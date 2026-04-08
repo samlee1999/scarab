@@ -6,10 +6,15 @@
 
 // ==========================================================
 // HBT (Hard Branch Table) 관련 상수(매크로) 정의
+// Per TEA paper Section IV-B:
+// - 3-bit saturating counter (max value 7)
+// - H2P if counter > 1 (i.e., >= 2)
+// - Decrement all counters by 1 every 50K instructions
 // ==========================================================
 #define HBT_SIZE 1024         // HBT 테이블의 전체 크기
-#define HBT_CTR_BITS 5        // HBT 카운터의 비트 수
-#define HBT_CTR_MAX ((1 << HBT_CTR_BITS) - 1) // HBT 카운터의 최댓값 (31)
+#define HBT_CTR_BITS 3        // HBT 카운터의 비트 수 (논문: 3-bit)
+#define HBT_CTR_MAX ((1 << HBT_CTR_BITS) - 1) // HBT 카운터의 최댓값 (7)
+#define HBT_H2P_THRESHOLD 1   // counter > 1이면 H2P (논문 기준)
 
 // ==========================================================
 // HBT 자료구조 정의

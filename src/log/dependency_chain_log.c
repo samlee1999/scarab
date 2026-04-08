@@ -109,14 +109,17 @@ void log_dependency_chain_block(uns proc_id, Dependency_Chain_Cache_Entry* entry
 
     // --- [ New code to print the bitmask ] ---
     char mask_str[65]; // 64 bits + null terminator
-    // Iterate from 0 to total_ops_in_block to build the binary string
-    for(int i = 0; i < entry->total_ops_in_block; ++i) {
+    // Limit to 64 bits (dependency_mask is 64-bit)
+    int mask_len = entry->total_ops_in_block > 64 ? 64 : entry->total_ops_in_block;
+    // Iterate from 0 to mask_len to build the binary string
+    for(int i = 0; i < mask_len; ++i) {
         // Check if the i-th bit is set in the mask
         mask_str[i] = (entry->dependency_mask >> i) & 1 ? '1' : '0';
     }
-    mask_str[entry->total_ops_in_block] = '\0'; // Add null terminator
-    fprintf(block_cache_log_file, "Block Length: %-3u Dependency Mask: %s\n", 
-            entry->total_ops_in_block, mask_str);
+    mask_str[mask_len] = '\0'; // Add null terminator
+    fprintf(block_cache_log_file, "Block Length: %-3u Dependency Mask: %s%s\n",
+            entry->total_ops_in_block, mask_str,
+            entry->total_ops_in_block > 64 ? " [TRUNCATED: block exceeds 64 ops]" : "");
     // ---------------------------------------------
     
     fprintf(block_cache_log_file, "------------------------------------------------------------------\n");
@@ -153,17 +156,20 @@ void log_full_cache_state(uns proc_id, Counter cycle_count) {
         if (entry->is_valid) {
             // --- [ Modified Part: Added Mask Info ] ---
             char mask_str[65];
-            for(int k = 0; k < entry->total_ops_in_block; ++k) {
+            // Limit to 64 bits (dependency_mask is 64-bit)
+            int mask_len = entry->total_ops_in_block > 64 ? 64 : entry->total_ops_in_block;
+            for(int k = 0; k < mask_len; ++k) {
                 mask_str[k] = (entry->dependency_mask >> k) & 1 ? '1' : '0';
             }
-            mask_str[entry->total_ops_in_block] = '\0';
+            mask_str[mask_len] = '\0';
 
-            fprintf(dependency_chain_log_file, "[Index %-4d] PC: 0x%08llx | OpNum: %-10llu | BlockLen: %-2u | Mask: %s\n",
+            fprintf(dependency_chain_log_file, "[Index %-4d] PC: 0x%08llx | OpNum: %-10llu | BlockLen: %-2u | Mask: %s%s\n",
                     i,
                     entry->h2p_branch_pc,
                     entry->h2p_branch_op_num,
                     entry->total_ops_in_block,
-                    mask_str);
+                    mask_str,
+                    entry->total_ops_in_block > 64 ? " [TRUNCATED]" : "");
             // ---------------------------------------------
 
             fprintf(dependency_chain_log_file, "             ChainLen: %u\n", entry->chain_length);

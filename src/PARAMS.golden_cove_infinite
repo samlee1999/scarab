@@ -96,13 +96,13 @@
 
 # register renaming table
 --reg_renaming_scheme               1
---reg_table_integer_physical_size   280
---reg_table_vector_physical_size    332
+--reg_table_integer_physical_size   2048
+--reg_table_vector_physical_size    2048
 
 ### Issue Stage
 
 # Max number of instructions to be renamed, and issued per cycle.
---issue_width                   6
+--issue_width                   8
 
 --rs_fill_width                 0
 # rs_sizes ~205 in total, and they are split into three different reservation stations (RS1, RS2, RS3) where each has 97, 70, 38 entries respectively
@@ -116,9 +116,8 @@
 # RS2 connected to port 2,3,9
 # RS3 connected to port 6,7 (port 4,9 removed, entries reduced to 19 from 38)
 # --rs_sizes                      97 70 19  # original (186 total)
-### RS total 352 (paper spec), proportional from original 97:70:19 → 184:132:36
-### With TEA_RS_RESERVATION=192, proportional alloc: TEA≈191, Main≈161 per RS
---rs_sizes                      184 132 36
+### Infinite resource: RS 4096 total (Main ~3904 after TEA 192 reservation)
+--rs_sizes                      2048 1280 768
 --rs_connections                b0100110011 b1000001100 b0011000000
 --fu_types                      b00100100111111100111001001111110010010011111110011100100111111 b10010000110111100011111001110111001000011011110001111100111011 b00000001000000001000000010000010000000100000000100000001000001 b00000001000000001000000010000010000000100000000100000001000001 b00000000110111100011011001110110000000011011110001101100111011 b01001000000000000111001001111110100100000000000011100100111111 b00000010000000010000000100000010000001000000001000000010000001 b00000010000000010000000100000010000001000000001000000010000001 b00000000000000000011001001110110000000000000000001100100111011 b00000001000000001000000010000010000000100000000100000001000001
 
@@ -136,8 +135,10 @@
 ### Reorder/Retire Stage
 
 # Max number of instructions to be retired per cycle.
---node_ret_width                8
---node_table_size               512
+--node_ret_width                16
+--node_table_size               2048
+--load_queue_entry_num          512
+--store_queue_entry_num         512
 
 # Do not keep stores in RSVs on cache misses; TODO: confirm what this knob does
 --stores_do_not_block_window    1
@@ -251,7 +252,7 @@
 --debug_inst_start              0
 --debug_inst_stop              -1
 --debug_cycle_start            1
---debug_cycle_stop             500000
+--debug_cycle_stop             10000
 #--debug_model                      1  # debug Every pipleline (targeting at retiring)
 #--debug_map                         1
 #--debug_node_stage              1       # showing what CPU is doing now / show ROB and RS at before recovery and after recovery

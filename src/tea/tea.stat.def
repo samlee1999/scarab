@@ -1,0 +1,80 @@
+/* Copyright 2020 HPS/SAFARI Research Groups
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+/* -*- Mode: c -*- */
+
+/* TEA Thread Statistics */
+
+/* TEA activation statistics */
+DEF_STAT(TEA_TRIGGER_ATTEMPTS, COUNT, NO_RATIO)    /* trigger_tea_thread() called */
+DEF_STAT(TEA_TRIGGER_SKIP_ACTIVE, COUNT, NO_RATIO)   /* skipped: TEA already active */
+DEF_STAT(TEA_TRIGGER_SKIP_NO_CHAIN, COUNT, NO_RATIO) /* skipped: no dependency chain */
+DEF_STAT(TEA_TRIGGERS, COUNT, NO_RATIO)
+
+/* TEA Fetch Stage diagnostics */
+DEF_STAT(TEA_FETCH_CALLED, COUNT, NO_RATIO)        /* update_tea_fetch_stage() entered */
+DEF_STAT(TEA_FETCH_SKIP_STATE, COUNT, NO_RATIO)    /* skipped: state != FETCHING */
+DEF_STAT(TEA_FETCH_CHAIN_MISS, COUNT, NO_RATIO)    /* Block Cache miss in fetch stage */
+DEF_STAT(TEA_FETCH_CHAIN_HIT, COUNT, NO_RATIO)     /* Block Cache hit in fetch stage */
+DEF_STAT(TEA_FETCH_LOOP_ENTERED, COUNT, NO_RATIO)  /* fetch loop actually executed */
+DEF_STAT(TEA_EARLY_FLUSHES, COUNT, NO_RATIO)
+DEF_STAT(TEA_OPS_FETCHED, COUNT, NO_RATIO)
+DEF_STAT(TEA_OPS_EXECUTED, COUNT, NO_RATIO)
+DEF_STAT(TEA_OPS_FLUSHED, COUNT, NO_RATIO)
+
+/* Phase 2.5: Node Table integration */
+DEF_STAT(TEA_OPS_DISPATCHED, COUNT, NO_RATIO)
+DEF_STAT(TEA_OPS_RETIRED, COUNT, NO_RATIO)
+
+/* Phase 3: TEA priority scheduling */
+DEF_STAT(TEA_OPS_ISSUED, COUNT, NO_RATIO)
+
+/* Phase 4: Resource partitioning */
+DEF_STAT(TEA_PREGS_ALLOCATED, COUNT, NO_RATIO)
+DEF_STAT(TEA_PREG_STALLS, COUNT, NO_RATIO)
+DEF_STAT(TEA_RS_STALLS, COUNT, NO_RATIO)
+
+/* Phase 4.1: Bug fixes */
+DEF_STAT(TEA_RENAME_STALL_PREG, COUNT, NO_RATIO)
+DEF_STAT(TEA_STORES_BUFFERED, COUNT, NO_RATIO)
+DEF_STAT(TEA_STORE_FORWARDS, COUNT, NO_RATIO)
+DEF_STAT(TEA_STORE_BUFFER_FULL, COUNT, NO_RATIO)
+
+/* Phase 5: TEA H2P Resolution */
+DEF_STAT(TEA_H2P_CORRECT, COUNT, NO_RATIO)
+
+/* Debug: Early Flush Case breakdown */
+DEF_STAT(TEA_EARLY_FLUSH_CASE1_DECODE, COUNT, NO_RATIO)  /* Case 1: no SRT checkpoint -> recover_at_decode */
+DEF_STAT(TEA_EARLY_FLUSH_CASE1_NO_CHKPT, COUNT, NO_RATIO) /* Case 1: no SRT checkpoint, passed decode */
+DEF_STAT(TEA_EARLY_FLUSH_CASE2_WITH_CHKPT, COUNT, NO_RATIO) /* Case 2: SRT checkpoint present */
+
+/* Debug: Preg recovery efficiency */
+DEF_STAT(TEA_RECOVER_PREGS_FREED, COUNT, NO_RATIO)   /* total Pregs freed by reg_file_recover() */
+DEF_STAT(TEA_RECOVER_CALLS_SKIPPED, COUNT, NO_RATIO) /* recover() calls that returned early (no work) */
+DEF_STAT(TEA_RECOVER_CALLS_ACTIVE, COUNT, NO_RATIO)  /* recover() calls that did actual SRT rollback */
+
+/* Debug: TEA op Node residence time */
+DEF_STAT(TEA_OP_NODE_CYCLES_0,   COUNT, NO_RATIO)  /* 0-9 cycles in Node */
+DEF_STAT(TEA_OP_NODE_CYCLES_10,  COUNT, NO_RATIO)  /* 10-49 cycles */
+DEF_STAT(TEA_OP_NODE_CYCLES_50,  COUNT, NO_RATIO)  /* 50-99 cycles */
+DEF_STAT(TEA_OP_NODE_CYCLES_100, COUNT, NO_RATIO)  /* 100-499 cycles */
+DEF_STAT(TEA_OP_NODE_CYCLES_500, COUNT, NO_RATIO)  /* 500+ cycles */
+DEF_STAT(TEA_OP_NODE_CYCLES_TOTAL, COUNT, NO_RATIO) /* sum of all TEA op residence cycles */

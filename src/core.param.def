@@ -374,3 +374,11 @@ DEF_PARAM(conf_perfect_mispred_conf, CONF_PERFECT_MISPRED_CONF, Flag, Flag, FALS
 DEF_PARAM(conf_log_dfe_to_rec, CONF_LOG_DFE_TO_REC, Flag, Flag, FALSE, )
 DEF_PARAM(conf_log_phase_cycles, CONF_LOG_PHASE_CYCLES, Flag, Flag, FALSE, )
 DEF_PARAM(fill_buffer_size, FILL_BUFFER_SIZE, uns, uns, 256, )
+
+// TEA Thread Parameters
+DEF_PARAM(tea_enable, TEA_ENABLE, Flag, Flag, FALSE, )
+DEF_PARAM(tea_fetch_width, TEA_FETCH_WIDTH, uns, uns, 2, )
+DEF_PARAM(tea_rs_reservation, TEA_RS_RESERVATION, uns, uns, 192, )
+DEF_PARAM(tea_preg_reservation, TEA_PREG_RESERVATION, uns, uns, 192, )
+DEF_PARAM(tea_store_buffer_size, TEA_STORE_BUFFER_SIZE, uns, uns, 64, )
+DEF_PARAM(backward_walk_cycles, BACKWARD_WALK_CYCLES, uns, uns, 500, )

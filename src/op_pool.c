@@ -47,10 +47,18 @@ allocates them once and then hands out pointers every time 'alloc_op' is called.
 #include "bp/bp.h"
 #include "frontend/frontend_intf.h"
 #include "frontend/pin_trace_fe.h"
+#include "cmp_model.h"
+#include "table_info.h"
 
 #include "map.h"
 #include "model.h"
 #include "sim.h"
+#include "decoupled_frontend.h"
+#include "uop_cache.h"
+#include "idq_stage.h"
+#include "uop_queue_stage.h"
+#include "tea/tea_fetch_stage.h"
+#include "tea/tea_rename.h"
 
 /**************************************************************************************/
 /* Macros */
@@ -69,6 +77,10 @@ uns op_pool_active_ops = 0;
 static Op* op_pool_free_head;
 
 Op invalid_op;
+
+/* Debug counters */
+static Counter total_alloc_count = 0;
+static Counter total_free_count = 0;
 
 /**************************************************************************************/
 /* Prototypes */
@@ -121,6 +133,7 @@ Op* alloc_op(uns proc_id) {
   op_pool_setup_op(proc_id, new_op);
 
   op_pool_active_ops++;
+  total_alloc_count++;
   DEBUG(0, "Allocating op  id:%u  op_pool_active_ops:%u  op_pool_entries:%d\n", new_op->op_pool_id, op_pool_active_ops,
         op_pool_entries);
   op_pool_free_head = new_op->op_pool_next;
@@ -141,6 +154,7 @@ void free_op(Op* op) {
 
   op->op_pool_valid = FALSE;
   op_pool_active_ops--;
+  total_free_count++;
   ASSERTM(0, op_pool_active_ops >= 0, "op_pool_active_ops:%u\n", op_pool_active_ops);
   DEBUG(0, "Freed op  id:%u  op_pool_active_ops: %u\n", op->op_pool_id, op_pool_active_ops);
 
@@ -286,5 +300,133 @@ static inline void expand_op_pool() {
   op_pool_init_op(&new_pool[ii]);
 
   op_pool_free_head = &new_pool[0];
+
+  /* DEBUG: Dump op pool state before assertion */
+  if (op_pool_entries > OP_POOL_ENTRIES_INC * 128) {
+    fprintf(stderr, "\n=== OP POOL EXHAUSTION DEBUG ===\n");
+    fprintf(stderr, "op_pool_entries: %d, limit: %d\n", op_pool_entries, OP_POOL_ENTRIES_INC * 128);
+    fprintf(stderr, "op_pool_active_ops: %d\n", op_pool_active_ops);
+    fprintf(stderr, "total_alloc_count: %llu, total_free_count: %llu\n", total_alloc_count, total_free_count);
+    fprintf(stderr, "alloc - free = %llu (should match active_ops)\n", total_alloc_count - total_free_count);
+    fprintf(stderr, "FTQ num_ops: %lu, num_fts: %lu\n", decoupled_fe_ftq_num_ops(), decoupled_fe_ftq_num_fts());
+
+    /* Dump Node Table state */
+    Node_Stage* ns = &cmp_model.node_stage[0];
+    fprintf(stderr, "Node Table count: %d\n", ns->node_count);
+
+    int tea_count = 0, main_count = 0;
+    int tea_not_done = 0, tea_mem_not_done = 0;
+    Op* op = ns->node_head;
+    int dump_count = 0;
+
+    while (op && dump_count < 50) {
+      if (op->thread_id == 1) {
+        tea_count++;
+        if (op->done_cycle == MAX_CTR) {
+          tea_not_done++;
+          if (op->table_info->mem_type != NOT_MEM) {
+            tea_mem_not_done++;
+          }
+          /* Print first 10 unfinished TEA ops */
+          if (tea_not_done <= 10) {
+            fprintf(stderr, "  TEA op: op_num=%llu state=%d mem_type=%d done_cycle=%llu\n",
+                    op->op_num, op->state, op->table_info->mem_type, op->done_cycle);
+          }
+        }
+      } else {
+        main_count++;
+      }
+      op = op->next_node;
+      dump_count++;
+    }
+
+    fprintf(stderr, "Node Table Summary: TEA=%d (not_done=%d, mem_not_done=%d), Main=%d\n",
+            tea_count, tea_not_done, tea_mem_not_done, main_count);
+
+    /* Check exec_stage */
+    Exec_Stage* es = &cmp_model.exec_stage[0];
+    int exec_tea = 0, exec_main = 0;
+    for (uns i = 0; i < es->sd.max_op_count; i++) {
+      if (es->sd.ops[i]) {
+        if (es->sd.ops[i]->thread_id == 1) exec_tea++;
+        else exec_main++;
+      }
+    }
+    fprintf(stderr, "Exec Stage: TEA=%d, Main=%d (op_count=%d)\n", exec_tea, exec_main, es->sd.op_count);
+
+    /* Check dcache_stage */
+    Dcache_Stage* dc = &cmp_model.dcache_stage[0];
+    int dc_tea = 0, dc_main = 0;
+    for (uns i = 0; i < dc->sd.max_op_count; i++) {
+      if (dc->sd.ops[i]) {
+        if (dc->sd.ops[i]->thread_id == 1) dc_tea++;
+        else dc_main++;
+      }
+    }
+    fprintf(stderr, "Dcache Stage: TEA=%d, Main=%d (op_count=%d)\n", dc_tea, dc_main, dc->sd.op_count);
+
+    /* Check map_stage - uses sds array */
+    Map_Stage* ms = &cmp_model.map_stage[0];
+    int map_total = 0;
+    for (int stage = 0; stage < MAP_CYCLES; stage++) {
+      map_total += ms->sds[stage].op_count;
+    }
+    fprintf(stderr, "Map Stage: total ops=%d\n", map_total);
+
+    /* Check decode_stage - uses sds array */
+    Decode_Stage* ds = &cmp_model.decode_stage[0];
+    int decode_total = 0;
+    for (int stage = 0; stage < DECODE_CYCLES; stage++) {
+      decode_total += ds->sds[stage].op_count;
+    }
+    fprintf(stderr, "Decode Stage: total ops=%d\n", decode_total);
+
+    /* Check icache_stage */
+    Icache_Stage* ic = &cmp_model.icache_stage[0];
+    fprintf(stderr, "Icache Stage: sd.op_count=%d\n", ic->sd.op_count);
+
+    /* Check uop_cache stage */
+    if (uc) {
+      fprintf(stderr, "UOP Cache Stage: sd.op_count=%d\n", uc->sd.op_count);
+    }
+
+    /* Check IDQ stage */
+    int idq_count = 0;
+    Stage_Data* idq_sd = idq_stage_get_stage_data();
+    if (idq_sd) {
+      idq_count = idq_sd->op_count;
+      fprintf(stderr, "IDQ Stage: sd.op_count=%d\n", idq_count);
+    }
+
+    /* Check UOP Queue stage */
+    int uop_queue_len = get_uop_queue_stage_length();
+    fprintf(stderr, "UOP Queue Stage: length=%d\n", uop_queue_len);
+
+    /* Check TEA stages */
+    int tea_fetch_count = 0, tea_rename_count = 0;
+    extern Tea_Fetch_Stage** tea_fetch_stages;
+    extern Tea_Rename_Stage** tea_rename_stages;
+    if (tea_fetch_stages && tea_fetch_stages[0]) {
+      tea_fetch_count = tea_fetch_stages[0]->sd.op_count;
+      fprintf(stderr, "TEA Fetch Stage: op_count=%d\n", tea_fetch_count);
+    }
+    if (tea_rename_stages && tea_rename_stages[0]) {
+      tea_rename_count = tea_rename_stages[0]->sd.op_count;
+      fprintf(stderr, "TEA Rename Stage: op_count=%d\n", tea_rename_count);
+    }
+
+    /* Summary calculation */
+    int total_tracked = ns->node_count + es->sd.op_count + dc->sd.op_count +
+                        map_total + decode_total + ic->sd.op_count +
+                        (uc ? uc->sd.op_count : 0) + idq_count + uop_queue_len +
+                        tea_fetch_count + tea_rename_count;
+    fprintf(stderr, "\nSUMMARY:\n");
+    fprintf(stderr, "  Active ops: %d\n", op_pool_active_ops);
+    fprintf(stderr, "  Tracked in pipeline: %d\n", total_tracked);
+    fprintf(stderr, "  FTQ ops: %lu\n", decoupled_fe_ftq_num_ops());
+    fprintf(stderr, "  UNACCOUNTED ops: %d\n", op_pool_active_ops - total_tracked);
+    fprintf(stderr, "=================================\n\n");
+  }
+
   ASSERT(0, op_pool_entries <= OP_POOL_ENTRIES_INC * 128);
 }

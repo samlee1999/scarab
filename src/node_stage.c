@@ -67,6 +67,9 @@
 
 #include "log/fill_buffer_log.h"
 #include "dependency_chain_cache.h"
+#include "tea/tea_thread.h"
+#include "tea/tea_rename.h"
+#include "cmp_model.h"
 
 /* Macros */
 
@@ -193,6 +196,15 @@ void flush_ready_list() {
   Op** last;
   for (op = node->rdy_head, last = &node->rdy_head; op; op = op->next_rdy) {
     ASSERT(node->proc_id, node->proc_id == op->proc_id);
+    /* Skip TEA ops — their ready list cleanup is handled by
+     * flush_tea_ops_from_node_stage() step 1, which also synchronizes
+     * RS counters for OS_SCHEDULED/OS_MISS TEA ops. FLUSH_OP() always
+     * matches TEA ops (op_num >= 0x8000000000000000 > any recovery_op_num),
+     * so without this skip, step 1 would find them already removed. */
+    if (op->thread_id == 1) {
+      last = &op->next_rdy;
+      continue;
+    }
     if (FLUSH_OP(op)) {
       ASSERT(node->proc_id, op->op_num > bp_recovery_info->recovery_op_num);
       *last = op->next_rdy;
@@ -237,6 +249,16 @@ void flush_window() {
   for (op = node->node_head, last = &node->node_head; op; op = *last) {
     ASSERT(node->proc_id, node->proc_id == op->proc_id);
 
+    /* Skip TEA ops - they are handled by flush_tea_ops_from_node_stage().
+     * TEA ops use a different op_num counter (tea_op_counter), so FLUSH_OP()
+     * comparison with recovery_op_num is not meaningful for them.
+     * Also, TEA ops are not counted in node_count via macro_fused handling. */
+    if (op->thread_id == 1) {
+      last = &op->next_node;
+      node->node_tail = op;
+      continue;
+    }
+
     if (FLUSH_OP(op)) {
       DEBUG(node->proc_id, "Node flushing  op:%s\n", unsstr64(op->op_num));
       if (!op->macro_fused)
@@ -247,6 +269,23 @@ void flush_window() {
       if (op->state == OS_IN_RS || op->state == OS_READY || op->state == OS_WAIT_FWD) {
         ASSERT(op->proc_id, node->rs[op->rs_id].rs_op_count > 0);
         node->rs[op->rs_id].rs_op_count--;
+
+        /* Phase 4: Update per-thread counter */
+        if (op->thread_id == 1) {
+          if (node->rs[op->rs_id].tea_op_count > 0)
+            node->rs[op->rs_id].tea_op_count--;
+        } else {
+          if (node->rs[op->rs_id].main_op_count > 0)
+            node->rs[op->rs_id].main_op_count--;
+        }
+
+        /* DEBUG: detect divergence */
+        ASSERTM(op->proc_id,
+                node->rs[op->rs_id].rs_op_count >= node->rs[op->rs_id].main_op_count + node->rs[op->rs_id].tea_op_count,
+                "flush_window() divergence: rs=%d rs_op=%d main=%d tea=%d op_num=%s tid=%d C=%llu\n",
+                (int)op->rs_id, node->rs[op->rs_id].rs_op_count,
+                node->rs[op->rs_id].main_op_count, node->rs[op->rs_id].tea_op_count,
+                unsstr64(op->op_num), op->thread_id, cycle_count);
       }
       free_op(op);
     } else {
@@ -373,6 +412,119 @@ void debug_print_ready_list() {
 }
 
 /**************************************************************************************/
+/* tea_dispatch_to_rs: Dispatch TEA ops to Node Table for RS dispatch
+ *   TEA ops use Node Table for issue/wakeup but skip retirement (commit bypass) */
+
+static void tea_dispatch_to_rs(Stage_Data* tea_sd) {
+  if (!tea_sd || tea_sd->op_count == 0) {
+    return;
+  }
+
+  for (uns i = 0; i < tea_sd->max_op_count; i++) {
+    Op* op = tea_sd->ops[i];
+    if (!op) {
+      continue;
+    }
+
+    ASSERT(node->proc_id, op->thread_id == 1);  /* Verify TEA op */
+    ASSERT(node->proc_id, op->proc_id == node->proc_id);
+
+    /* Check Node Table capacity */
+    if (is_node_table_full()) {
+      DEBUG(node->proc_id, "Node Table full, TEA op stalled op_num:%s\n",
+            unsstr64(op->op_num));
+      break;
+    }
+
+    /* Remove from TEA rename stage */
+    tea_sd->ops[i] = NULL;
+    tea_sd->op_count--;
+
+    /* Set op fields (same as node_fill_rob) */
+    op->node_id = node->node_count;
+    op->issue_cycle = cycle_count;
+
+    /* Add to Node Table linked list */
+    ASSERT(node->proc_id, !op->in_node_list);
+    if (node->node_tail) {
+      node->node_tail->next_node = op;
+    }
+    if (node->node_head == NULL) {
+      node->node_head = op;
+    }
+    op->next_node = NULL;
+    op->in_node_list = TRUE;
+    node->node_tail = op;
+
+    /* Independent dispatch: do NOT set next_op_into_rs for TEA ops.
+     * next_op_into_rs is Main-only, preventing TEA/Main ordering issues
+     * (ASSERT 1&2 root cause fix). */
+
+    /* TEA ops are NOT counted in node_count.
+     * They are managed separately and flushed by flush_tea_ops_from_node_stage().
+     * This avoids count mismatch in flush_window() ASSERT. */
+
+    /* Direct RS dispatch: bypass node_issue_queue_dispatch() entirely */
+    int64 rs_id = node_dispatch_find_emptiest_rs(op);
+    if (rs_id != NODE_ISSUE_QUEUE_RS_SLOT_INVALID) {
+      Reservation_Station* rs = &node->rs[rs_id];
+      op->state = OS_IN_RS;
+      op->rs_id = (Counter)rs_id;
+      rs->rs_op_count++;
+      rs->tea_op_count++;
+
+      /* Register in ready list if all sources are ready */
+      if (op->srcs_not_rdy_vector == 0) {
+        op->state = (cycle_count + 1 >= op->rdy_cycle ? OS_READY : OS_WAIT_FWD);
+        op->next_rdy = node->rdy_head;
+        node->rdy_head = op;
+        op->in_rdy_list = TRUE;
+      }
+    } else {
+      /* TEA RS partition full — stay in Node Table as OS_IN_ROB.
+       * tea_dispatch_retry() will retry after clear() frees RS slots. */
+      op->state = OS_IN_ROB;
+      STAT_EVENT(node->proc_id, TEA_RS_STALLS);
+    }
+
+    DEBUG(node->proc_id, "TEA op to Node Table  op_num:%s rs_id:%lld state:%d\n",
+          unsstr64(op->op_num), (long long)rs_id, op->state);
+
+    STAT_EVENT(node->proc_id, TEA_OPS_DISPATCHED);
+  }
+}
+
+/**************************************************************************************/
+/* tea_dispatch_retry: Retry RS dispatch for TEA ops that failed due to RS full.
+ *   Called after node_issue_queue_update() so clear() has freed RS slots. */
+
+static void tea_dispatch_retry() {
+  for (Op* op = node->node_head; op; op = op->next_node) {
+    if (op->thread_id != 1 || op->state != OS_IN_ROB)
+      continue;
+
+    int64 rs_id = node_dispatch_find_emptiest_rs(op);
+    if (rs_id == NODE_ISSUE_QUEUE_RS_SLOT_INVALID) {
+      STAT_EVENT(node->proc_id, TEA_RS_STALLS);
+      continue;  /* Still full, try next TEA op */
+    }
+
+    Reservation_Station* rs = &node->rs[rs_id];
+    op->state = OS_IN_RS;
+    op->rs_id = (Counter)rs_id;
+    rs->rs_op_count++;
+    rs->tea_op_count++;
+
+    if (op->srcs_not_rdy_vector == 0) {
+      op->state = (cycle_count + 1 >= op->rdy_cycle ? OS_READY : OS_WAIT_FWD);
+      op->next_rdy = node->rdy_head;
+      node->rdy_head = op;
+      op->in_rdy_list = TRUE;
+    }
+  }
+}
+
+/**************************************************************************************/
 /* node_cycle: */
 
 void update_node_stage(Stage_Data* src_sd) {
@@ -387,6 +539,11 @@ void update_node_stage(Stage_Data* src_sd) {
   STAT_EVENT(node->proc_id, NODE_CYCLE);
   STAT_EVENT(node->proc_id, POWER_CYCLE);
 
+  /* TEA ops: Dispatch to RS first (bypassing ROB) */
+  if (TEA_ENABLE && tea_is_active(node->proc_id)) {
+    tea_dispatch_to_rs(&tea_rename_stages[node->proc_id]->sd);
+  }
+
   /* insert ops coming from the previous stage*/
   node_fill_rob(src_sd);
 
@@ -394,6 +551,12 @@ void update_node_stage(Stage_Data* src_sd) {
   node_precommit_update();
 
   node_issue_queue_update();
+
+  /* TEA RS dispatch retry: previous cycle's RS-full TEA ops get another chance
+   * after clear() has freed RS slots. */
+  if (TEA_ENABLE && tea_is_active(node->proc_id)) {
+    tea_dispatch_retry();
+  }
 
   /* get rid of the ops that are finished */
   node_retire();
@@ -490,24 +653,126 @@ void node_fill_rob(Stage_Data* src_sd) {
 }
 
 /**************************************************************************************/
+/* node_retire_tea_ops: Remove completed TEA ops from Node Table
+ *   TEA ops skip normal retirement - just remove from list and free */
+
+static void node_retire_tea_ops() {
+  Op** last = &node->node_head;
+  Op* op = node->node_head;
+  Op* new_tail = NULL;
+
+  while (op) {
+    /* Retirement gate differs by op type:
+     *   mem ops  — OS_DONE only (set by tea_op_completed() called from dcache_stage).
+     *              OP_DONE would fire based on exec address-calc latency, one cycle
+     *              BEFORE dcache runs and calls tea_op_completed(), causing free_op()
+     *              to race ahead and produce a dangling pointer in exec->sd / a ghost
+     *              count in tea->tea_op_count.
+     *   non-mem  — OP_DONE || OS_DONE (exec sets done_cycle AND calls tea_op_completed
+     *              in the same cycle before node runs, so either gate is safe). */
+    Flag tea_done;
+    if (op->thread_id == 1) {
+      if (op->table_info->mem_type != NOT_MEM) {
+        tea_done = (op->state == OS_DONE);   /* mem: dcache must have called tea_op_completed */
+      } else {
+        tea_done = (OP_DONE(op) || op->state == OS_DONE);  /* non-mem: exec latency sufficient */
+      }
+    } else {
+      tea_done = FALSE;
+    }
+    if (tea_done) {
+      /* TEA op done: Remove from Node Table linked list.
+       * Note: TEA ops are NOT counted in node_count (not incremented on dispatch,
+       * not decremented on retire).
+       * recovery_op is always a Main H2P op (never a TEA op), so no guard needed. */
+
+      *last = op->next_node;
+      op->in_node_list = FALSE;
+
+      /* Decrement tea_op_count: this is the authoritative decrement point.
+       * tea_op_completed() (called from exec/dcache) only sets OS_DONE and
+       * records EXECUTED — it no longer decrements the counter.  Moving the
+       * decrement here ensures that 0-latency non-mem ops (done_cycle ==
+       * issue_cycle, so OP_DONE fires in the same cycle as issuance while
+       * exec_stage_clear_fu cannot run until avail_cycle = issue+1) are
+       * counted correctly.  Every op that exits via this path decrements
+       * exactly once; ops that exit via flush have tea_op_count reset to 0
+       * by terminate_tea_thread(). */
+      if (tea_threads && tea_threads[node->proc_id]) {
+        Tea_Thread* tea_state = tea_threads[node->proc_id];
+        if (tea_state->tea_op_count > 0)
+          tea_state->tea_op_count--;
+      }
+
+      DEBUG(node->proc_id, "TEA op retired op_num:%s\n", unsstr64(op->op_num));
+      STAT_EVENT(node->proc_id, TEA_OPS_RETIRED);
+
+      /* Record Node residence time: issue_cycle is set on dispatch */
+      if (op->issue_cycle > 0) {
+        Counter residence = cycle_count - op->issue_cycle;
+        INC_STAT_EVENT(node->proc_id, TEA_OP_NODE_CYCLES_TOTAL, residence);
+        if      (residence < 10)  STAT_EVENT(node->proc_id, TEA_OP_NODE_CYCLES_0);
+        else if (residence < 50)  STAT_EVENT(node->proc_id, TEA_OP_NODE_CYCLES_10);
+        else if (residence < 100) STAT_EVENT(node->proc_id, TEA_OP_NODE_CYCLES_50);
+        else if (residence < 500) STAT_EVENT(node->proc_id, TEA_OP_NODE_CYCLES_100);
+        else                      STAT_EVENT(node->proc_id, TEA_OP_NODE_CYCLES_500);
+      }
+
+      Op* next = op->next_node;
+      free_op(op);
+      op = next;
+      continue;
+    }
+    /* Keep this op in list */
+    new_tail = op;
+    last = &op->next_node;
+    op = op->next_node;
+  }
+
+  /* Update node_tail */
+  node->node_tail = new_tail;
+}
+
+/**************************************************************************************/
 /* node_retire:*/
 
 void node_retire() {
   uns ret_count = 0;
-  Op* op = NULL;
 
   // If node table is empty, then there is nothing to retire
   if (is_node_table_empty())
     return;
 
-  // Iterate through the first NODE_RET_WIDTH number of ops and try to retire them
-  for (op = node->node_head; op && ret_count < NODE_RET_WIDTH; op = op->next_node) {
+  /* First pass: Remove completed TEA ops (they skip normal retirement) */
+  if (TEA_ENABLE) {
+    node_retire_tea_ops();
+  }
+
+  /* Second pass: Retire Main thread ops while maintaining linked list integrity.
+   * TEA ops stay in the list (they don't participate in in-order retirement).
+   * We use pointer-to-pointer to properly remove retired ops from linked list.
+   */
+  Op** prev_next_ptr = &node->node_head;
+  Op* op = node->node_head;
+  Op* last_remaining = NULL;
+
+  while (op && ret_count < NODE_RET_WIDTH) {
+    Op* next = op->next_node;
+
+    /* Skip TEA ops - they stay in linked list, don't participate in retirement */
+    if (op->thread_id == 1) {
+      last_remaining = op;
+      prev_next_ptr = &op->next_node;
+      op = next;
+      continue;
+    }
     ASSERT(node->proc_id, node->proc_id == op->proc_id);
 
     // check to see if the head of the node table is ready to retire
     if (op_not_ready_for_retire(op)) {
       // op is not ready to retire
       collect_not_ready_to_retire_stats(op);
+      last_remaining = op;  /* This op stays in list */
       break;
     }
 
@@ -613,16 +878,23 @@ void node_retire() {
       lsq_commit(op);
     }
 
-    if (model->op_retired_hook)
-      model->op_retired_hook(op);
-    else
-      free_op(op);
-
     // the fused op does not occupy the ROB entry
     if (!op->macro_fused)
       node->node_count--;
 
     ASSERT(node->proc_id, node->node_count >= 0);
+
+    /* Remove retired op from linked list */
+    *prev_next_ptr = next;
+    op->in_node_list = FALSE;
+    /* Note: prev_next_ptr is NOT updated since this op is removed */
+
+    if (model->op_retired_hook)
+      model->op_retired_hook(op);
+    else
+      free_op(op);
+
+    op = next;
   }
 
   if (ret_count > 0) {
@@ -633,7 +905,7 @@ void node_retire() {
         log_fill_buffer_entry(node->proc_id, fb, cycle_count);
         // --- Snapshot 저장 ---
         engine->state = BW_WALKING;
-        engine->walk_cycles_remaining = 500;
+        engine->walk_cycles_remaining = BACKWARD_WALK_CYCLES;
 
         engine->snapshot_op_count = fb->count;
         int current_idx = fb->head;
@@ -647,13 +919,20 @@ void node_retire() {
   STAT_EVENT(node->proc_id, ROW_SIZE_0 + ret_count);
   log_retired_ops(cycle_count, ret_count);
 
-  // op should be pointing to first op that was not retired because of the above for-loop
-  node->node_head = op;
-  if (node->node_head)
-    DEBUG(node->proc_id, "Op op_num:%s is now head of the node table\n", unsstr64(node->node_head->op_num));
-  if (op == NULL) {
+  /* node->node_head is already updated through *prev_next_ptr during the loop.
+   * Update node_tail based on remaining ops in the linked list.
+   */
+  if (node->node_head == NULL) {
     node->node_tail = NULL;
-    ASSERTM(node->proc_id, node->node_count == 0, "Node table must be empty if next node is null!\n");
+    ASSERTM(node->proc_id, node->node_count == 0, "Node table must be empty if head is null!\n");
+  } else {
+    /* Find the new tail by walking the list */
+    Op* tail = node->node_head;
+    while (tail->next_node) {
+      tail = tail->next_node;
+    }
+    node->node_tail = tail;
+    DEBUG(node->proc_id, "Op op_num:%s is now head of the node table\n", unsstr64(node->node_head->op_num));
   }
 }
 
@@ -688,13 +967,17 @@ void debug_print_retired_uop(Op* op) {
 }
 
 Flag op_not_ready_for_retire(Op* op) {
-  return !(op->state == OS_DONE || OP_DONE(op)) || op->off_path || op->recovery_scheduled || op->redirect_scheduled;
+  Flag not_done   = !(op->state == OS_DONE || OP_DONE(op));
+  Flag blocked    = op->off_path || op->recovery_scheduled || op->redirect_scheduled;
+  Flag result     = not_done || blocked;
+  return result;
 }
 
 Flag is_node_table_empty() {
   if (node->node_count == 0) {
     if (node->node_head != NULL) {
-      ASSERT(node->proc_id, node->node_head->macro_fused);
+      /* macro_fused ops and TEA ops (thread_id==1) are not counted in node_count */
+      ASSERT(node->proc_id, node->node_head->macro_fused || node->node_head->thread_id == 1);
       return FALSE;
     }
 
@@ -776,6 +1059,10 @@ void node_precommit_update(void) {
   // scan the node table to update the precommit pointer
   uns precommit_count = 0;
   for (; op != NULL && precommit_count < NODE_RET_WIDTH; op = op->next_node) {
+    /* Skip TEA ops - they don't participate in precommit/retirement */
+    if (op->thread_id == 1)
+      continue;
+
     // wait until the results usable for branches
     if (op->table_info->cf_type && op->exec_cycle > cycle_count)
       return;
@@ -832,4 +1119,137 @@ void node_fuse_op(Op* op) {
   }
 
   node->prev_op_fusable = FALSE;
+}
+
+/**************************************************************************************/
+/* flush_tea_ops_from_node_stage: CRITICAL - Remove all orphan TEA ops on termination */
+
+void flush_tea_ops_from_node_stage(uns proc_id) {
+  extern Cmp_Model cmp_model;
+  Node_Stage* node_local = &cmp_model.node_stage[proc_id];
+  Op* op;
+  Op** last;
+
+  /* 0a. Clear exec_stage->sd.ops[] FIRST - prevent use-after-free when ops are freed below */
+  Exec_Stage* exec_local = &cmp_model.exec_stage[proc_id];
+  for (uns ii = 0; ii < exec_local->sd.max_op_count; ii++) {
+    op = exec_local->sd.ops[ii];
+    if (op && op->thread_id == 1) {
+      exec_local->sd.ops[ii] = NULL;
+      exec_local->sd.op_count--;
+      /* Don't free here - will be freed from node table below */
+    }
+  }
+
+  /* 0b. Clear dcache_stage->sd.ops[] FIRST - prevent use-after-free when ops are freed below */
+  Dcache_Stage* dc_local = &cmp_model.dcache_stage[proc_id];
+  for (uns ii = 0; ii < dc_local->sd.max_op_count; ii++) {
+    op = dc_local->sd.ops[ii];
+    if (op && op->thread_id == 1) {
+      dc_local->sd.ops[ii] = NULL;
+      dc_local->sd.op_count--;
+      /* Don't free here - will be freed from node table below */
+    }
+  }
+
+  /* 1. Flush ready list — also decrement RS counter for OS_SCHEDULED/OS_MISS TEA ops.
+   *    If found in ready list → clear() has NOT yet processed them (same-cycle case).
+   *    In cross-cycle case, clear() already removed them → not found here → safe. */
+  for (op = node_local->rdy_head, last = &node_local->rdy_head; op;) {
+    if (op->thread_id == 1) {
+      /* Remove TEA op from ready list */
+      *last = op->next_rdy;
+      op->in_rdy_list = FALSE;
+
+      /* RS counter decrement for OS_SCHEDULED/OS_MISS:
+       * Normally clear() does this, but we just removed op from ready list
+       * so clear() will never see it. Must decrement here to prevent leak. */
+      if (op->state == OS_SCHEDULED || op->state == OS_MISS) {
+        if (node_local->rs[op->rs_id].rs_op_count > 0)
+          node_local->rs[op->rs_id].rs_op_count--;
+        if (node_local->rs[op->rs_id].tea_op_count > 0)
+          node_local->rs[op->rs_id].tea_op_count--;
+
+        /* DEBUG: detect divergence */
+        ASSERTM(0,
+                node_local->rs[op->rs_id].rs_op_count >= node_local->rs[op->rs_id].main_op_count + node_local->rs[op->rs_id].tea_op_count,
+                "flush_tea step1 divergence: rs=%d rs_op=%d main=%d tea=%d op_num=%s state=%d C=%llu\n",
+                (int)op->rs_id, node_local->rs[op->rs_id].rs_op_count,
+                node_local->rs[op->rs_id].main_op_count, node_local->rs[op->rs_id].tea_op_count,
+                unsstr64(op->op_num), op->state, cycle_count);
+      }
+
+      op = op->next_rdy;
+      /* Don't free here - will be freed from node table below */
+    } else {
+      last = &op->next_rdy;
+      op = op->next_rdy;
+    }
+  }
+
+  /* 2. Flush scheduling buffer */
+  for (uns ii = 0; ii < node_local->sd.max_op_count; ii++) {
+    op = node_local->sd.ops[ii];
+    if (op && op->thread_id == 1) {
+      node_local->sd.ops[ii] = NULL;
+      node_local->sd.op_count--;
+      /* Don't free here - will be freed from node table below */
+    }
+  }
+
+  /* 3. Flush next_op_into_rs — if it points to a TEA op, advance to
+   * the next non-TEA op so main ops can still dispatch. */
+  op = node_local->next_op_into_rs;
+  if (op && op->thread_id == 1) {
+    Op* next = op->next_node;
+    while (next && next->thread_id == 1)
+      next = next->next_node;
+    node_local->next_op_into_rs = next;  /* NULL if no main ops follow */
+    /* Don't free here - will be freed from node table below */
+  }
+
+  /* 4. Flush node table (window) - TEA ops bypass ROB but check for safety */
+  node_local->node_tail = NULL;
+  for (op = node_local->node_head, last = &node_local->node_head; op;) {
+    if (op->thread_id == 1) {
+      /* Remove TEA op from node table */
+      *last = op->next_node;
+      op->in_node_list = FALSE;
+
+      /* Update RS count: only for pre-scheduling states where clear() has
+       * NOT yet decremented the counter. After scheduling, clear() already
+       * decremented for OS_SCHEDULED/OS_MISS, and post-scheduling states
+       * (OS_WAIT_DCACHE, OS_WAIT_MEM, OS_DONE, etc.) also don't need
+       * decrement. Use whitelist matching flush_window(). */
+      if (op->state == OS_IN_RS || op->state == OS_READY ||
+          op->state == OS_WAIT_FWD || op->state == OS_SLEEP ||
+          op->state == OS_LOW_PRIORITY || op->state == OS_TENTATIVE) {
+        if (node_local->rs[op->rs_id].rs_op_count > 0) {
+          node_local->rs[op->rs_id].rs_op_count--;
+        }
+        if (node_local->rs[op->rs_id].tea_op_count > 0) {
+          node_local->rs[op->rs_id].tea_op_count--;
+        }
+
+        /* DEBUG: detect divergence */
+        ASSERTM(0,
+                node_local->rs[op->rs_id].rs_op_count >= node_local->rs[op->rs_id].main_op_count + node_local->rs[op->rs_id].tea_op_count,
+                "flush_tea step4 divergence: rs=%d rs_op=%d main=%d tea=%d op_num=%s state=%d C=%llu\n",
+                (int)op->rs_id, node_local->rs[op->rs_id].rs_op_count,
+                node_local->rs[op->rs_id].main_op_count, node_local->rs[op->rs_id].tea_op_count,
+                unsstr64(op->op_num), op->state, cycle_count);
+      }
+
+      Op* next = op->next_node;
+      tea_op_flushed(proc_id, op);  /* decrement tea_op_count for flush path */
+      free_op(op);
+      STAT_EVENT(proc_id, TEA_OPS_FLUSHED);
+      op = next;
+    } else {
+      /* Keep main thread op */
+      last = &op->next_node;
+      node_local->node_tail = op;
+      op = op->next_node;
+    }
+  }
 }

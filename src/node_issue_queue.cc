@@ -44,6 +44,7 @@ extern "C" {
 
 #include "exec_ports.h"
 #include "node_stage.h"
+#include "tea/tea_thread.h"
 }
 
 /**************************************************************************************/
@@ -67,10 +68,14 @@ void node_schedule_oldest_first_sched(Op*);
 
 /*
  * FIND_EMPTIEST_RS: will always select the RS with the most empty slots
+ *
+ * Phase 4: Thread-aware dispatch - checks per-thread partition limits
  */
 int64 node_dispatch_find_emptiest_rs(Op* op) {
   int64 emptiest_rs_id = NODE_ISSUE_QUEUE_RS_SLOT_INVALID;
   uns emptiest_rs_slots = 0;
+
+  Flag is_tea_op = (op->thread_id == 1);
 
   /*
    * Iterate through RSs looking for an available RS that is connected to
@@ -90,8 +95,22 @@ int64 node_dispatch_find_emptiest_rs(Op* op) {
         continue;
       }
 
-      ASSERT(node->proc_id, rs->size >= rs->rs_op_count);
-      uns num_empty_slots = rs->size - rs->rs_op_count;
+      /* Phase 4: Check per-thread partition limits */
+      uns num_empty_slots;
+      if (is_tea_op) {
+        /* TEA op: Check TEA partition availability */
+        if (rs->tea_op_count >= rs->tea_rs_limit) {
+          continue;  /* TEA partition full */
+        }
+        num_empty_slots = rs->tea_rs_limit - rs->tea_op_count;
+      } else {
+        /* Main op: Check Main partition availability */
+        if (rs->main_op_count >= rs->main_rs_limit) {
+          continue;  /* Main partition full */
+        }
+        num_empty_slots = rs->main_rs_limit - rs->main_op_count;
+      }
+
       if (num_empty_slots == 0) {
         continue;
       }
@@ -237,6 +256,24 @@ void node_issue_queue_clear() {
     op->in_rdy_list = FALSE;
     ASSERT(node->proc_id, node->rs[op->rs_id].rs_op_count > 0);
     node->rs[op->rs_id].rs_op_count--;
+
+    /* Phase 4: Update per-thread counter */
+    if (op->thread_id == 1) {
+      ASSERT(node->proc_id, node->rs[op->rs_id].tea_op_count > 0);
+      node->rs[op->rs_id].tea_op_count--;
+    } else {
+      ASSERT(node->proc_id, node->rs[op->rs_id].main_op_count > 0);
+      node->rs[op->rs_id].main_op_count--;
+    }
+
+    /* DEBUG: detect rs_op_count < main+tea divergence */
+    ASSERTM(node->proc_id,
+            node->rs[op->rs_id].rs_op_count >= node->rs[op->rs_id].main_op_count + node->rs[op->rs_id].tea_op_count,
+            "clear() divergence: rs=%d rs_op=%d main=%d tea=%d op_num=%s tid=%d C=%llu\n",
+            (int)op->rs_id, node->rs[op->rs_id].rs_op_count,
+            node->rs[op->rs_id].main_op_count, node->rs[op->rs_id].tea_op_count,
+            unsstr64(op->op_num), op->thread_id, cycle_count);
+
     STAT_EVENT(node->proc_id, OP_ISSUED);
   }
 }
@@ -251,8 +288,16 @@ void node_issue_queue_dispatch() {
   Op* op = NULL;
   uns32 num_fill_rs = 0;
 
-  /* Scan through dispatched nodes in node table that have not been filled to RS yet. */
+  /* Scan through dispatched nodes in node table that have not been filled to RS yet.
+   * TEA ops are dispatched independently by tea_dispatch_to_rs() and tea_dispatch_retry()
+   * in node_stage.c — they never enter this loop. */
   for (op = node->next_op_into_rs; op; op = op->next_node) {
+    /* Skip TEA ops — they are dispatched directly by tea_dispatch_to_rs().
+     * TEA ops in Node Table have state != OS_IN_ROB (already in RS) or
+     * OS_IN_ROB (awaiting tea_dispatch_retry). Either way, skip here. */
+    if (op->thread_id == 1)
+      continue;
+
     int64 rs_id = dispatch_func_table[NODE_ISSUE_QUEUE_DISPATCH_SCHEME](op);
     if (rs_id == NODE_ISSUE_QUEUE_RS_SLOT_INVALID)
       break;
@@ -266,6 +311,8 @@ void node_issue_queue_dispatch() {
     op->state = OS_IN_RS;
     op->rs_id = (Counter)rs_id;
     rs->rs_op_count++;
+    rs->main_op_count++;
+
     num_fill_rs++;
 
     DEBUG(node->proc_id, "Filling %s with op_num:%s (%d)\n", rs->name, unsstr64(op->op_num), rs->rs_op_count);
@@ -287,8 +334,38 @@ void node_issue_queue_dispatch() {
     }
   }
 
-  // mark the next node to continue filling in the next cycle
+  // mark the next node to continue filling in the next cycle.
   node->next_op_into_rs = op;
+}
+
+/*
+ * Helper function to check if an op can be scheduled this cycle.
+ * Returns TRUE if the op should be considered for scheduling, FALSE otherwise.
+ */
+static inline Flag node_issue_queue_op_can_schedule(Op* op) {
+  ASSERT(node->proc_id, node->proc_id == op->proc_id);
+  ASSERTM(node->proc_id, op->in_rdy_list, "op_num %llu\n", op->op_num);
+
+  if (op->state == OS_WAIT_MEM) {
+    if (node->mem_blocked)
+      return FALSE;
+    else
+      op->state = OS_READY;
+  }
+
+  if (op->state == OS_TENTATIVE || op->state == OS_WAIT_DCACHE)
+    return FALSE;
+
+  ASSERTM(node->proc_id, op->state == OS_IN_RS || op->state == OS_READY || op->state == OS_WAIT_FWD,
+          "op_num: %llu, op_state: %s\n", op->op_num, Op_State_str(op->state));
+
+  /* op will be ready next cycle, try to schedule */
+  if (cycle_count >= op->rdy_cycle - 1) {
+    ASSERT(node->proc_id, op->srcs_not_rdy_vector == 0x0);
+    return TRUE;
+  }
+
+  return FALSE;
 }
 
 /*
@@ -301,6 +378,11 @@ void node_issue_queue_dispatch() {
  * which is then removed from the ready list. If no FU is available, the
  * operation remains in the ready list to be considered in the next
  * scheduling cycle.
+ *
+ * TEA Priority Scheduling (Phase 3):
+ * When TEA is active, uses two-pass scheduling:
+ *   Pass 1: Schedule TEA ops (thread_id=1) first
+ *   Pass 2: Schedule Main ops (thread_id=0) to remaining FU slots
  */
 void node_issue_queue_schedule() {
   /*
@@ -312,33 +394,55 @@ void node_issue_queue_schedule() {
   // Check to see if the L1 Q is (still) full
   node_issue_queue_check_mem();
 
-  for (Op* op = node->rdy_head; op; op = op->next_rdy) {
-    ASSERT(node->proc_id, node->proc_id == op->proc_id);
-    ASSERTM(node->proc_id, op->in_rdy_list, "op_num %llu\n", op->op_num);
-    if (op->state == OS_WAIT_MEM) {
-      if (node->mem_blocked)
-        continue;
-      else
-        op->state = OS_READY;
-    }
+  Flag tea_active = TEA_ENABLE && tea_is_active(node->proc_id);
 
-    if (op->state == OS_TENTATIVE || op->state == OS_WAIT_DCACHE)
+  /*
+   * Pass 1: TEA ops first (when TEA is active)
+   * This gives TEA ops priority access to FU slots.
+   */
+  if (tea_active) {
+    for (Op* op = node->rdy_head; op; op = op->next_rdy) {
+      if (op->thread_id != 1)
+        continue;  /* Skip Main thread ops in this pass */
+
+      if (!node_issue_queue_op_can_schedule(op))
+        continue;
+
+      DEBUG(node->proc_id, "TEA Scheduler examining    op_num:%s op:%s l1:%d st:%s rdy:%s\n",
+            unsstr64(op->op_num), disasm_op(op, TRUE), op->engine_info.l1_miss,
+            Op_State_str(op->state), unsstr64(op->rdy_cycle));
+      DEBUG(node->proc_id, "TEA Scheduler considering  op_num:%s op:%s l1:%d\n",
+            unsstr64(op->op_num), disasm_op(op, TRUE), op->engine_info.l1_miss);
+
+      int prev_count = node->sd.op_count;
+      schedule_func_table[NODE_ISSUE_QUEUE_SCHEDULE_SCHEME](op);
+
+      /* Track if TEA op was actually scheduled */
+      if (node->sd.op_count > prev_count) {
+        STAT_EVENT(node->proc_id, TEA_OPS_ISSUED);
+      }
+    }
+  }
+
+  /*
+   * Pass 2: Main thread ops (always executed)
+   * Main ops get scheduled to remaining FU slots.
+   */
+  for (Op* op = node->rdy_head; op; op = op->next_rdy) {
+    /* Skip TEA ops - they were handled in Pass 1 */
+    if (tea_active && op->thread_id == 1)
       continue;
 
-    ASSERTM(node->proc_id, op->state == OS_IN_RS || op->state == OS_READY || op->state == OS_WAIT_FWD,
-            "op_num: %llu, op_state: %s\n", op->op_num, Op_State_str(op->state));
+    if (!node_issue_queue_op_can_schedule(op))
+      continue;
+
     DEBUG(node->proc_id, "Scheduler examining    op_num:%s op:%s l1:%d st:%s rdy:%s exec:%s done:%s\n",
           unsstr64(op->op_num), disasm_op(op, TRUE), op->engine_info.l1_miss, Op_State_str(op->state),
           unsstr64(op->rdy_cycle), unsstr64(op->exec_cycle), unsstr64(op->done_cycle));
+    DEBUG(node->proc_id, "Scheduler considering  op_num:%s op:%s l1:%d\n", unsstr64(op->op_num), disasm_op(op, TRUE),
+          op->engine_info.l1_miss);
 
-    /* op will be ready next cycle, try to schedule */
-    if (cycle_count >= op->rdy_cycle - 1) {
-      ASSERT(node->proc_id, op->srcs_not_rdy_vector == 0x0);
-      DEBUG(node->proc_id, "Scheduler considering  op_num:%s op:%s l1:%d\n", unsstr64(op->op_num), disasm_op(op, TRUE),
-            op->engine_info.l1_miss);
-
-      schedule_func_table[NODE_ISSUE_QUEUE_SCHEDULE_SCHEME](op);
-    }
+    schedule_func_table[NODE_ISSUE_QUEUE_SCHEDULE_SCHEME](op);
   }
 }
 

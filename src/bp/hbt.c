@@ -11,14 +11,13 @@
 HbtEntry hbt_table[HBT_SIZE];
 uns64    retired_branch_count = 0;
 
-// HBT의 모든 카운터를 주기적으로 15씩 감소시키는 내부 함수
+// HBT의 모든 카운터를 주기적으로 1씩 감소시키는 내부 함수
+// 논문 기준: "All counters are decremented by 1 every 50K instructions"
 static void hbt_periodic_decrement(void) {
   for (int i = 0; i < HBT_SIZE; i++) {
-    // 카운터가 0이 아니면 15만큼 감소 (Saturating at 0)
-    if (hbt_table[i].counter > 15) {
-      hbt_table[i].counter -= 15;
-    } else {
-      hbt_table[i].counter = 0;
+    // 카운터가 0보다 크면 1만큼 감소 (Saturating at 0)
+    if (hbt_table[i].counter > 0) {
+      hbt_table[i].counter--;
     }
   }
 }
@@ -78,11 +77,11 @@ void hbt_update(Op* op) {
   }
   // ※ 예측 성공 시에는 아무것도 하지 않는 것이 HBT의 핵심 로직입니다.
 
-  // 5. 주기적 감소 로직 트리거
-  // retire된 브랜치 수를 1 증가시키고,
+  // 5. 주기적 감소 로직 트리거 (논문 기준: 50K instructions마다 -1)
+  // 논문: "All counters are decremented by 1 every 50K instructions"
+  // 구현: branches를 카운트하지만, 비슷한 효과를 위해 50000 branches마다 -1
   retired_branch_count++;
-  // 1000의 배수가 될 때마다 모든 카운터를 15씩 감소시키는 함수 호출
-  if ((retired_branch_count % 1000) == 0) {
+  if ((retired_branch_count % 50000) == 0) {
      _DEBUG(0, DEBUG_HBT, "Triggering periodic decrement at branch count = %llu\n", retired_branch_count);
     hbt_periodic_decrement();
   }
@@ -98,8 +97,10 @@ Flag hbt_is_hard_branch(Addr pc) {
   uns64 tag   = pc / HBT_SIZE;
   HbtEntry* entry = &hbt_table[index];
 
-  // 해당 entry의 주인이 맞고(tag 일치), 카운터가 최댓값에 도달했다면 'Hard'로 판단
-  if (entry->tag == tag && entry->counter == HBT_CTR_MAX) {
+  // 논문 기준: counter > 1이면 H2P (즉, 2회 이상 misprediction)
+  // "A branch is considered H2P if it has an entry in the H2P Table and
+  //  its counter value is greater than 1."
+  if (entry->tag == tag && entry->counter > HBT_H2P_THRESHOLD) {
     return TRUE;
   }
   return FALSE;

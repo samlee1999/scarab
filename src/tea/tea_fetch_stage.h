@@ -20,76 +20,66 @@
  */
 
 /***************************************************************************************
- * File         : cmp_model.c
- * Author       : HPS Research Group
- * Date         : 11/27/2006
- * Description  : CMP with runahead
+ * File         : tea/tea_fetch_stage.h
+ * Author       : TEA Implementation
+ * Date         : 2025
+ * Description  : TEA Fetch Stage - fetches dependency chain ops from Block Cache
  ***************************************************************************************/
 
-#ifndef __CMP_MODEL_H__
-#define __CMP_MODEL_H__
+#ifndef __TEA_FETCH_STAGE_H__
+#define __TEA_FETCH_STAGE_H__
 
-#include "bp/bp.h"
-#include "memory/memory.h"
-
-#include "cmp_model_support.h"
-#include "dcache_stage.h"
-#include "decode_stage.h"
-#include "decoupled_frontend.h"
-#include "exec_ports.h"
-#include "exec_stage.h"
-#include "icache_stage.h"
-#include "map.h"
-#include "map_stage.h"
-#include "node_stage.h"
-#include "thread.h"
-#include "uop_cache.h"
+#include "globals/global_types.h"
+#include "stage_data.h"
+#include "dependency_chain_cache.h"
 
 /**************************************************************************************/
-/* cmp model data  */
+/* Forward Declarations */
 
-typedef struct Cmp_Model_struct {
-  /* cmp: one thread for each core,
-   * "single_td" in sim.c is only for single core */
-  Thread_Data* thread_data;
-
-  Map_Data* map_data;
-  Bp_Recovery_Info* bp_recovery_info;
-  Bp_Data* bp_data;
-
-  Memory memory;
-
-  Icache_Stage* icache_stage;
-  Decode_Stage* decode_stage;
-  Uop_Cache_Stage* uop_cache_stage;
-  Map_Stage* map_stage;
-  Node_Stage* node_stage;
-  Exec_Stage* exec_stage;
-  Dcache_Stage* dcache_stage;
-
-  uns window_size;
-
-} Cmp_Model;
+struct Op_struct;
+typedef struct Op_struct Op;
 
 /**************************************************************************************/
-/* Global vars */
+/* TEA Fetch Stage Structure */
 
-extern Cmp_Model cmp_model;
+typedef struct Tea_Fetch_Stage_struct {
+  uns8 proc_id;
+
+  /* Stage interface data - output to TEA Rename */
+  Stage_Data sd;
+
+  /* Block Cache traversal state */
+  Dependency_Chain_Cache_Entry* active_chain;  /* Current dependency chain */
+  int current_chain_idx;                       /* Index within chain */
+  int total_chain_length;                      /* Total ops in chain */
+
+  /* Fetch state */
+  Flag fetch_complete;                         /* All ops fetched from chain */
+  Counter ops_fetched_this_cycle;              /* Ops fetched in current cycle */
+
+} Tea_Fetch_Stage;
 
 /**************************************************************************************/
-/* Prototypes */
+/* Global Variables */
 
-void cmp_init(uns mode);
-void cmp_reset(void);
-void cmp_cycle(void);
-void cmp_debug(void);
-void cmp_per_core_done(uns8);
-void cmp_done(void);
-void cmp_wake(Op*, Op*, uns8);
-void cmp_retire_hook(Op*);
-void cmp_warmup(Op*);
-void recover_tea_on_flush(uns proc_id);  /* TEA termination on flush (used by exec_stage Case 1) */
+extern Tea_Fetch_Stage** tea_fetch_stages;  /* Per-core TEA fetch stage */
+
+/**************************************************************************************/
+/* Function Prototypes */
+
+/* Initialization and reset */
+void init_tea_fetch_stage(uns proc_id);
+void reset_tea_fetch_stage(uns proc_id);
+
+/* Per-cycle update */
+void update_tea_fetch_stage(uns proc_id);
+
+/* Recovery */
+void recover_tea_fetch_stage(uns proc_id);
+
+/* Op creation from Block Cache */
+Op* tea_create_op_from_cache(uns proc_id, Op* cached_op, Flag is_h2p_branch);
 
 /**************************************************************************************/
 
-#endif /* #ifndef __CMP_MODEL_H__ */
+#endif /* __TEA_FETCH_STAGE_H__ */

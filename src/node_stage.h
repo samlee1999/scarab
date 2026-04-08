@@ -43,6 +43,12 @@ typedef struct Reservation_Station_struct {
   uns32 num_fus;                       // number of fus that this rs is connected to.
   uns32 rs_op_count;                   // number of ops in this reservation station
   uint64_t* entry_status;              // bitmask for entry status (0: empty, 1: occupied)
+
+  /* Phase 4: Per-thread RS partitioning */
+  uns32 main_op_count;  // Main thread ops in this RS
+  uns32 tea_op_count;   // TEA thread ops in this RS
+  uns32 main_rs_limit;  // Max main ops = size - TEA_RS_RESERVATION/NUM_RS
+  uns32 tea_rs_limit;   // Max TEA ops = TEA_RS_RESERVATION/NUM_RS
 } Reservation_Station;
 
 typedef struct Node_Stage_struct {
@@ -87,6 +93,9 @@ void recover_node_stage(void);
 void debug_node_stage(void);
 void update_node_stage(Stage_Data*);
 Flag is_node_stage_stalled(void);
+
+/* TEA Thread support */
+void flush_tea_ops_from_node_stage(uns proc_id);
 
 /**************************************************************************************/
 

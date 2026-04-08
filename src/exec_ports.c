@@ -202,6 +202,17 @@ void init_exec_ports_rs_list(uns proc_id, Reservation_Station* rs, Func_Unit* lo
   const char* base_name = "RS";
   ASSERT(proc_id, strlen(base_name) + 5 < EXEC_PORTS_MAX_NAME_LEN);
 
+  /* Pre-compute total RS size for proportional TEA allocation */
+  uns32 total_rs_size = 0;
+  {
+    char* rs_sizes_pre = strdup(RS_SIZES);
+    uns64 sz;
+    Flag ok = parse_next_elt(rs_sizes_pre, &sz);
+    for (uns32 j = 0; j < NUM_RS && ok; j++, ok = parse_next_elt(NULL, &sz))
+      total_rs_size += (uns32)sz;
+    free(rs_sizes_pre);
+  }
+
   char* rs_sizes_copy = strdup(RS_SIZES);
   Flag tmp = parse_next_elt(rs_sizes_copy, &next);
   POWER_TOTAL_RS_SIZE = 0;
@@ -215,6 +226,24 @@ void init_exec_ports_rs_list(uns proc_id, Reservation_Station* rs, Func_Unit* lo
     sprintf(rs[i].name, "%s%d", base_name, i);
     ASSERTM(proc_id, tmp, "Found less RS_SIZES than expected\n");
     rs[i].size = next;
+
+    /* TEA RS partitioning: allocate proportional to each RS's share of total.
+     * This ensures sum(tea_limits) ≈ TEA_RS_RESERVATION and
+     * sum(main_limits) ≈ total_rs_size - TEA_RS_RESERVATION,
+     * matching the paper's intended Main/TEA split (160/192 out of 352 total). */
+    rs[i].main_op_count = 0;
+    rs[i].tea_op_count = 0;
+    if (TEA_ENABLE && rs[i].size > 0 && total_rs_size > 0) {
+      uns32 tea_per_rs =
+          (uns32)((uint64_t)TEA_RS_RESERVATION * rs[i].size / total_rs_size);
+      if (tea_per_rs > rs[i].size)
+        tea_per_rs = rs[i].size;
+      rs[i].tea_rs_limit = tea_per_rs;
+      rs[i].main_rs_limit = rs[i].size - tea_per_rs;
+    } else {
+      rs[i].tea_rs_limit = 0;
+      rs[i].main_rs_limit = rs[i].size;
+    }
   }
   ASSERTM(proc_id, tmp == FALSE, "Found more RS_SIZES than expected\n");
   free(rs_sizes_copy);

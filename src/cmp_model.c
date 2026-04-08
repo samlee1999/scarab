@@ -71,6 +71,10 @@
 #include "log/dependency_chain_log.h"
 #include "log/fill_buffer_log.h"
 
+#include "tea/tea_thread.h"
+#include "tea/tea_fetch_stage.h"
+#include "tea/tea_rename.h"
+
 /**************************************************************************************/
 /* Global vars */
 
@@ -132,6 +136,15 @@ void cmp_init(uns mode) {
     init_dependency_chain_cache(proc_id);
     init_on_off_path_cache(proc_id);
 
+    /* TEA Thread initialization */
+    if (TEA_ENABLE) {
+      init_tea_thread(proc_id);
+      init_tea_fetch_stage(proc_id);
+      init_tea_rename_stage(proc_id);
+      /* Phase 4: Initialize TEA preg pools (must be after map_stage and tea_rename_stage) */
+      init_tea_preg_pools(proc_id);
+    }
+
     /* initialize the common data structures */
     init_bp_recovery_info(proc_id, &cmp_model.bp_recovery_info[proc_id]);
     init_bp_data(proc_id, &cmp_model.bp_data[proc_id]);
@@ -183,6 +196,9 @@ void cmp_reset() {
     reset_node_stage();
     reset_exec_stage();
     reset_dcache_stage();
+    if (TEA_ENABLE) {
+      reset_tea_thread(proc_id);
+    }
   }
   reset_memory();
 }
@@ -264,6 +280,13 @@ void cmp_cores(void) {
       update_decoupled_fe();
       update_fdip();
       update_eip();
+
+      /* TEA Thread update */
+      if (TEA_ENABLE && tea_is_active(proc_id)) {
+        update_tea_rename_stage(proc_id, &tea_fetch_stages[proc_id]->sd);
+        update_tea_fetch_stage(proc_id);
+        update_tea_thread(proc_id);
+      }
 
       cmp_measure_chip_util();
       // 매 사이클 Backward Walk 엔진 구동
@@ -361,6 +384,21 @@ void cmp_wake(Op* src_op, Op* dep_op, uns8 rdy_bit) {
 }
 
 /**************************************************************************************/
+/* recover_tea_on_flush: Handle TEA thread termination on flush */
+
+void recover_tea_on_flush(uns proc_id) {
+  if (!TEA_ENABLE || !tea_is_active(proc_id)) {
+    return;
+  }
+
+  /* Terminate TEA thread and reset all TEA stages */
+  terminate_tea_thread(proc_id);
+  reset_tea_fetch_stage(proc_id);
+  reset_tea_rename_stage(proc_id);
+  reset_tea_preg_pool(proc_id);
+}
+
+/**************************************************************************************/
 /* cmp_recover: */
 
 void cmp_recover() {
@@ -401,6 +439,11 @@ void cmp_recover() {
   recover_exec_stage();
   recover_dcache_stage();
   recover_memory();
+
+  /* TEA Thread recovery: Terminate TEA on any flush */
+  if (TEA_ENABLE) {
+    recover_tea_on_flush(bp_recovery_info->proc_id);
+  }
 
   log_recovery_end(node, cycle_count, bp_recovery_info);
   bp_recovery_info->recovery_cycle = MAX_CTR;

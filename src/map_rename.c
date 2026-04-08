@@ -493,6 +493,7 @@ static inline void reg_file_release_prev(Op *op, int *reg_table_types, int reg_t
              reg_table->parent_reg_table->entries[entry->parent_reg_id].child_reg_id != REG_TABLE_REG_ID_INVALID);
       entry->reg_state = REG_TABLE_ENTRY_STATE_COMMIT;
 
+
       int prev_reg_id = op->prev_dst_reg_id[ii][table_type];
       ASSERT(op->proc_id, prev_reg_id != REG_TABLE_REG_ID_INVALID);
 
@@ -533,7 +534,7 @@ static inline void reg_file_snapshot_srt() {
     struct reg_checkpoint *checkpoint = reg_file[ii]->reg_checkpoint;
     memcpy(checkpoint->entries, srt->entries, sizeof(struct reg_table_entry) * srt->size);
 
-    ASSERT(map_data->proc_id, !checkpoint->is_valid);
+    ASSERT(map_data->proc_id, !checkpoint->is_valid); // checkpoint should be invalid before snapshot
     checkpoint->is_valid = TRUE;
   }
 }
@@ -548,11 +549,25 @@ static inline void reg_file_rollback_srt() {
   for (uns ii = 0; ii < REG_FILE_REG_TYPE_NUM; ++ii) {
     struct reg_table *srt = reg_file[ii]->reg_table[REG_TABLE_TYPE_ARCHITECTURAL];
     struct reg_checkpoint *checkpoint = reg_file[ii]->reg_checkpoint;
+
     memcpy(srt->entries, checkpoint->entries, sizeof(struct reg_table_entry) * srt->size);
 
     ASSERT(map_data->proc_id, checkpoint->is_valid);
     checkpoint->is_valid = FALSE;
   }
+}
+
+/*
+  Returns TRUE if an SRT checkpoint is currently held (is_valid == TRUE).
+  Used by TEA early flush logic to detect if Main H2P has passed rename
+  (Case 2: post-rename) vs not yet renamed (Case 1: pre-rename).
+*/
+Flag reg_file_checkpoint_is_valid(void) {
+  for (uns ii = 0; ii < REG_FILE_REG_TYPE_NUM; ++ii) {
+    if (reg_file[ii]->reg_checkpoint->is_valid)
+      return TRUE;
+  }
+  return FALSE;
 }
 
 /**************************************************************************************/
@@ -971,18 +986,33 @@ void reg_renaming_scheme_realistic_produce(Op *op) {
 void reg_renaming_scheme_realistic_recover(Op *op) {
   // do not need to do flushing if it is a decoding flush
   ASSERT(op->proc_id, op->table_info->cf_type);
-  if (op->oracle_info.recover_at_decode)
+  if (op->oracle_info.recover_at_decode) {
+    STAT_EVENT(op->proc_id, TEA_RECOVER_CALLS_SKIPPED);
     return;
+  }
+
+  // TEA Case 1: No SRT checkpoint means recovery_op has not yet passed rename.
+  // In-order rename guarantees no ops after it have been renamed either,
+  // so there are no off-path pregs to free and no SRT rollback needed.
+  if (!reg_file_checkpoint_is_valid()) {
+    STAT_EVENT(op->proc_id, TEA_RECOVER_CALLS_SKIPPED);
+    return;
+  }
+
+  STAT_EVENT(op->proc_id, TEA_RECOVER_CALLS_ACTIVE);
 
   // rollback to the status that does not contain any off_path entries
   reg_file_rollback_srt();
 
   // release the registers from the youngest to the flush point
   int reg_table_types[] = {REG_TABLE_TYPE_PHYSICAL};
+  uns pregs_freed = 0;
   for (Op **op_p = (Op **)list_start_tail_traversal(&td->seq_op_list); op_p && (*op_p)->op_num > op->op_num;
        op_p = (Op **)list_prev_element(&td->seq_op_list)) {
+    pregs_freed += (*op_p)->table_info->num_dest_regs;
     reg_file_flush_mispredict(*op_p, reg_table_types, sizeof(reg_table_types) / sizeof(reg_table_types[0]));
   }
+  INC_STAT_EVENT(op->proc_id, TEA_RECOVER_PREGS_FREED, pregs_freed);
 }
 
 void reg_renaming_scheme_realistic_precommit(Op *op) {
@@ -1574,6 +1604,11 @@ Flag reg_file_issue(Op *op) {
   --- consume the src registers
 */
 void reg_file_consume(Op *op) {
+  /* TEA ops use separate preg pool - skip Main thread's reg_table state tracking */
+  if (op->thread_id == 1) {
+    return;
+  }
+
   ASSERT(map_data->proc_id,
          REG_RENAMING_SCHEME >= REG_RENAMING_SCHEME_INFINITE && REG_RENAMING_SCHEME < REG_RENAMING_SCHEME_NUM);
   reg_file = map_data->reg_file;
@@ -1587,6 +1622,15 @@ void reg_file_consume(Op *op) {
   --- write back the dst registers
 */
 void reg_file_produce(Op *op) {
+  /* TEA ops use separate preg pool and don't enter ROB.
+   * Their preg lifecycle is managed by reset_tea_preg_pool() on TEA termination.
+   * Skip Main thread's reg_table state tracking for TEA ops.
+   * Note: Dependency wakeup (wake_action callback) still works - this only skips state tracking.
+   */
+  if (op->thread_id == 1) {
+    return;
+  }
+
   ASSERT(map_data->proc_id,
          REG_RENAMING_SCHEME >= REG_RENAMING_SCHEME_INFINITE && REG_RENAMING_SCHEME < REG_RENAMING_SCHEME_NUM);
   reg_file = map_data->reg_file;
@@ -1600,6 +1644,10 @@ void reg_file_produce(Op *op) {
   --- flush registers of misprediction operands
 */
 void reg_file_recover(Op *op) {
+  /* After TEA early flush fix, recovery_op should always be a Main thread op.
+   * TEA ops must NOT be passed here as it would skip or corrupt SRT rollback. */
+  ASSERT(map_data->proc_id, op->thread_id != 1);
+
   ASSERT(map_data->proc_id,
          REG_RENAMING_SCHEME >= REG_RENAMING_SCHEME_INFINITE && REG_RENAMING_SCHEME < REG_RENAMING_SCHEME_NUM);
   reg_file = map_data->reg_file;

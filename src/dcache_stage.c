@@ -55,6 +55,10 @@
 #include "model.h"
 #include "statistics.h"
 
+/* Phase 4.1: TEA Store Buffer */
+#include "tea/tea_store_buffer.h"
+#include "tea/tea_thread.h"
+
 /**************************************************************************************/
 /* Macros */
 
@@ -224,6 +228,54 @@ void update_dcache_stage(Stage_Data* src_sd) {
       continue;
     }
 
+    /* Phase 4.1: Intercept TEA memory operations - use store buffer instead of D-cache */
+    if (TEA_ENABLE && op->thread_id == 1) {
+      if (op->table_info->mem_type == MEM_ST) {
+        /* TEA Store: Write to buffer, not D-cache */
+        if (!tea_store_buffer_write(op->proc_id, op->oracle_info.va,
+                                    op->oracle_info.new_mem_value,
+                                    op->oracle_info.mem_size)) {
+          /* Buffer full: terminate TEA thread immediately.
+           * terminate_tea_thread() flushes all TEA ops, so skip further
+           * processing of this op (it may already be freed). */
+          STAT_EVENT(op->proc_id, TEA_STORE_BUFFER_FULL);
+          terminate_tea_thread(op->proc_id);
+          dc->sd.ops[oldest_index] = NULL;
+          dc->sd.op_count--;
+          ASSERT(dc->proc_id, dc->sd.op_count >= 0);
+          continue;
+        }
+        STAT_EVENT(op->proc_id, TEA_STORES_BUFFERED);
+        op->done_cycle = cycle_count + DCACHE_CYCLES;
+        op->state = OS_SCHEDULED;
+      } else if (op->table_info->mem_type == MEM_LD) {
+        /* TEA Load: Check buffer first, then fall through to D-cache */
+        Quad forwarded_data;
+        if (tea_store_buffer_read(op->proc_id, op->oracle_info.va,
+                                  op->oracle_info.mem_size, &forwarded_data)) {
+          /* Forwarding hit from TEA store buffer */
+          op->done_cycle = cycle_count + DCACHE_CYCLES;
+          op->wake_cycle = cycle_count + DCACHE_CYCLES;
+          op->state = OS_SCHEDULED;
+          STAT_EVENT(op->proc_id, TEA_STORE_FORWARDS);
+          /* Wake up dependent TEA ops waiting on this load's data */
+          wake_up_ops(op, REG_DATA_DEP, model->wake_hook);
+        } else {
+          /* No forwarding - let TEA load access D-cache normally (read-only) */
+          goto tea_load_dcache_access;
+        }
+      }
+      /* Mark TEA memory op as completed (decrement tea_op_count) */
+      tea_op_completed(dc->proc_id, op);
+      /* Remove TEA op from dcache stage after processing */
+      dc->sd.ops[oldest_index] = NULL;
+      dc->sd.op_count--;
+      ASSERT(dc->proc_id, dc->sd.op_count >= 0);
+      continue;
+    }
+tea_load_dcache_access:
+    ;  /* Empty statement required after label in C */
+
     /* check on the availability of a read port for the given bank */
     // the bank bits are the lowest order cache index bits
     uns bank = op->oracle_info.va >> dc->dcache.shift_bits & N_BIT_MASK(LOG2(DCACHE_BANKS));
@@ -272,11 +324,19 @@ void update_dcache_stage(Stage_Data* src_sd) {
         op->wake_cycle = op->done_cycle;
         wake_up_ops(op, REG_DATA_DEP, model->wake_hook);
       }
+      /* TEA load via normal dcache (PERFECT_DCACHE): mark completed */
+      if (TEA_ENABLE && op->thread_id == 1) {
+        tea_op_completed(dc->proc_id, op);
+      }
       continue;
     }
 
     if (line) {
       dcache_cacheline_hit(op, line_addr, line);
+      /* TEA load via normal dcache (cache hit): mark completed */
+      if (TEA_ENABLE && op->thread_id == 1) {
+        tea_op_completed(dc->proc_id, op);
+      }
       continue;
     }
     dcache_cacheline_miss(op, line_addr);
@@ -596,6 +656,10 @@ static inline void dcache_cacheline_miss(Op* op, Addr line_addr) {
         op->done_cycle = cycle_count + DCACHE_CYCLES + op->inst_info->extra_ld_latency;
         op->wake_cycle = cycle_count + DCACHE_CYCLES + op->inst_info->extra_ld_latency;
         wake_up_ops(op, REG_DATA_DEP, model->wake_hook);
+        /* TEA load via normal dcache (store fwd hit on miss): mark completed */
+        if (TEA_ENABLE && op->thread_id == 1) {
+          tea_op_completed(dc->proc_id, op);
+        }
         break;
       }
 
@@ -839,6 +903,11 @@ static inline void dcache_fill_process_cacheline(Mem_Req* req, Dcache_Data* data
     if (op->table_info->mem_type != MEM_ST) {
       op->wake_cycle = op->done_cycle;
       wake_up_ops(op, REG_DATA_DEP, model->wake_hook);
+    }
+
+    /* TEA load via normal dcache (cache miss fill): mark completed */
+    if (TEA_ENABLE && op->thread_id == 1) {
+      tea_op_completed(dc->proc_id, op);
     }
   }
 

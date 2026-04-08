@@ -55,6 +55,20 @@ void fill_buffer_add(uns proc_id, Op* op) {
         // 2. 만약 이 op가 H2P 브랜치라면, 경로 기록 함수를 호출합니다.
         if (evicted_op->oracle_info.hbt_pred_is_hard) {
             record_on_off_path(proc_id, evicted_op);
+
+            // BW Walk 트리거: 엔진이 유휴 상태일 때만 새 Walk를 시작
+            // evict되는 oldest H2P는 스냅샷에서 제외 (older ops 부재로 chain 생성 불가)
+            Backward_Walk_Engine* engine = bw_engines[proc_id];
+            if (engine && engine->state == BW_IDLE) {
+                int idx = (fb->head + 1) % fb->size;  // evicted H2P 제외
+                engine->snapshot_op_count = 0;
+                for (int i = 0; i < fb->count - 1; i++) {
+                    engine->snapshot_buffer[engine->snapshot_op_count++] = fb->entries[idx];
+                    idx = (idx + 1) % fb->size;
+                }
+                engine->walk_cycles_remaining = BACKWARD_WALK_CYCLES;
+                engine->state = BW_WALKING;
+            }
         }
         // head 이동
         fb->head = (fb->head + 1) % fb->size;

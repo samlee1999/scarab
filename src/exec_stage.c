@@ -53,9 +53,12 @@
 #include "exec_ports.h"
 #include "map.h"
 #include "map_rename.h"
+#include "op_pool.h"
 #include "statistics.h"
 
 #include "log/recovery_log.h"
+
+#include "tea/tea_thread.h"
 
 /**************************************************************************************/
 /* Macros */
@@ -467,6 +470,33 @@ static inline void exec_stage_reject_op(Stage_Data* src_sd, int ii, int event) {
 }
 
 static inline void exec_stage_clear_fu(int ii) {
+  Op* op = exec->sd.ops[ii];
+
+  /* TEA op completion: mark done, will be freed in node_retire() */
+  if (op && TEA_ENABLE && op->thread_id == 1) {
+    /* TEA memory ops: don't clear - let dcache_stage handle them for done_cycle */
+    if (op->table_info->mem_type != NOT_MEM) {
+      return;  /* Memory ops need dcache processing to set done_cycle */
+    }
+
+    /* TEA non-memory ops: clear from exec->sd.
+     * 0-latency ops have OS_DONE already set by exec_stage_process_op() (called
+     * in Phase 2 of the same cycle).  Latency>0 ops need tea_op_completed() here
+     * (Phase 1 of N+avail, before node runs in same cycle). */
+    if (op->state != OS_DONE) {
+      DEBUG(exec->proc_id, "TEA op completed op_num:%s\n", unsstr64(op->op_num));
+      tea_op_completed(exec->proc_id, op);
+    }
+
+    exec->sd.ops[ii] = NULL;
+    exec->sd.op_count--;
+    ASSERT(exec->proc_id, exec->sd.op_count >= 0);
+
+    /* Don't free here - TEA ops are freed in node_retire() after removal from Node Table */
+    return;
+  }
+
+  /* Main thread ops: normal clear */
   exec->sd.ops[ii] = NULL;
   exec->sd.op_count--;
   ASSERT(exec->proc_id, exec->sd.op_count >= 0);
@@ -520,11 +550,100 @@ static inline void exec_stage_process_op(Op* op) {
   STAT_EVENT(op->proc_id, EXEC_ON_PATH_INST_MEM + (op->table_info->mem_type == NOT_MEM) + 2 * op->off_path);
   STAT_EVENT(op->proc_id, EXEC_ALL_INST);
 
+  /* TEA non-mem 0-latency: complete immediately.
+   * done_cycle == cycle_count means OP_DONE fires in the same cycle this op is
+   * latched (Phase 2).  exec_stage_clear_fu runs in Phase 1 of the NEXT cycle,
+   * which is after node has already retired (and freed) this op — use-after-free.
+   * Fix: call tea_op_completed() here (Phase 2, op still live) so OS_DONE is set
+   * before node runs.  exec_stage_clear_fu will see OS_DONE and skip the call. */
+  if (TEA_ENABLE && op->thread_id == 1 &&
+      op->table_info->mem_type == NOT_MEM &&
+      op->inst_info->latency == 0) {
+    tea_op_completed(op->proc_id, op);
+  }
+
   DEBUG(exec->proc_id, "op_num:%s fu_num:%d exec_cycle:%s done_cycle:%s off_path:%d\n", unsstr64(op->op_num),
         op->fu_num, unsstr64(op->exec_cycle), unsstr64(op->done_cycle), op->off_path);
 }
 
 static inline void exec_stage_bp_resolve(Op* op) {
+  /* TEA H2P branch: early misprediction detection and flush */
+  if (TEA_ENABLE && op->thread_id == 1) {
+    if (tea_is_active(op->proc_id)) {
+      Tea_Thread* tea = tea_threads[op->proc_id];
+
+      /* Check if this is the target H2P branch */
+      if (op->inst_info->addr == tea->target_h2p_pc) {
+        /* Misprediction detected: trigger early flush */
+        if (op->oracle_info.mispred || op->oracle_info.misfetch) {
+          DEBUG(op->proc_id, "TEA early flush: H2P mispred detected op_num:%s\n",
+                unsstr64(op->op_num));
+
+          Op* main_h2p = tea->main_h2p_op;
+          ASSERT(op->proc_id, main_h2p != NULL);
+          ASSERT(op->proc_id, main_h2p->op_pool_valid);
+
+          /* Guard: Main H2P is off-path → an earlier recovery will flush it anyway,
+           * no need to schedule another recovery. TEA terminates when that flush fires. */
+          if (main_h2p->off_path) {
+            return;
+          }
+
+          /* Guard: Main H2P already scheduled its own recovery → skip */
+          if (!main_h2p->oracle_info.recovery_sch) {
+            if (reg_file_checkpoint_is_valid()) {
+              /* Case 2: Main H2P past rename → SRT checkpoint exists.
+               * Use Main H2P as recovery_op: thread_id==0 allows correct SRT rollback (Bug 1),
+               * uses Main H2P's branch_id for BP checkpoint restore (Bug 2),
+               * and uses Main H2P's op_num for FLUSH_OP comparison (Bug 3).
+               *
+               * CRITICAL: set recovery_scheduled=TRUE to prevent Main H2P from
+               * retiring before cmp_recover() fires.
+               * TEA termination happens inside cmp_recover()->recover_tea_on_flush(). */
+              bp_sched_recovery(bp_recovery_info, main_h2p, op->exec_cycle,
+                                FALSE, FALSE, EXTRA_LATE_RECOVERY_CYCLES);
+              /* Only block retirement if bp_sched_recovery() actually registered
+               * this op as recovery_op. If an older recovery was already pending,
+               * bp_sched_recovery() silently returns without setting recovery_sch,
+               * and main_h2p will be flushed by that earlier recovery anyway. */
+              if (main_h2p->oracle_info.recovery_sch) {
+                main_h2p->recovery_scheduled = TRUE;
+              }
+              main_h2p->oracle_info.recover_at_exec = FALSE;  /* Prevent double recovery */
+              STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE2_WITH_CHKPT);
+            } else {
+              /* Case 1: No SRT checkpoint available (Main H2P not yet past rename). */
+              if (main_h2p->decode_cycle) {
+                /* Case 1a: Main H2P already past decode but not yet renamed.
+                 * Main H2P's recover_at_exec was already set by bp_predict_op()
+                 * if it was mispredicted, so it will naturally recover at exec.
+                 * Just terminate TEA and let Main H2P proceed normally. */
+                STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_NO_CHKPT);
+              } else {
+                /* Case 1b: Main H2P not yet decoded.
+                 * DO NOT use recover_at_decode: that path skips flush_mispredict and
+                 * SRT rollback, leaving off-path preg allocations as ALLOC orphans and
+                 * SRT in an inconsistent state, causing COMMIT orphan accumulation.
+                 * Instead, keep recover_at_exec=TRUE so Main H2P proceeds normally:
+                 * at rename → SRT checkpoint taken; at exec → proper recovery fires. */
+                STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_DECODE);
+              }
+              recover_tea_on_flush(op->proc_id);
+            }
+            STAT_EVENT(op->proc_id, TEA_EARLY_FLUSHES);
+          }
+        } else {
+          /* TEA H2P correct prediction: record for statistics */
+          STAT_EVENT(op->proc_id, TEA_H2P_CORRECT);
+        }
+      }
+      STAT_EVENT(op->proc_id, TEA_OPS_EXECUTED);
+    }
+    /* TEA ops do not update BP structures */
+    return;
+  }
+
+  /* Main thread branch resolution */
   if (!BP_UPDATE_AT_RETIRE) {
     // this code updates the branch prediction structures
     if (op->table_info->cf_type >= CF_IBR)

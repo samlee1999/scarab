@@ -200,6 +200,7 @@ Flag reg_file_issue(Op *op);                  // check the op before being issue
 void reg_file_consume(Op *op);                // consume the src registers
 void reg_file_produce(Op *op);                // write back the dst registers
 void reg_file_recover(Op *op);                // flush registers of misprediction operands
+Flag reg_file_checkpoint_is_valid(void);          // TRUE if SRT checkpoint is currently held (Main H2P passed rename)
 void reg_file_precommit(Op *op);              // update the register metadata when an op is non-spec
 void reg_file_commit(Op *op);                 // release the previous register with same architectural register id
 

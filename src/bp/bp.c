@@ -27,7 +27,7 @@
  ***************************************************************************************/
 
 #include "bp/bp.h"
-#include "bp/hbt.h" 
+#include "bp/hbt.h"
 #include "globals/assert.h"
 #include "globals/global_defs.h"
 #include "globals/global_types.h"
@@ -48,6 +48,7 @@
 #include "bp/gshare.h"
 #include "bp/hybridgp.h"
 #include "bp/tagescl.h"
+#include "tea/tea_thread.h"
 #include "frontend/pin_trace_fe.h"
 #include "isa/isa_macros.h"
 #include "libs/cache_lib.h"
@@ -312,6 +313,7 @@ Addr bp_predict_op(Bp_Data* bp_data, Op* op, uns br_num, Addr fetch_addr) {
   if (op->table_info->cf_type) {
      op->oracle_info.hbt_pred_is_hard = hbt_is_hard_branch(op->inst_info->addr);
     op->oracle_info.hbt_misp_counter = hbt_get_counter(op->inst_info->addr);
+    /* NOTE: TEA trigger moved to after bp_predict_op_evaluate() - see line ~876 */
   }
 
   Addr* btb_target;
@@ -867,6 +869,15 @@ Addr bp_predict_op(Bp_Data* bp_data, Op* op, uns br_num, Addr fetch_addr) {
 
   ASSERT_PROC_ID_IN_ADDR(op->proc_id, op->oracle_info.pred_npc);
   bp_predict_op_evaluate(bp_data, op, op->oracle_info.pred_npc);
+
+  /* TEA trigger: Activate TEA thread for Hard-to-Predict branches.
+   * Must be called AFTER bp_predict_op_evaluate() so that oracle_info.mispred
+   * is computed. TEA uses this to detect main thread mispredictions.
+   * Off-path branches are excluded: they have no BP checkpoint (spec_update
+   * skips TakeCheckpoint for off_path ops), and they will be flushed anyway. */
+  if (TEA_ENABLE && op->oracle_info.hbt_pred_is_hard && !op->off_path) {
+    trigger_tea_thread(bp_data->proc_id, op->inst_info->addr, op->op_num, op);
+  }
 
   // The case where BTB-miss not-taken branch pollute global hist
   // mispred || misfetch will trigger a re-steer but no chance to fix the global hist

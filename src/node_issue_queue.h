@@ -56,6 +56,7 @@ const static int32 NODE_ISSUE_QUEUE_FU_SLOT_INVALID = -1;
 /* External Methods */
 
 void node_issue_queue_update();
+int64 node_dispatch_find_emptiest_rs(Op* op);
 
 #ifdef __cplusplus
 }
