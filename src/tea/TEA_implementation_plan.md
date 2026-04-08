@@ -79,7 +79,7 @@
         - Case 1a (Main H2P가 decode 통과): recover_at_exec = TRUE
           → Main H2P exec 시 cmp_recover()로 메인 스레드 recovery
         - Case 1b (Main H2P가 decode 미도달): recover_at_decode = TRUE
-          → Main H2P decode 도달 시 cmp_recover()로 메인 스레드 recovery
+          → Main H2P decode 도달 시 recovery 진행 X
         해당 chain만 즉시 종료 (terminate_tea_chain)
     - Case 2 (Main H2P가 rename 후, SRT checkpoint 존재):
         bp_sched_recovery() → 다음 cycle에 cmp_recover() 실행:
