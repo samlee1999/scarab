@@ -79,7 +79,7 @@
         - Case 1a (Main H2P가 decode 통과): recover_at_exec = TRUE
           → Main H2P exec 시 cmp_recover()로 메인 스레드 recovery
         - Case 1b (Main H2P가 decode 미도달): recover_at_decode = TRUE
-          → Main H2P decode 도달 시 recovery 진행 X
+          → Main H2P decode 도달 시 cmp_recover()로 메인 스레드 recovery
         해당 chain만 즉시 종료 (terminate_tea_chain)
     - Case 2 (Main H2P가 rename 후, SRT checkpoint 존재):
         bp_sched_recovery() → 다음 cycle에 cmp_recover() 실행:
@@ -120,7 +120,7 @@
 | RS 파티셔닝 (main/tea limits) | `node_stage.h:51-54`, `exec_ports.c:223` | ✅ |
 | 2-pass 우선 스케줄링 (TEA first) | `node_issue_queue.cc:395-443` | ✅ |
 | TEA Store Buffer (forwarding + full 종료) | `tea/tea_store_buffer.h/c` | ✅ |
-| TEA Node Stage dispatch + flush | `node_stage.c:418-525, 1116-1244` | ✅ 독립 dispatch 구현 완료: `tea_dispatch_to_rs()` 직접 RS dispatch, `tea_dispatch_retry()` 신규, `flush_tea_ops_from_node_stage()` step 1 RS 카운터 동기화 완료 ([`TEA_dispatch_plan.md`](TEA_implementation_plan/TEA_dispatch_plan.md)) |
+| TEA Node Stage dispatch + flush | `node_stage.c:397-459, 1001-1094` | ⚠️ ASSERT 1&2 발견, 독립 dispatch 전환 필요 ([`TEA_dispatch_plan.md`](TEA_implementation_plan/TEA_dispatch_plan.md)) |
 | Early Flush Case 1 (pre-rename: recover_at_decode) | `exec_stage.c:597-602` | ✅ |
 | Early Flush Case 2 (post-rename: bp_sched_recovery) | `exec_stage.c:579-596` | ✅ |
 | Off-path 가드 (main_h2p->off_path 체크) | `exec_stage.c:573-575` | ✅ |
@@ -356,11 +356,10 @@ DEF_PARAM(block_cache_reset_period, BLOCK_CACHE_RESET_PERIOD, uns, uns, 500000, 
 작업 G (TEA 의존성 Wakeup) ✅ 완료 (2026-03-18)
     │   Shadow RAT producer 추적 + add_to_wake_up_lists() 연결
     │
-    ├──→ 작업 I (독립 Dispatch) ✅ 완료 (2026-04-03)
-    │       tea_dispatch_to_rs(): 직접 RS dispatch
-    │       tea_dispatch_retry(): RS full 재시도
-    │       node_issue_queue_dispatch(): TEA 완전 분리
-    │       flush_tea_ops_from_node_stage() step 1: RS 카운터 동기화
+    ├──→ 작업 I (독립 Dispatch) ← ASSERT 1&2 근본 해결 (TEA_dispatch_plan.md)
+    │       TEA ops를 tea_dispatch_to_rs()에서 직접 RS dispatch
+    │       node_issue_queue_dispatch()에서 TEA 완전 분리
+    │       flush step 1 RS 카운터 동기화 (§10)
     │
     ▼
 작업 C + HC (periodically_reset + Hybrid Chain) ← 함께 구현
@@ -431,17 +430,12 @@ cd ~/scarab-infra
 
 ## 13. 알려진 버그 및 주의사항
 
-### 13.1 현재 코드의 알려진 ASSERT (2026-03-17)
+### 13.1 현재 코드의 알려진 ASSERT
 
 | ASSERT | 파일:라인 | simpoint | 상태 | 원인 |
 |--------|----------|----------|------|------|
-| ASSERT 1: `op->state == OS_IN_ROB` | `node_issue_queue.cc:308` | leela 118750, C=42133 | ✅ 해결 (2026-04-03) | 작업 I 독립 dispatch: `node_issue_queue_dispatch()`에서 TEA ops skip, `tea_dispatch_to_rs()`에서 직접 RS dispatch |
-| ASSERT 2: `rs_op_count > 0` | `node_issue_queue.cc:262` | leela 128383, C=30322 | ✅ 해결 (2026-04-03) | ASSERT 1과 동일 근본 원인 → 작업 I로 해결 |
-| flush_window `rs_op_count > 0` | `node_stage.c:261` | 모든 벤치마크 | ✅ 해결 (2026-04-03) | `flush_tea_ops_from_node_stage()` step 1에서 OS_SCHEDULED/OS_MISS RS 카운터 동기화 구현 완료 ([`TEA_dispatch_plan.md`](TEA_implementation_plan/TEA_dispatch_plan.md) §10) |
 | FTQ deadlock (Case 1) | `decoupled_frontend.cc:280` | mcf | ⚠️ 부분 해결 | Case 1 `recover_at_decode` deadlock ([`TEA_early_flush_status.md`](TEA_implementation_status/TEA_early_flush_status.md) §7.1) |
-| TEA mem op node 무기한 잔류 / OS_DONE 미설정 | `tea_thread.c`, `node_stage.c` | leela (IPC -65.5%) | ✅ 해결 (2026-04-01) | exec이 mem op의 done_cycle 미설정 → OP_DONE 발동 불가, OS_DONE도 미설정 → node table 무기한 잔류. 수정: `tea_op_completed()`에서 `op->state = OS_DONE` 설정 + `node_retire_tea_ops()`에서 mem op는 OS_DONE 전용 게이트 사용. 상세: [`TEA_op_manage_status.md §8.7`](TEA_implementation_status/TEA_op_manage_status.md) |
 
-**해결 완료**: ASSERT 1&2 및 flush_window ASSERT → 작업 I (독립 dispatch + flush step 1 RS 카운터 동기화) 구현으로 해결 (`TEA_dispatch_plan.md`)
 
 ### 13.2 다중 H2P 관련 주의사항
 
