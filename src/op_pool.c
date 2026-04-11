@@ -310,16 +310,15 @@ static inline void expand_op_pool() {
     fprintf(stderr, "alloc - free = %llu (should match active_ops)\n", total_alloc_count - total_free_count);
     fprintf(stderr, "FTQ num_ops: %lu, num_fts: %lu\n", decoupled_fe_ftq_num_ops(), decoupled_fe_ftq_num_fts());
 
-    /* Dump Node Table state */
+    /* Dump Node Table state — full traversal (no 50-op limit) */
     Node_Stage* ns = &cmp_model.node_stage[0];
-    fprintf(stderr, "Node Table count: %d\n", ns->node_count);
+    fprintf(stderr, "Node Table node_count (main only): %d\n", ns->node_count);
 
     int tea_count = 0, main_count = 0;
     int tea_not_done = 0, tea_mem_not_done = 0;
     Op* op = ns->node_head;
-    int dump_count = 0;
 
-    while (op && dump_count < 50) {
+    while (op) {
       if (op->thread_id == 1) {
         tea_count++;
         if (op->done_cycle == MAX_CTR) {
@@ -337,10 +336,9 @@ static inline void expand_op_pool() {
         main_count++;
       }
       op = op->next_node;
-      dump_count++;
     }
 
-    fprintf(stderr, "Node Table Summary: TEA=%d (not_done=%d, mem_not_done=%d), Main=%d\n",
+    fprintf(stderr, "Node Table (full traversal): TEA=%d (not_done=%d, mem_not_done=%d), Main=%d\n",
             tea_count, tea_not_done, tea_mem_not_done, main_count);
 
     /* Check exec_stage */
@@ -415,16 +413,27 @@ static inline void expand_op_pool() {
       fprintf(stderr, "TEA Rename Stage: op_count=%d\n", tea_rename_count);
     }
 
-    /* Summary calculation */
-    int total_tracked = ns->node_count + es->sd.op_count + dc->sd.op_count +
-                        map_total + decode_total + ic->sd.op_count +
-                        (uc ? uc->sd.op_count : 0) + idq_count + uop_queue_len +
-                        tea_fetch_count + tea_rename_count;
+    /* Summary calculation
+     * node_count = main ops only; TEA ops in node table tracked separately via tea_count */
+    uns ftq_ops = (uns)decoupled_fe_ftq_num_ops();
+    int total_tracked_main = main_count + es->sd.op_count + dc->sd.op_count +
+                             map_total + decode_total + ic->sd.op_count +
+                             (uc ? uc->sd.op_count : 0) + idq_count + uop_queue_len +
+                             ftq_ops;
+    int total_tracked_tea  = tea_count + exec_tea + dc_tea +
+                             tea_fetch_count + tea_rename_count;
+    int total_tracked      = total_tracked_main + total_tracked_tea;
     fprintf(stderr, "\nSUMMARY:\n");
-    fprintf(stderr, "  Active ops: %d\n", op_pool_active_ops);
-    fprintf(stderr, "  Tracked in pipeline: %d\n", total_tracked);
-    fprintf(stderr, "  FTQ ops: %lu\n", decoupled_fe_ftq_num_ops());
-    fprintf(stderr, "  UNACCOUNTED ops: %d\n", op_pool_active_ops - total_tracked);
+    fprintf(stderr, "  Active ops (alloc-free): %d\n", op_pool_active_ops);
+    fprintf(stderr, "  Tracked Main ops: %d  (node=%d ftq=%u exec=%d dc=%d map=%d decode=%d ic=%d idq=%d uopq=%d)\n",
+            total_tracked_main, main_count, ftq_ops, exec_main, dc_main,
+            map_total, decode_total, ic->sd.op_count, idq_count, uop_queue_len);
+    fprintf(stderr, "  Tracked TEA  ops: %d  (node=%d exec=%d dc=%d fetch=%d rename=%d)\n",
+            total_tracked_tea, tea_count, exec_tea, dc_tea,
+            tea_fetch_count, tea_rename_count);
+    fprintf(stderr, "  Total tracked: %d\n", total_tracked);
+    fprintf(stderr, "  UNACCOUNTED ops: %d  (likely leaked — not in any pipeline stage)\n",
+            op_pool_active_ops - total_tracked);
     fprintf(stderr, "=================================\n\n");
   }
 

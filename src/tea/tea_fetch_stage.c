@@ -147,7 +147,13 @@ void update_tea_fetch_stage(uns proc_id) {
     return;
   }
 
-  /* Clear stage data from previous cycle */
+  /* Backpressure: if Rename Stage didn't consume last cycle's fetch output, stall.
+   * Prevents advancing chain index or calling alloc_op() while ops are stuck. */
+  if (tea_fetch->sd.op_count > 0) {
+    return;
+  }
+
+  /* Safe to clear — all previous ops were consumed by Rename Stage */
   tea_fetch->sd.op_count = 0;
   tea_fetch->ops_fetched_this_cycle = 0;
 

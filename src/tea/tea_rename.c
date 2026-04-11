@@ -437,7 +437,15 @@ void update_tea_rename_stage(uns proc_id, Stage_Data* tea_fetch_sd) {
   Tea_Rename_Stage* rename = tea_rename_stages[proc_id];
   Shadow_RAT* srat = rename->shadow_rat;
 
-  /* Clear previous cycle's output */
+  /* Backpressure: if Node Stage didn't consume all ops from last cycle, stall.
+   * Same pattern as main thread: map_stage.c stall = (last_sd->op_count > 0).
+   * Prevents overwriting ops still in rename->sd without calling free_op(). */
+  if (rename->sd.op_count > 0) {
+    STAT_EVENT(proc_id, TEA_RENAME_STALL_DISPATCH);
+    return;
+  }
+
+  /* Safe to clear — all previous ops were consumed by Node Stage */
   rename->sd.op_count = 0;
 
   /* Check if Shadow RAT is valid */
