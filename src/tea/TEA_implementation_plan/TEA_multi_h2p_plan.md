@@ -566,15 +566,20 @@ static inline void exec_stage_bp_resolve(Op* op) {
             if (main_h2p->oracle_info.recovery_sch) {
               main_h2p->recovery_scheduled = TRUE;
             }
+            main_h2p->oracle_info.recover_at_exec = FALSE;  // 이중 recovery 방지
             // → 다음 cycle cmp_recover() → recover_tea_on_flush(proc_id, recovery_op_num)
             //   recovery_op_num보다 younger한 chain만 종료
           } else {
             // Case 1: pre-rename (SRT checkpoint 없음)
-            main_h2p->oracle_info.recover_at_decode = TRUE;
-            // 해당 chain만 즉시 종료
-            terminate_tea_chain(op->proc_id, chain_id);
+            // recover_at_exec=TRUE 유지 — Main H2P가 rename→exec 정상 통과 후 recovery 발동
+            // (recover_at_decode=TRUE 사용 안 함: flush_mispredict 우회 시 ALLOC orphan 발생)
+            if (main_h2p->decode_cycle) {
+              STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_NO_CHKPT);  // Case 1a: past decode
+            } else {
+              STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_DECODE);    // Case 1b: not yet decoded
+            }
+            terminate_tea_chain(op->proc_id, chain_id);  // 해당 chain만 즉시 종료
           }
-          main_h2p->oracle_info.recover_at_exec = FALSE;
           STAT_EVENT(op->proc_id, TEA_EARLY_FLUSHES);
         }
       } else {
@@ -662,22 +667,8 @@ void flush_tea_ops_by_chain_id(uns proc_id, uns8 chain_id) {
           node->rs[op->rs_id].tea_op_count--;
       }
 
-      // dependent TEA ops의 not-rdy bit 강제 clear (§9.1 from TEA_reg_dependency_plan.md)
-      Wake_Up_Entry* wake = op->wake_up_head;
-      while (wake) {
-        Op* dep_op = wake->op;
-        if (dep_op->op_pool_valid && dep_op->unique_num == wake->unique_num) {
-          clear_not_rdy_bit(dep_op, wake->rdy_bit);
-          if (dep_op->state == OS_IN_RS &&
-              dep_op->srcs_not_rdy_vector == 0x0 &&
-              !dep_op->in_rdy_list) {
-            dep_op->next_rdy = node->rdy_head;
-            node->rdy_head = dep_op;
-            dep_op->in_rdy_list = TRUE;
-          }
-        }
-        wake = wake->next;
-      }
+      // dependent TEA ops의 not-rdy bit 강제 clear
+      // → 구현 상세: TEA_reg_dependency_plan.md §4.1
 
       free_op(op);
       STAT_EVENT(proc_id, TEA_OPS_FLUSHED);
@@ -776,6 +767,9 @@ void recover_tea_on_flush(uns proc_id, Counter recovery_op_num) {
     }
     // older chain → 유지 (recovery point 이전이므로 flush 대상 아님)
   }
+
+  // 생존 chain의 flushed Main op 의존성 정리
+  // → 구현 상세: TEA_reg_dependency_plan.md §4.2
 }
 ```
 
@@ -798,9 +792,17 @@ if (TEA_ENABLE) {
 
 ### 7.4 Case 1 (pre-rename) 호출부 변경
 
-**파일**: `exec_stage.c` — Case 1에서 `recover_tea_on_flush()` 호출하지 않음.
+**파일**: `exec_stage.c` — Case 1을 두 sub-case로 구분하되 처리 방식은 동일:
+
+- **Case 1a** (`main_h2p->decode_cycle > 0`): Main H2P가 decode를 통과했지만 아직 rename 전.
+  `recover_at_exec=TRUE` 유지 → Main H2P가 exec 도달 시 정상 recovery 발동.
+- **Case 1b** (`main_h2p->decode_cycle == 0`): Main H2P가 아직 decode 전.
+  `recover_at_decode=TRUE` **미사용** — flush_mispredict/SRT rollback 우회로 ALLOC orphan 발생하기 때문.
+  `recover_at_exec=TRUE` 유지 → Main H2P가 rename→exec 정상 통과 후 recovery 발동.
+
+양 sub-case 모두 `recover_tea_on_flush()` 직접 호출하지 않음.
 대신 `terminate_tea_chain(proc_id, chain_id)`로 해당 chain만 즉시 종료.
-Main thread recovery는 이후 decode 도달 시 `cmp_recover()`가 처리하며,
+Main thread recovery는 Main H2P가 exec에 도달할 때 `cmp_recover()`가 처리하며,
 이때 `recover_tea_on_flush(proc_id, recovery_op_num)`이 호출되어
 추가적으로 younger chain이 있으면 종료됨.
 

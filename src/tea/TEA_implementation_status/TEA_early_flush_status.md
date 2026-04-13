@@ -1,6 +1,6 @@
 # TEA Early Flush 현재 구현 상태
 
-**최종 갱신**: 2026-03-26
+**최종 갱신**: 2026-04-12
 **관련 계획 문서**: `TEA_early_flush_plan.md`
 
 ---
@@ -23,41 +23,28 @@ case 2: Post-Rename (Main H2P가 Rename 통과, SRT Checkpoint 존재)
 
 | 항목 | 위치 | 상태 |
 |------|------|------|
-| `reg_file_checkpoint_is_valid() == FALSE` 분기 | `exec_stage.c:598` | ✅ |
-| `decode_cycle` 기반 분기 (Bug Fix) | `exec_stage.c:604` | ✅ |
-| Case 1a: decode 통과 → no-op (기존 `recover_at_exec` 활용) | `exec_stage.c:600-604` | ✅ |
-| Case 1b: decode 미도달 → `recover_at_decode = TRUE` | `exec_stage.c:610-611` | ✅ |
-| 즉시 `recover_tea_on_flush()` 호출 | `exec_stage.c:613` | ✅ |
+| `reg_file_checkpoint_is_valid() == FALSE` 분기 | `exec_stage.c:614` | ✅ |
+| `decode_cycle` 기반 분기 | `exec_stage.c:616` | ✅ |
+| Case 1a: decode 통과 → `TEA_EARLY_FLUSH_CASE1_NO_CHKPT` stat 기록 + TEA 종료 | `exec_stage.c:617-622` | ✅ |
+| Case 1b: decode 미도달 → `TEA_EARLY_FLUSH_CASE1_DECODE` stat 기록 + TEA 종료 | `exec_stage.c:623-630` | ✅ |
+| 즉시 `recover_tea_on_flush()` 호출 | `exec_stage.c:631` | ✅ |
 
-**Bug Fix History**:
+**현재 구현 (2026-04-12)**:
 
-**(2026-03-16)** 원래 코드는 Case 1에서 항상 `recover_at_decode = TRUE`를 설정했으나,
-Main H2P가 이미 decode를 통과한 경우 이 플래그는 다시 확인되지 않아 recovery가 영원히 발생하지 않았음 (→ FTQ deadlock).
-수정: `main_h2p->decode_cycle`을 확인하여 Case 1a/1b로 분기.
+- **Case 1a** (decode 통과, rename 미통과): `TEA_EARLY_FLUSH_CASE1_NO_CHKPT` stat 기록 후 `recover_tea_on_flush()` 호출로 TEA 즉시 종료. Main H2P의 `recover_at_exec=TRUE`는 `bp_predict_op()`에서 이미 설정되어 있으므로 자연 recovery.
+- **Case 1b** (decode 미도달): `TEA_EARLY_FLUSH_CASE1_DECODE` stat 기록 후 `recover_tea_on_flush()` 호출로 TEA 즉시 종료. `recover_at_decode` flag를 **설정하지 않음** — Main H2P가 rename에 도달 시 SRT checkpoint가 취득되고, exec에서 `recover_at_exec=TRUE`로 정상 recovery.
+- **`map_rename.c`**: `reg_renaming_scheme_realistic_recover()`에 `!reg_file_checkpoint_is_valid()` guard 적용 — Case 1에서 SRT checkpoint 없을 때 rollback 안전 스킵.
 
-**(2026-03-26) Phase 9 수정**:
-- **Case 1a** (decode 통과, rename 미통과): `recover_at_exec = TRUE` 중복 설정 제거.
-  Main H2P가 mispredicted이면 `bp_predict_op()`에서 이미 `recover_at_exec=TRUE`가 설정됨.
-  TEA가 추가로 설정할 필요 없이 Main H2P가 exec에 도달하면 자연 recovery.
-- **Case 1b** (decode 미도달): `recover_at_decode = TRUE` + `recover_at_exec = FALSE` 설정.
-  Main H2P가 decode에 도달하면 `decode_stage_process_op()`에서 `bp_sched_recovery()` 호출.
-  즉시 `bp_sched_recovery()`를 호출하는 시도는 `recovery_sch` 이중 설정 ASSERT (`bp.c:153`)를
-  유발하여 revert함 — decode stage에서의 호출과 충돌.
-- **`map_rename.c`**: `reg_renaming_scheme_realistic_recover()`에 `!reg_file_checkpoint_is_valid()` guard 추가.
-  Case 1에서 `cmp_recover()` 시 SRT checkpoint이 없으므로 rollback + preg flush를 안전하게 스킵.
-  In-order rename이므로 Main H2P 이후 ops가 rename되지 않아 preg 해제 불필요.
-
-**동작**: SRT checkpoint이 없으므로 즉시 SRT rollback 불가. Main H2P의 파이프라인 위치에 따라
-적절한 recovery flag를 설정하여 해당 스테이지에서 recovery 수행. TEA는 즉시 종료.
+**동작**: SRT checkpoint이 없으므로 즉시 SRT rollback 불가. 두 케이스 모두 TEA를 즉시 종료하고 Main H2P의 기존 `recover_at_exec` flag로 자연 recovery 진행.
 
 ### Case 2: Post-Rename (Main H2P가 Rename 통과, SRT Checkpoint 존재)
 
 | 항목 | 위치 | 상태 |
 |------|------|------|
-| `reg_file_checkpoint_is_valid() == TRUE` 분기 | `exec_stage.c:579` | ✅ |
-| `bp_sched_recovery(main_h2p, ...)` 호출 | `exec_stage.c:588-589` | ✅ |
-| `recovery_scheduled = TRUE` (retirement 차단) | `exec_stage.c:594-596` | ✅ |
-| `recover_at_exec = FALSE` (double-recovery 방지) | `exec_stage.c:597` | ✅ |
+| `reg_file_checkpoint_is_valid() == TRUE` 분기 | `exec_stage.c:594` | ✅ |
+| `bp_sched_recovery(main_h2p, ...)` 호출 | `exec_stage.c:603-604` | ✅ |
+| `recovery_scheduled = TRUE` (retirement 차단) | `exec_stage.c:609-611` | ✅ |
+| `recover_at_exec = FALSE` (double-recovery 방지) | `exec_stage.c:612` | ✅ |
 
 **동작**: 다음 cycle `cmp_recover()`에서 SRT rollback + BP 복원 + 전체 flush + TEA 종료.
 Main H2P는 Node Table에 남아 execute되지만 `recover_at_exec == FALSE`이므로 recovery 재발 없음.
@@ -66,15 +53,15 @@ Main H2P는 Node Table에 남아 execute되지만 `recover_at_exec == FALSE`이�
 
 | Guard | 위치 | 상태 |
 |-------|------|------|
-| Off-path Main H2P skip | `exec_stage.c:573-575` | ✅ |
-| 이미 recovery 스케줄됨 skip (`recovery_sch`) | `exec_stage.c:578` | ✅ |
-| On-path TEA H2P만 Early Flush (oracle 활용) | `exec_stage.c:563` | ✅ |
+| Off-path Main H2P skip | `exec_stage.c:588-590` | ✅ |
+| 이미 recovery 스케줄됨 skip (`recovery_sch`) | `exec_stage.c:593` | ✅ |
+| On-path TEA H2P만 Early Flush (oracle 활용) | `exec_stage.c:578` | ✅ |
 
 ---
 
 ## 3. 핵심 코드
 
-### 3.1 exec_stage_bp_resolve() — TEA H2P 분기 (`exec_stage.c:554-627`)
+### 3.1 exec_stage_bp_resolve() — TEA H2P 분기 (`exec_stage.c:569-644`)
 
 ```c
 static inline void exec_stage_bp_resolve(Op* op) {
@@ -101,12 +88,13 @@ static inline void exec_stage_bp_resolve(Op* op) {
             } else {
               // Case 1: Pre-rename (no SRT checkpoint)
               if (main_h2p->decode_cycle) {
-                // Case 1a: decode 통과 → no-op
-                // bp_predict_op()에서 이미 recover_at_exec 설정됨
+                // Case 1a: decode 통과, rename 미통과
+                // recover_at_exec는 bp_predict_op()에서 이미 설정됨 → 자연 recovery
+                STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_NO_CHKPT);
               } else {
                 // Case 1b: decode 미도달
-                main_h2p->oracle_info.recover_at_decode = TRUE;
-                main_h2p->oracle_info.recover_at_exec = FALSE;
+                // recover_at_decode 설정 안 함 — Main H2P가 rename→exec 경로에서 자연 recovery
+                STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_DECODE);
               }
               recover_tea_on_flush(op->proc_id);
             }
@@ -295,15 +283,14 @@ Main H2P가 이미 decode를 통과한 상태이면:
    - `map_rename.c`에 `!reg_file_checkpoint_is_valid()` guard 추가 (Case 1에서 SRT rollback 안전 스킵)
    - 결과: 5/6 simpoint 정상 종료, leela/128383만 여전히 deadlock
 
-**미해결 deadlock 분석** (leela/128383):
-```
-Case 1b: recover_at_decode=TRUE 설정 (bp_sched_recovery 미호출)
-  → Main H2P가 decode에 도달해야 recovery 시작
-  → 하지만 GP free_num < 32 → MAP stall → IDQ full → decode stall
-  → Main H2P가 decode에 영원히 도달 못함 → FTQ full → ASSERT
-```
-- 다른 simpoint에서는 이 deadlock 조건에 걸리지 않음 (GP preg 충분 또는 Case 1b 미발생)
-- 해결하려면 Case 1b에서 즉시 recovery를 트리거하되, decode stage와의 이중 호출 문제를 해결해야 함
+**2026-04-12 최종 수정 — `recover_at_decode` 접근법 포기**:
 
-**⚠️ 부분 해결**: 마스터 문서 `TEA_implementation_plan.md` §13.1에 등록됨.
+`recover_at_decode=TRUE` 접근법은 Case 1b에서 MAP stall 시 deadlock을 유발하는 구조적 문제가 있어
+완전히 포기함. 현재 코드는 Case 1b에서 Main H2P의 flag를 일절 건드리지 않으며, TEA만 즉시 종료.
+
+Main H2P의 기존 `recover_at_exec=TRUE` flag가 자연스럽게 유지되어:
+- Main H2P가 rename 단계에 도달하면 SRT checkpoint 생성
+- exec 단계에 도달하면 기존 recovery 경로(`recover_at_exec`)로 정상 처리
+
+이 방식은 blender 기준으로 `TEA_EARLY_FLUSH_CASE1_DECODE = 43` 정상 동작 확인됨 (2026-04-12).
 

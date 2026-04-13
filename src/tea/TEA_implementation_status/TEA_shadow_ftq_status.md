@@ -65,7 +65,7 @@ trigger_tea_thread(proc_id, h2p_pc, h2p_op_num, h2p_op)
     │   (dependency_chain_cache.c:266)
     │
     ├─ shadow_rat_snapshot(proc_id) — Main RAT → Shadow RAT 복사
-    │   (tea_rename.c:176)
+    │   (tea_rename.c:189)
     │
     └─ reset_tea_fetch_stage(proc_id) — fetch state 초기화
         (tea_fetch_stage.c:87)
@@ -143,7 +143,7 @@ if (TEA_ENABLE && tea_is_active(proc_id)) {
 ```
 
 **호출 순서 (역순 파이프라인 업데이트)**:
-1. `update_tea_rename_stage()` (`tea_rename.c:395`): 이전 cycle의 fetch 출력(`sd`)을 rename
+1. `update_tea_rename_stage()` (`tea_rename.c:432`): 이전 cycle의 fetch 출력(`sd`)을 rename
    - Shadow RAT에서 src phys reg 읽기, TEA preg pool에서 dst 할당
    - Rename된 ops를 `rename->sd`에 저장 → `tea_dispatch_to_rs()`로 전달
 2. `update_tea_fetch_stage()` (`tea_fetch_stage.c:113`): 이번 cycle의 fetch 수행
@@ -256,6 +256,3 @@ BW Walk 시점에 미리 계산하여 저장한 것과 같다.
 
 3. **TEA_FETCH_WIDTH 기본값 작음**: 논문 8-wide 대비 기본값 2. Chain이 긴 경우
    (예: 30 ops) fetch에 15 cycles 소요. 논문 방식에서는 4 cycles.
-
-4. **BW Walk 트리거 미구현** (작업 A): `fill_buffer_add()`에서 `bw_engines->state = BW_WALKING`을
-   설정하는 코드가 없어서 `dependency_chain_caches`가 비어 있음 → TEA가 활성화되지 않음.

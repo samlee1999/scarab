@@ -250,8 +250,8 @@
 ### Debug
 --debug_inst_start              0
 --debug_inst_stop              -1
---debug_cycle_start            1
---debug_cycle_stop             500000
+--debug_cycle_start            10000500
+--debug_cycle_stop             10000600
 #--debug_model                      1  # debug Every pipleline (targeting at retiring)
 #--debug_map                         1
 #--debug_node_stage              1       # showing what CPU is doing now / show ROB and RS at before recovery and after recovery

@@ -99,22 +99,30 @@ void recover_tea_on_flush(uns proc_id, Counter recovery_op_num) {
 recover_tea_on_flush(bp_recovery_info->proc_id,
                      bp_recovery_info->recovery_op_num);
 
-// exec_stage.c:602 — Case 1 (Pre-rename)
-// Case 1에서는 TEA의 target H2P가 아직 rename 안 됨 → recovery가 나중에 발생
-// 이 시점에서 TEA를 즉시 종료해야 하므로 recovery_op_num을 target_h2p_op_num으로 전달
+// exec_stage.c:631 — Case 1 (Pre-rename, 양쪽 sub-case 공통)
+// Case 1a/1b 모두 recover_at_exec=TRUE를 유지한 채 TEA만 즉시 종료.
+// target_h2p_op_num >= target_h2p_op_num → TRUE → TEA 정상 종료.
 recover_tea_on_flush(op->proc_id, tea->target_h2p_op_num);
 ```
 
-**Case 1 설명**: `main_h2p->oracle_info.recover_at_decode = TRUE` 설정 후, Main H2P가
-decode에 도달할 때 `cmp_recover()`가 실행된다. 하지만 TEA는 이미 이 시점에서 종료해야 함
-(TEA ops가 잘못된 의존성 체인을 기반으로 실행 중이므로). `recovery_op_num`으로
-`target_h2p_op_num`을 전달하면 `target_h2p_op_num >= target_h2p_op_num`은 TRUE이므로
-조건을 만족한다. 따라서 Case 1도 별도 처리 없이 동일한 `recover_tea_on_flush()` 호출로 처리 가능하다.
+**Case 1 현재 구현**: 현재 `exec_stage.c`는 Case 1을 두 sub-case로 구분한다:
 
-**참고**: 이전에 `>` 연산자를 사용했을 때는 `==` 케이스에서 조건이 FALSE가 되어
-Case 1 별도 처리(직접 terminate 또는 force 플래그)가 필요했으나, `>=`로 수정하여 해결됨.
-Case 2에서도 `cmp_recover()` → `recover_tea_on_flush(recovery_op_num = main_h2p->op_num)`
-호출 시 동일한 `==` 케이스가 발생하므로, `>=`가 두 케이스 모두에서 올바르게 동작한다.
+- **Case 1a** (`main_h2p->decode_cycle > 0`): Main H2P가 decode를 통과했지만 아직
+  rename 전. `recover_at_exec = TRUE`를 유지하여 Main H2P가 exec에 도달할 때 정상
+  recovery 발동. TEA만 즉시 종료 (`TEA_EARLY_FLUSH_CASE1_NO_CHKPT`).
+- **Case 1b** (`main_h2p->decode_cycle == 0`): Main H2P가 아직 decode 전.
+  `recover_at_decode = TRUE`를 **사용하지 않음** — 이 경로는 `flush_mispredict()`와
+  SRT rollback을 건너뛰어 off-path preg allocation이 ALLOC orphan으로 누수되고
+  SRT 불일치가 발생하기 때문. `recover_at_exec = TRUE`를 유지하여 Main H2P가
+  rename → exec를 정상 통과할 때 proper recovery 발동. TEA만 즉시 종료
+  (`TEA_EARLY_FLUSH_CASE1_DECODE`).
+
+두 sub-case 모두 `recover_tea_on_flush()` 단일 호출로 처리되며, EF-1 적용 후에도
+`recovery_op_num = target_h2p_op_num`을 전달하면 `>=` 조건에서 TRUE가 되어 TEA가 종료됨.
+
+**참고**: `>=` 연산자 이유 — `>` 사용 시 `target_h2p_op_num == recovery_op_num`인 케이스
+(Case 1 + Case 2 모두 해당)에서 조건이 FALSE가 되어 TEA가 종료되지 않는 버그 발생.
+`>=`로 수정하여 두 케이스 모두에서 올바르게 동작한다.
 
 ### 2.5 수정 파일
 

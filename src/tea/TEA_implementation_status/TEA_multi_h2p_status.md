@@ -1,6 +1,6 @@
 # TEA 다중 H2P+DC 현재 구현 상태
 
-**최종 갱신**: 2026-03-11
+**최종 갱신**: 2026-04-12
 **관련 계획**: [`TEA_multi_h2p_plan.md`](../TEA_implementation_plan/TEA_multi_h2p_plan.md)
 **마스터 문서**: [`TEA_implementation_plan.md`](../TEA_implementation_plan.md) Section 3.4, 8
 
@@ -49,7 +49,7 @@ typedef struct Tea_Thread_struct {
   /* TEA 파이프라인 — 전체 합산 카운터 */
   uns tea_op_count;                // Line 64: per-chain 구분 불가
   Counter tea_ops_fetched;         // Line 65
-  Counter tea_op_counter;          // Line 66
+  Counter tea_op_counter;          // Line 66: 0x8000000000000000 으로 초기화
   // ...
 } Tea_Thread;
 ```
@@ -58,7 +58,7 @@ typedef struct Tea_Thread_struct {
 
 ### 2.2 `trigger_tea_thread()` 게이트
 
-**파일**: `tea/tea_thread.c:110-114`
+**파일**: `tea/tea_thread.c:110-115`
 
 ```c
 if (tea->state != TEA_IDLE) {
@@ -79,6 +79,7 @@ Dependency_Chain_Cache_Entry* active_chain;  // Line 52: 하나의 chain만 fetc
 int current_chain_idx;                       // Line 53
 int total_chain_length;                      // Line 54
 Flag fetch_complete;                         // Line 57: 단일 완료 플래그
+Counter ops_fetched_this_cycle;              // Line 58
 ```
 
 **문제**: chain 전환 메커니즘이 없으므로, Chain A fetch 완료 후 Chain B로 넘어가는
@@ -86,7 +87,7 @@ Flag fetch_complete;                         // Line 57: 단일 완료 플래그
 
 ### 2.4 `tea_create_op_from_cache()` — chain ID 미부여
 
-**파일**: `tea/tea_fetch_stage.c:189-237`
+**파일**: `tea/tea_fetch_stage.c:195-243`
 
 - `tea_op->thread_id = 1`만 설정, `h2p_chain_id`는 `Op` 구조체에 필드 자체가 없음
 - H2P branch의 oracle/recovery 정보를 `tea->h2p_oracle_info` 단일 값에서 복사
@@ -118,6 +119,7 @@ switch (tea->state) {
 **파일**: `tea/tea_thread.c:154-185`
 
 ```c
+// tea_thread.c:154-185
 recover_tea_fetch_stage(proc_id);        // Line 166: 전체 fetch stage flush
 recover_tea_rename_stage(proc_id);       // Line 167: 전체 rename stage flush
 flush_tea_ops_from_node_stage(proc_id);  // Line 168: 모든 thread_id==1 ops flush
@@ -130,7 +132,7 @@ reset_tea_store_buffer(proc_id);         // Line 174: 전체 store buffer 리셋
 
 ### 2.7 `exec_stage_bp_resolve()` — 단일 H2P PC 비교
 
-**파일**: `exec_stage.c:561`
+**파일**: `exec_stage.c:576`
 
 ```c
 if (op->inst_info->addr == tea->target_h2p_pc) {  // 단일 PC만 비교
@@ -185,13 +187,13 @@ typedef struct Tea_Store_Buffer_Entry_struct {
 
 | # | 컴포넌트 | 파일:라인 | 호환 이유 |
 |---|---------|----------|----------|
-| 1 | RS 파티셔닝 | `node_issue_queue.cc:97-116` | `thread_id` 기반 카운터 |
-| 2 | 2-pass 스케줄링 (TEA 우선) | `node_issue_queue.cc:395-443` | `thread_id==1` 전체 우선 |
-| 3 | `tea_dispatch_to_rs()` | `node_stage.c:401-457` | `thread_id==1` 체크만 사용 |
+| 1 | RS 파티셔닝 | `node_issue_queue.cc:100-111` | `thread_id` 기반 카운터 |
+| 2 | 2-pass 스케줄링 (TEA 우선) | `node_issue_queue.cc:403-446` | `thread_id==1` 전체 우선 |
+| 3 | `tea_dispatch_to_rs()` | `node_stage.c:418` | `thread_id==1` 체크만 사용 |
 | 4 | Node Table 링크드 리스트 | `node_stage.c` | 모든 TEA ops 공존 가능 |
-| 5 | `node_retire_tea_ops()` | `node_stage.c:585-615` | `thread_id==1`이면 모두 처리 |
-| 6 | `flush_window()` TEA skip | `node_stage.c:247-251` | `thread_id==1` → skip |
-| 7 | `flush_tea_ops_from_node_stage()` | `node_stage.c:1005-1094` | `thread_id==1` 일괄 제거 |
+| 5 | `node_retire_tea_ops()` | `node_stage.c:659` | `thread_id==1`이면 모두 처리 |
+| 6 | `flush_window()` TEA skip | `node_stage.c:252-260` | `thread_id==1` → skip |
+| 7 | `flush_tea_ops_from_node_stage()` | `node_stage.c:1127` | `thread_id==1` 일괄 제거 |
 | 8 | Main RAT에서 TEA 제외 | `map_rename.c:1591-1615` | `thread_id==1` → return |
 | 9 | `exec_stage_clear_fu()` TEA 처리 | `exec_stage.c:475-494` | `thread_id==1` dispatch |
 | 10 | Dcache TEA load/store | `dcache_stage.c:228-267` | 주소 기반, H2P 무관 |
@@ -204,10 +206,10 @@ typedef struct Tea_Store_Buffer_Entry_struct {
 다중 H2P에서는 `flush_tea_ops_by_chain_id()`를 추가하되,
 전체 종료가 필요한 경우에는 기존 함수도 유지.
 
-**⚠️ 2026-03-16 Bug Fix 반영 필수**: `flush_tea_ops_by_chain_id()` 구현 시 아래 수정사항을 반드시 적용:
-- **RS 카운터 감소 조건** (Bug Fix 8.1): `state != OS_IN_ROB && != OS_SCHEDULED && != OS_MISS && != OS_DONE` (기존 3-state 체크 대신)
-- **next_op_into_rs 처리** (Bug Fix 8.3): NULL 대신 다음 non-target op으로 전진
-- 상세: `TEA_op_manage_status.md` §8 참조
+**⚠️ `flush_tea_ops_by_chain_id()` 구현 시 적용 필수**: `flush_tea_ops_from_node_stage()` (`node_stage.c:1127`)의 5-step 로직 참조:
+- **RS 카운터 감소 조건**: whitelist 기반 (`OS_IN_RS || OS_READY || OS_WAIT_FWD`) — OS_IN_ROB/SCHEDULED/MISS/DONE 제외
+- **next_op_into_rs 처리**: NULL이 아닌 다음 non-target op으로 전진
+- 상세: `TEA_op_manage_status.md` §3, §5 참조
 
 ---
 
@@ -246,8 +248,12 @@ typedef struct Tea_Store_Buffer_Entry_struct {
 
 | 전제 작업 | 상태 | 설명 |
 |----------|------|------|
-| 작업 A: BW Walk Trigger | ❌ 미구현 | Dep Chain Cache가 비어 TEA 자체가 미활성 |
-| 작업 G: TEA 의존성 Wakeup | ❌ 미구현 | TEA ops의 타이밍이 무의미 (즉시 issue) |
+| 작업 A: BW Walk Trigger | ✅ 완료 | `fill_buffer.c:59-71` — H2P eviction 시 `engine->state = BW_WALKING` 설정 |
+| 작업 G: TEA 의존성 Wakeup | ✅ 완료 | Shadow RAT producer 추적 + `add_to_wake_up_lists()` (`tea_rename.c:502-593`) |
+| 작업 I: 독립 Dispatch | ✅ 완료 | `tea_dispatch_to_rs()` 직접 RS dispatch, `tea_dispatch_retry()`, `node_issue_queue_dispatch()`에서 `thread_id==1` skip |
+| Op Pool Backpressure | ✅ 완료 | `rename->sd.op_count > 0` stall (`tea_rename.c:443`), `tea_fetch->sd.op_count > 0` stall (`tea_fetch_stage.c:152`) |
+| 단일 H2P 시뮬레이션 검증 | ✅ 완료 | blender simpoint 25328 정상 완료 (2026-04-12) |
 
-다중 H2P 구현(작업 F)은 작업 A, G가 완료된 후 단일 H2P의 정상 동작이 검증된
-상태에서 진행해야 함 (`TEA_implementation_plan.md` Section 10 우선순위 참조).
+다중 H2P 구현(작업 F)은 단일 H2P의 정상 동작이 검증된 상태에서 진행.
+현재 blender 기준 96.2% TEA_TRIGGER_SKIP_ACTIVE → Work F가 핵심 성능 개선 포인트.
+(`TEA_implementation_plan.md` §3 우선순위 참조)

@@ -200,7 +200,7 @@ Op* tea_create_op_from_cache(uns proc_id, Op* cached_op, Flag is_h2p_branch) {
 }
 ```
 
-### 3.2 TEA Rename (`tea_rename.c:494-585`)
+### 3.2 TEA Rename (`tea_rename.c:502-593`)
 
 ```c
 void tea_rename_op(uns proc_id, Op* op) {
@@ -460,5 +460,5 @@ flushed producer의 not-rdy bit를 강제 clear. `op_pool_valid + unique_num` �
 | `exec_stage.c` | TEA op 완료 + wakeup 호출 | `exec_stage_dep_wakeup()`, `exec_stage_clear_fu()` |
 | `node_issue_queue.cc` | RS dispatch 시 ready 판별 | `node_issue_queue_dispatch()` |
 | `map_rename.c` | `reg_file_consume()` — TEA skip | `reg_file_consume()` |
-| `tea/tea_rename.h` | Shadow_RAT (producer 없음) | — |
+| `tea/tea_rename.h` | Shadow_RAT + producer 추적 필드 (`tea_rename.h:84-88`) | — |
 | `tea/tea_rename.c` | `shadow_rat_snapshot()`, `tea_rename_op()` | — |
