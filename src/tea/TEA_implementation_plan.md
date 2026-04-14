@@ -145,9 +145,14 @@ IPC: TEA_OFF=2.273 → TEA_ON=2.235 (-1.65%)  ← Work F로 개선 필요
 
 ## 6. 작업 F: 다중 H2P+DC 동시 처리 ★ 현재 단계
 
-**상세 계획**: [`TEA_multi_h2p_plan.md`](TEA_implementation_plan/TEA_multi_h2p_plan.md)
-**Fetch stage 상세**: [`TEA_shadow_ftq_plan.md`](TEA_implementation_plan/TEA_shadow_ftq_plan.md) (F.3 chain 전환 로직)
-**현재 상태**: [`TEA_multi_h2p_status.md`](TEA_implementation_status/TEA_multi_h2p_status.md)
+**상세 계획 (구역별)**:
+- 전체 아키텍처 & Phase 구분: [`TEA_multi_h2p_plan.md`](TEA_implementation_plan/TEA_multi_h2p_plan.md)
+- Fetch stage chain 전환 (F.3): [`TEA_shadow_ftq_plan.md`](TEA_implementation_plan/TEA_shadow_ftq_plan.md)
+- Per-chain Op 관리 / `terminate_tea_chain()` / `flush_tea_ops_by_chain_id()`: [`TEA_op_manage_plan.md`](TEA_implementation_plan/TEA_op_manage_plan.md)
+- Early Flush 다중화 (EF-1 시그니처, EF-2 per-chain flush, EF-3 SRT checkpoint): [`TEA_early_flush_plan.md`](TEA_implementation_plan/TEA_early_flush_plan.md)
+- 다중 H2P Reg Dependency 관리 (not-rdy bit 정리): [`TEA_reg_dependency_plan.md`](TEA_implementation_plan/TEA_reg_dependency_plan.md) §4
+
+**현재 상태**: [`TEA_multi_h2p_status.md`](TEA_implementation_status/TEA_multi_h2p_status.md), [`TEA_op_manage_status.md`](TEA_implementation_status/TEA_op_manage_status.md), [`TEA_early_flush_status.md`](TEA_implementation_status/TEA_early_flush_status.md), [`TEA_reg_dependency_status.md`](TEA_implementation_status/TEA_reg_dependency_status.md)
 
 ### 문제
 
@@ -231,3 +236,24 @@ IPC TEA_ON > TEA_OFF (성능 개선 확인)
 |------|------|------|------|
 | FTQ deadlock (Case 1) | `decoupled_frontend.cc:280` | ✅ 해결 (2026-03-26) | `decode_cycle` 기반 Case 1a/1b 분기, `recover_at_exec` 이중 설정 제거 |
 | Op pool 고갈 ASSERT | `op_pool.c` | ✅ 해결 (2026-04-12) | Rename/Fetch stage backpressure stall 추가 — undispatched ops 덮어쓰기 방지 |
+
+---
+
+## 11. 구현 계획·상태 문서 인덱스
+
+각 feature의 상세 계획과 현재 상태는 서브디렉토리의 개별 문서에 있다.
+아래 표는 master plan과 개별 문서 간의 매핑이다.
+
+| 주제 | 계획 (`TEA_implementation_plan/`) | 상태 (`TEA_implementation_status/`) | 연결된 Master 섹션 |
+|------|----------------------------------|-------------------------------------|-------------------|
+| 독립 Dispatch (Work I) — ✅ | [`TEA_dispatch_plan.md`](TEA_implementation_plan/TEA_dispatch_plan.md) | — | §2 완료, §5 |
+| Reg Dependency / Wakeup (Work G + Work F §4) | [`TEA_reg_dependency_plan.md`](TEA_implementation_plan/TEA_reg_dependency_plan.md) | [`TEA_reg_dependency_status.md`](TEA_implementation_status/TEA_reg_dependency_status.md) | §2 완료, §6 |
+| Early Flush (Case 1/2 완료, EF-1~4 미구현) | [`TEA_early_flush_plan.md`](TEA_implementation_plan/TEA_early_flush_plan.md) | [`TEA_early_flush_status.md`](TEA_implementation_status/TEA_early_flush_status.md) | §2 완료, §6 |
+| Op Pool / Backpressure / 다중 H2P Op 관리 | [`TEA_op_manage_plan.md`](TEA_implementation_plan/TEA_op_manage_plan.md) | [`TEA_op_manage_status.md`](TEA_implementation_status/TEA_op_manage_status.md) | §2 완료, §6 |
+| 다중 H2P+DC 전체 아키텍처 (Work F) | [`TEA_multi_h2p_plan.md`](TEA_implementation_plan/TEA_multi_h2p_plan.md) | [`TEA_multi_h2p_status.md`](TEA_implementation_status/TEA_multi_h2p_status.md) | §6 |
+| Shadow FTQ / Fetch stage chain 전환 (Work F F.3) | [`TEA_shadow_ftq_plan.md`](TEA_implementation_plan/TEA_shadow_ftq_plan.md) | [`TEA_shadow_ftq_status.md`](TEA_implementation_status/TEA_shadow_ftq_status.md) | §6 |
+| Hybrid Chain / `periodically_reset_caches()` (Work C+HC) | [`TEA_hybrid_chain_plan.md`](TEA_implementation_plan/TEA_hybrid_chain_plan.md) | — | §7 |
+
+TEA 코드를 수정하기 전에 (1) 관련 주제의 상태 문서로 현재 구현 상황을 확인하고,
+(2) 계획 문서로 수정 범위와 설계 결정을 파악한 뒤,
+(3) 작업 완료 후 상태 문서와 master plan §2/§3을 갱신한다.

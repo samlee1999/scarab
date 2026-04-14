@@ -364,16 +364,38 @@ Flag tea_is_active(uns proc_id) {
 }
 ```
 
-### 3.6 `tea_op_completed()` / `tea_op_flushed()` — per-chain count
+> **주의: `tea_is_active()` 호출부 6곳 전수 재확인 필요**
+>
+> 의미는 "inactive → 파이프라인 업데이트 skip"으로 동일하게 유지되지만, 전환 시
+> 각 호출 site에서 `num_active_chains > 0` 의미가 기존 `state != TEA_IDLE` 의미와
+> 동치인지 반드시 확인할 것.
+>
+> | 파일 | 라인 | 호출 컨텍스트 |
+> |------|------|---------------|
+> | `src/cmp_model.c` | 285 | `update_tea_*()` 진입 gate |
+> | `src/cmp_model.c` | 390 | `recover_tea_on_flush()` early return |
+> | `src/node_stage.c` | 543 | dispatch 시 TEA ops 처리 gate |
+> | `src/node_stage.c` | 557 | 동일 context |
+> | `src/node_issue_queue.cc` | 397 | 2-pass scheduling TEA skip |
+> | `src/exec_stage.c` | 572 | `exec_stage_bp_resolve()` 내 TEA gate |
+>
+> 특히 `recover_tea_on_flush()` 호출부(`cmp_model.c:390`)는 다중 H2P 변환 후 생존
+> chain이 있으면 함수 내부에서 `num_active_chains > 0`이 TRUE인 상태로 진입해야
+> 하므로 **early return 제거** 또는 `num_active_chains == 0`으로 변경 필요
+> (`TEA_early_flush_plan.md §3.6` 참조).
+
+### 3.6 `tea_op_completed()` — op 상태 전환만 (방안 A)
+
+> **중요**: `tea_op_count` 감소는 이 함수가 아닌 `node_retire_tea_ops()`에서 수행.
+> 이유: 0-latency op의 use-after-free 방지 (`TEA_op_manage_plan.md §4.1` 참조).
+> 감소 구현은 `TEA_op_manage_plan.md §4.3` 참조.
 
 ```c
 void tea_op_completed(uns proc_id, Op* op) {
-  Tea_Thread* tea = tea_threads[proc_id];
-  int chain_id = op->h2p_chain_id - 1;  // 1-based → 0-based
-  ASSERT(proc_id, chain_id >= 0 && chain_id < MAX_TEA_CHAINS);
-
-  Tea_H2P_Chain* c = &tea->chains[chain_id];
-  if (c->tea_op_count > 0) c->tea_op_count--;
+  /* op->state = OS_DONE 설정 필수: 이것이 없으면 node_retire_tea_ops()가
+   * TEA op을 retire하지 못해 ROB 누적 → deadlock.
+   * 카운터 감소는 node_retire_tea_ops()에서 담당 (현재 단일 H2P와 동일). */
+  op->state = OS_DONE;
   STAT_EVENT(proc_id, TEA_OPS_EXECUTED);
 }
 ```

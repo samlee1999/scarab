@@ -55,9 +55,9 @@ TEA documentation lives in `src/tea/`:
 | `src/tea/TEA_implementation_plan/` | Per-feature detailed plans (dispatch, early flush, multi-H2P, etc.) |
 | `src/tea/TEA_implementation_status/` | Per-feature current status with code references and bug history |
 
-**Before working on any TEA-related code**, read the master plan (`src/tea/TEA_implementation_plan.md`) §2 (current state) and §10 (priority), then the relevant plan/status files for the specific feature.
+**Before working on any TEA-related code**, read the master plan (`src/tea/TEA_implementation_plan.md`) §2 (current state) and §3 (priority), then the relevant plan/status files for the specific feature. The master plan §11 lists all per-feature plan/status docs.
 
-**After completing a piece of TEA logic**, update the corresponding status file in `src/tea/TEA_implementation_status/` and the master plan §2/§13 if applicable.
+**After completing a piece of TEA logic**, update the corresponding status file in `src/tea/TEA_implementation_status/` and the master plan §2/§3 if applicable.
 
 ### Current TEA State (critical context)
 
@@ -67,7 +67,7 @@ TEA is **not yet functional end-to-end**. Key gaps (in priority order):
 3. ~~**Work I**: Independent dispatch needed — TEA/Main share single dispatch stream, causing ASSERT failures~~ — ✅ 구현 완료 (`node_stage.c`: `tea_dispatch_to_rs()`, `tea_dispatch_retry()`; `node_issue_queue.cc`: TEA ops skip in dispatch, 2-pass scheduling)
 4. **Work F**: Multi-H2P — only single H2P chain supported
 
-Implementation priority: **A → G → I → C → F → B** (see master plan (`/home/lee/scarab/src/tea/TEA_implementation_plan.md`) §10)
+Implementation priority: **A → G → I → C → F → B** (see master plan (`/home/lee/scarab/src/tea/TEA_implementation_plan.md`) §3)
 
 ## Build & Run via scarab-infra (primary workflow)
 

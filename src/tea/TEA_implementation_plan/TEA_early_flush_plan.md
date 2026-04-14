@@ -83,10 +83,15 @@ void recover_tea_on_flush(uns proc_id, Counter recovery_op_num) {
   /* 2. 현재 활성 TEA의 target_h2p_op_num >= recovery_op_num이면 종료
    *    (활성 H2P 자체가 flush 대상이거나 recovery point와 동일) */
   if (tea->target_h2p_op_num >= recovery_op_num) {
+    /* terminate_tea_thread()가 내부에서 다음 작업을 모두 수행하므로
+     * 외부 reset_* 호출은 중복이다 (tea_thread.c:154-185 참조):
+     *   - recover_tea_fetch_stage()  → reset_tea_fetch_stage()
+     *   - recover_tea_rename_stage() → reset_tea_rename_stage()
+     *   - flush_tea_ops_from_node_stage()
+     *   - reset_tea_preg_pool()
+     *   - reset_tea_store_buffer()
+     * 기존 단일 H2P 코드의 중복 reset_* 3줄은 제거된다. */
     terminate_tea_thread(proc_id);
-    reset_tea_fetch_stage(proc_id);
-    reset_tea_rename_stage(proc_id);
-    reset_tea_preg_pool(proc_id);
   }
   /* else: 활성 H2P가 flush 대상이 아니면 TEA 유지 (최적화) */
 }
@@ -123,6 +128,23 @@ recover_tea_on_flush(op->proc_id, tea->target_h2p_op_num);
 **참고**: `>=` 연산자 이유 — `>` 사용 시 `target_h2p_op_num == recovery_op_num`인 케이스
 (Case 1 + Case 2 모두 해당)에서 조건이 FALSE가 되어 TEA가 종료되지 않는 버그 발생.
 `>=`로 수정하여 두 케이스 모두에서 올바르게 동작한다.
+
+> **⚠️ 다중 H2P 전환 시 Case 1 경로 교체 필수**
+>
+> 단일 H2P EF-1에서는 `exec_stage.c:631` Case 1이 `recover_tea_on_flush()`를 경유해도
+> chain이 1개뿐이라 결과적으로 `terminate_tea_thread()`로 수렴하지만, 다중 H2P에서는
+> `recover_tea_on_flush()`가 **모든 younger chain**을 종료하므로 mispredicted H2P 이외의
+> 정상 chain까지 불필요하게 종료된다. EF-2 전환 시 이 호출부를 다음과 같이 교체해야 함:
+>
+> ```c
+> // 단일 H2P (EF-1):
+> recover_tea_on_flush(op->proc_id, tea->target_h2p_op_num);
+>
+> // 다중 H2P (EF-2, 본 문서 §3.3): mispredicted chain만 직접 종료
+> terminate_tea_chain(op->proc_id, chain_idx);
+> ```
+>
+> EF-1 구현 시 이 경로를 별도 래퍼나 주석으로 표시해두면 EF-2 전환 시 누락을 방지할 수 있다.
 
 ### 2.5 수정 파일
 
@@ -365,10 +387,14 @@ void flush_tea_ops_by_chain_id(uns proc_id, uns8 chain_id) {
     if (op->thread_id == 1 && op->h2p_chain_id == chain_id) {
       *last = op->next_node;
       op->in_node_list = FALSE;
-      /* RS 카운터 감소: dispatch 후 아직 issue 완료되지 않은 모든 상태
-       * (Bug Fix 8.1 반영: OS_TENTATIVE/WAIT_DCACHE/WAIT_MEM도 포함) */
-      if (op->state != OS_IN_ROB && op->state != OS_SCHEDULED &&
-          op->state != OS_MISS && op->state != OS_DONE) {
+      /* RS 카운터 감소: pre-scheduling 상태에서만 (whitelist).
+       * 현재 flush_tea_ops_from_node_stage() (node_stage.c:1224-1226)와 동일.
+       * OS_SCHEDULED/OS_MISS는 scheduling 시 clear()가 이미 감소했고,
+       * OS_WAIT_DCACHE/OS_WAIT_MEM/OS_DONE 등 post-scheduling 상태도
+       * clear()가 이미 처리했으므로 decrement 불필요 (double-decrement → underflow 방지). */
+      if (op->state == OS_IN_RS || op->state == OS_READY ||
+          op->state == OS_WAIT_FWD || op->state == OS_SLEEP ||
+          op->state == OS_LOW_PRIORITY || op->state == OS_TENTATIVE) {
         if (node_local->rs[op->rs_id].rs_op_count > 0)
           node_local->rs[op->rs_id].rs_op_count--;
         if (node_local->rs[op->rs_id].tea_op_count > 0)

@@ -141,10 +141,14 @@ void flush_tea_ops_by_chain_id(uns proc_id, uns8 chain_id) {
       *last = op->next_node;
       op->in_node_list = FALSE;
 
-      /* RS 카운터 감소: dispatch 후 아직 issue 완료되지 않은 모든 상태
-       * (Bug Fix 8.1 반영: OS_TENTATIVE/WAIT_DCACHE/WAIT_MEM도 포함) */
-      if (op->state != OS_IN_ROB && op->state != OS_SCHEDULED &&
-          op->state != OS_MISS && op->state != OS_DONE) {
+      /* RS 카운터 감소: pre-scheduling 상태에서만 (whitelist).
+       * 현재 flush_tea_ops_from_node_stage() (node_stage.c:1224-1226)와 동일.
+       * OS_SCHEDULED/OS_MISS는 scheduling 시 clear()가 이미 감소했고,
+       * OS_WAIT_DCACHE/OS_WAIT_MEM/OS_DONE 등 post-scheduling 상태도
+       * clear()가 이미 처리했으므로 decrement 불필요 (double-decrement → underflow 방지). */
+      if (op->state == OS_IN_RS || op->state == OS_READY ||
+          op->state == OS_WAIT_FWD || op->state == OS_SLEEP ||
+          op->state == OS_LOW_PRIORITY || op->state == OS_TENTATIVE) {
         if (node_local->rs[op->rs_id].rs_op_count > 0)
           node_local->rs[op->rs_id].rs_op_count--;
         if (node_local->rs[op->rs_id].tea_op_count > 0)
@@ -284,65 +288,71 @@ void terminate_tea_chain(uns proc_id, uns chain_slot) {
 
 ---
 
-## 4. Per-Chain `tea_op_count` 추적
+## 4. Per-Chain `tea_op_count` 추적 (방안 A)
 
-### 4.1 문제점
+### 4.1 현재 동작 및 문제점
 
-현재 `tea_op_completed()` (`tea_thread.c:251-263`)는 전체 `tea->tea_op_count`만 감소.
-다중 H2P에서는 chain별 카운터를 감소시켜야 개별 chain 완료를 감지할 수 있다.
+**현재 단일 H2P 동작**:
+- `tea_op_completed()` (`tea_thread.c:251-265`): `op->state = OS_DONE` 설정 + `STAT_EVENT`만 수행. **카운터 감소 없음**.
+- `node_retire_tea_ops()` (`node_stage.c:692-705`): op을 node table에서 물리적으로 제거하는 시점에 `tea->tea_op_count--` 수행 — **유일한 감소 지점**.
 
-**`node_retire_tea_ops()`에서 `tea_op_completed()`를 추가 호출해서는 안 됨**:
-`tea_op_completed()`는 이미 `exec_stage_clear_fu()` (비메모리 ops)와 `dcache_stage` (메모리 ops)에서
-각 op 실행 완료 시 호출된다 (`TEA_op_manage_status.md` §5.1 참조). `node_retire_tea_ops()`에서
-추가로 호출하면 per-chain `tea_op_count`가 **이중 감소**되어 chain이 조기 종료된다.
-따라서 `tea_op_completed()` 내부에서 per-chain 카운터 감소를 추가하는 것만으로 충분하다.
+**이 설계의 이유 (0-latency op 안전성)**:
+`op_latency == 0`인 op의 경우, `exec_stage`가 같은 cycle에 `tea_op_completed()`를 호출하면서 `exec_stage_clear_fu()`는 다음 cycle로 예약한다. 그 사이 `node_retire_tea_ops()`가 해당 op을 `free_op()`하면 `clear_fu()`가 접근하는 op 포인터는 use-after-free가 된다. 따라서 **파이프라인에서 완전히 떠난 시점(=retire)**이 유일하게 안전한 감소 지점이다.
 
-### 4.2 `tea_op_completed()` 수정
+**다중 H2P에서의 문제**:
+- `TEA_multi_h2p_plan.md:120`이 전역 `tea->tea_op_count` 필드를 삭제하고 per-chain `chains[i].tea_op_count`로 이동시킴.
+- 따라서 `node_retire_tea_ops()`의 기존 전역 감소 코드는 **컴파일 불가** — per-chain 감소로 변경해야 함.
+- 감소 지점은 **그대로 `node_retire_tea_ops()` 유지** (0-latency op 안전성 불변). `tea_op_completed()`는 변경하지 않음.
 
-**파일**: `src/tea/tea_thread.c`
+### 4.2 `tea_op_completed()` — 변경 없음
+
+**파일**: `src/tea/tea_thread.c` (변경하지 않음)
+
+현재 동작 그대로 유지. `op->state = OS_DONE` 설정과 `STAT_EVENT`만 수행하고 카운터는 건드리지 않는다.
 
 ```c
 void tea_op_completed(uns proc_id, Op* op) {
-  Tea_Thread* tea = tea_threads[proc_id];
-
-  /* Per-chain count 감소 */
-  uns chain_slot = op->h2p_chain_id - 1;  // 1-based → 0-based
-  ASSERT(proc_id, chain_slot < MAX_TEA_CHAINS);
-  Tea_H2P_Chain* c = &tea->chains[chain_slot];
-  if (c->tea_op_count > 0) c->tea_op_count--;
-
-  /* Chain의 모든 ops 완료 시 chain 종료 */
-  if (c->tea_op_count == 0 && c->tea_ops_fetched > 0 &&
-      c->state == CHAIN_EXECUTING) {
-    terminate_tea_chain(proc_id, chain_slot);
-  }
-
+  /* tea_op_count 감소는 이 함수에서 하지 않음. node_retire_tea_ops()가 담당.
+   * 0-latency op의 use-after-free 방지 설계 (§4.1 참조). */
+  op->state = OS_DONE;
   STAT_EVENT(proc_id, TEA_OPS_EXECUTED);
 }
 ```
 
-### 4.3 `node_retire_tea_ops()` — 변경 없음
+> **주의**: `tea_op_completed()`에 per-chain `c->tea_op_count--`를 추가하면 `node_retire_tea_ops()`의 감소와 겹쳐 **이중 감소** 발생. 반드시 둘 중 하나에서만 감소시킬 것.
 
-`node_retire_tea_ops()`는 **기존과 동일하게 retire만 담당** (`free_op()` 호출).
-`tea_op_completed()`를 추가 호출하지 **않는다** — 이미 `exec_stage_clear_fu()` (비메모리)와
-`dcache_stage` (메모리)에서 각 op 실행 완료 시 1회 호출되므로, 여기서 추가하면 이중 감소.
+### 4.3 `node_retire_tea_ops()` — Per-Chain 감소로 변경
 
-§4.2의 수정된 `tea_op_completed()`가 per-chain 카운터를 감소하므로, 기존 호출 경로만으로
-per-chain counting이 정확히 동작한다.
+**파일**: `src/node_stage.c` (`node_retire_tea_ops()` 내부, 기존 전역 감소 블록 교체)
 
-**종료 판단**: `tea_op_completed()`에서는 카운터 감소만 하고, `update_tea_thread()`의
-per-chain 루프에서 `tea_op_count == 0` chain을 종료 (현재 단일 H2P 방식과 동일한 패턴).
+**기존 코드** (`node_stage.c:692-705`):
+```c
+if (tea_threads && tea_threads[node->proc_id]) {
+  Tea_Thread* tea_state = tea_threads[node->proc_id];
+  if (tea_state->tea_op_count > 0)
+    tea_state->tea_op_count--;
+}
+```
+
+**수정 후 (방안 A)**:
+```c
+/* Per-chain tea_op_count 감소 — free_op() 직전.
+ * 여기가 감소 지점인 이유: 0-latency op가 같은 cycle에 exec → clear_fu를
+ * 거치는 동안 op 포인터 유효성을 보장하기 위해, 물리적으로 node table에서
+ * 제거되는 이 시점까지 카운터를 유지해야 함 (§4.1 참조). */
+if (tea_threads && tea_threads[node->proc_id]) {
+  Tea_Thread* tea_state = tea_threads[node->proc_id];
+  int slot = op->h2p_chain_id - 1;  // 1-based → 0-based
+  if (slot >= 0 && slot < MAX_TEA_CHAINS &&
+      tea_state->chains[slot].tea_op_count > 0) {
+    tea_state->chains[slot].tea_op_count--;
+  }
+}
+```
+
+**종료 판단**: `update_tea_thread()`의 per-chain 루프가 `c->tea_op_count == 0 && c->tea_ops_fetched > 0 && c->state == CHAIN_EXECUTING` 조건으로 chain 종료를 감지 (`TEA_multi_h2p_plan.md §3.5`).
 
 ```c
-// tea_op_completed() — 카운터 감소만 (exec/dcache에서 호출)
-void tea_op_completed(uns proc_id, Op* op) {
-  Tea_Thread* tea = tea_threads[proc_id];
-  uns chain_slot = op->h2p_chain_id - 1;
-  Tea_H2P_Chain* c = &tea->chains[chain_slot];
-  if (c->tea_op_count > 0) c->tea_op_count--;
-  STAT_EVENT(proc_id, TEA_OPS_EXECUTED);
-}
-
 // update_tea_thread() — per-chain 종료 판단
 void update_tea_thread(uns proc_id) {
   Tea_Thread* tea = tea_threads[proc_id];
@@ -414,7 +424,7 @@ bottleneck."
 | `src/tea/tea_fetch_stage.c` | op 생성 시 `h2p_chain_id` 할당, `recover_tea_fetch_stage_by_chain()` 추가 |
 | `src/tea/tea_rename.c` | `recover_tea_rename_stage_by_chain()` 추가 |
 | `src/tea/tea_store_buffer.h/c` | entry에 `chain_id` 필드, `tea_store_buffer_clear_by_chain_id()` 추가 |
-| `src/node_stage.c` | `flush_tea_ops_by_chain_id()` 추가 (`node_retire_tea_ops()`는 변경 없음) |
+| `src/node_stage.c` | `flush_tea_ops_by_chain_id()` 추가, `node_retire_tea_ops()`의 `tea_op_count--`를 per-chain `chains[slot].tea_op_count--`로 변경 |
 | `src/node_stage.h` | `flush_tea_ops_by_chain_id()` 프로토타입 추가 |
 | `src/tea/tea.stat.def` | `TEA_CHAIN_TERMINATED` stat 추가 |
 
@@ -426,10 +436,10 @@ bottleneck."
 2. **`Tea_Thread` 구조체 확장** — `chains[]`, `num_active_chains`, `Chain_State`
 3. **`tea_fetch_stage.c` 수정** — `h2p_chain_id` 할당 + `recover_by_chain`
 4. **`node_stage.c`에 `flush_tea_ops_by_chain_id()` 추가**
-5. **`tea_op_completed()` 내부에 per-chain 카운터 감소 추가** — `node_retire_tea_ops()`는 변경 없음 (이중 감소 방지)
+5. **`node_retire_tea_ops()`의 `tea_op_count--`를 per-chain `chains[slot].tea_op_count--`로 변경** — `tea_op_completed()`는 변경하지 않음 (0-latency op 안전성)
 6. **`terminate_tea_chain()` 구현**
 7. **`update_tea_thread()` per-chain 루프 추가**
 8. **Store buffer chain_id 지원**
 9. **`trigger_tea_thread()` 수정** — 새 chain을 빈 slot에 할당
 
-**단계 5는 단일 H2P 상태에서도 먼저 적용 가능** — `tea_op_completed()`의 기존 전체 카운터 감소 로직을 유지하면서 per-chain 카운터 감소를 추가하는 방식. `node_retire_tea_ops()`에서 `tea_op_completed()`를 추가 호출하면 이중 감소가 발생하므로, 기존 호출 경로(exec/dcache)만 사용.
+**단계 5는 단일 H2P 상태에서도 먼저 적용 가능** — `op->h2p_chain_id`가 항상 1이므로 `chains[0].tea_op_count`만 감소시키면 기존 전역 카운터와 동일한 동작. `tea_op_completed()`는 절대 카운터를 감소시키지 말 것 (이중 감소 방지).
