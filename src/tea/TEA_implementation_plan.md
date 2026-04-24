@@ -2,7 +2,7 @@
 
 **논문**: Timely, Efficient, and Accurate Branch Precomputation (MICRO 2024, UT Austin)
 **논문 원본**: `/home/lee/scarab/docs/TEA_info/TEA_paper_origin.pdf`
-**최종 갱신**: 2026-04-12
+**최종 갱신**: 2026-04-21
 **베이스라인 코드**: `/home/lee/scarab/src/`
 
 ---
@@ -30,7 +30,7 @@ bp.c: bp_predict_op() — HBT가 H2P 감지, get_dependency_chain()으로 존재
   → tea_dispatch_to_rs() : 직접 RS dispatch (tea_dispatch_retry()로 RS full 재시도)
   → exec_stage_bp_resolve() : TEA H2P branch 실행 시
         mispred + SRT checkpoint 있음 → Case 2: bp_sched_recovery() → SRT rollback
-        mispred + SRT checkpoint 없음 → Case 1: recover_at_exec/decode 설정
+        mispred + SRT checkpoint 없음 → Case 1: tea_pending_mispred 세팅 → map_stage에서 deferred flush
         correct prediction → TEA_H2P_CORRECT, terminate_tea_thread()
 ```
 
@@ -67,15 +67,20 @@ bp.c: bp_predict_op() — HBT가 H2P 감지, get_dependency_chain()으로 존재
 | RS 파티셔닝 + 2-pass 스케줄링 (TEA 우선) | `node_stage.h`, `exec_ports.c`, `node_issue_queue.cc` | |
 | TEA Node Stage 독립 Dispatch (Work I) | `node_stage.c:401-560` | `tea_dispatch_to_rs()` 직접 RS dispatch, `tea_dispatch_retry()` |
 | TEA Store Buffer (forwarding + full 종료) | `tea_store_buffer.h/c` | |
-| Early Flush Case 1 (pre-rename) | `exec_stage.c:614-631` | `decode_cycle` 기반 1a/1b 분기 |
+| Early Flush Case 1 (pre-rename) | `exec_stage.c`, `map_stage.c` | `tea_pending_mispred` + deferred-to-rename flush |
 | Early Flush Case 2 (post-rename) | `exec_stage.c:594-613` | `bp_sched_recovery()` + SRT rollback |
 | Op Pool Backpressure (pipeline stall) | `tea_rename.c:443`, `tea_fetch_stage.c:152` | `op_count > 0` stall 체크 |
+| **다중 H2P+DC (Work F) — F.1** | `tea_thread.h` | `Tea_H2P_Chain` 구조체 + `Tea_Thread.chains[MAX_TEA_CHAINS]` + `num_active_chains` |
+| **다중 H2P+DC (Work F) — F.2** | `tea_thread.c` | `trigger_tea_thread()` 빈 슬롯 탐색 + `TEA_TRIGGER_SKIP_FULL`, `terminate_tea_chain()` 6단계 per-chain 정리 |
+| **다중 H2P+DC (Work F) — F.3** | `tea_fetch_stage.c` | `find_next_fetching_chain()` 순환 탐색, `current_fetch_chain` 추적, per-chain fetch 완료 시 전환 |
+| **다중 H2P+DC (Work F) — F.4** | `exec_stage.c` | `exec_stage_bp_resolve()` `h2p_chain_id` 매칭, per-chain Early Flush 처리 |
+| **다중 H2P+DC (Work F) — F.5** | `node_stage.c`, `tea_rename.c`, `tea_store_buffer.c` | `flush_tea_ops_by_chain_id()`, `recover_tea_rename_stage_by_chain()`, `tea_store_buffer_clear_by_chain_id()` |
+| **다중 H2P+DC (Work F) — F.6** | `cmp_model.c` | `recover_tea_on_flush()`: `target_h2p_op_num >= recovery_op_num` chain만 선택적 종료 |
 
 ### ❌ 미구현 (우선순위 순)
 
 | ID | 항목 | 파일 | 영향 |
 |----|------|------|------|
-| **F** | **다중 H2P+DC 동시 처리** | `tea_thread.h/c`, `tea_fetch_stage.c`, `exec_stage.c`, `node_stage.c`, `cmp_model.c` | ★ 핵심 — 96.2% trigger skip 해소 |
 | **C+HC** | `periodically_reset_caches()` 연결 + Hybrid Chain | `dependency_chain_cache.c/h`, `node_stage.c` | dep cache stale, 단일 경로 덮어쓰기 |
 | **B** | Iterative Walk (chain_bit 활용) | `fill_buffer.c`, `dependency_chain_cache.c` | 긴 체인 추적 불가 |
 | **D** | Poison bit | — | 미구현 예정 (oracle로 대체) |
@@ -90,34 +95,64 @@ bp.c: bp_predict_op() — HBT가 H2P 감지, get_dependency_chain()으로 존재
 ✅ 작업 I (독립 Dispatch)
 ✅ Op Pool Backpressure (2026-04-12)
 ✅ 단일 H2P 시뮬레이션 검증 (blender 2026-04-12)
-        ⚠️  96.2% TEA_TRIGGER_SKIP_ACTIVE → Work F 필요
+✅ 작업 F (다중 H2P+DC, 2026-04-21)
+        TEA_TRIGGER_SKIP_FULL 정상 동작, TEA_CHAIN_TERMINATED ≈ TEA_TRIGGERS 확인
+        IPC 개선: leela +4%, xgboost +8.2%
     │
     ▼
-★ 작업 F (다중 H2P+DC) ← 현재 다음 단계 (§5 참조)
-    │   96.2% skip 해소 → TEA_TRIGGERS 대폭 증가 → early flush 효과 실현
+★ 작업 C+HC (periodically_reset + Hybrid Chain) ← 현재 다음 단계 (§7 참조)
     │
     ▼
-작업 C+HC (periodically_reset + Hybrid Chain, §6 참조)
-    │
-    ▼
-작업 B (Iterative Walk, §7 참조)
+작업 B (Iterative Walk, §8 참조)
 ```
 
 ---
 
-## 4. 검증 결과 (2026-04-12, blender simpoint 25328)
+## 4. 검증 결과
+
+### 단일 H2P 검증 (2026-04-12, blender simpoint 25328)
 
 ```
 TEA_TRIGGER_ATTEMPTS      1,194,296
 TEA_TRIGGER_SKIP_ACTIVE   1,148,916   (96.2% — 단일 H2P 한계)
 TEA_TRIGGERS                 45,379
 TEA_EARLY_FLUSHES               373   (0.8% of triggers)
-TEA_H2P_CORRECT              36,839   (81% — 원래 BP가 맞은 경우)
-TEA_OPS_FETCHED           1,177,124
-TEA_OPS_DISPATCHED        1,177,124   (= FETCHED, op pool 누수 없음)
-TEA_RENAME_STALL_DISPATCH     5,968   (backpressure 동작 확인)
-IPC: TEA_OFF=2.273 → TEA_ON=2.235 (-1.65%)  ← Work F로 개선 필요
+TEA_H2P_CORRECT              36,839   (81%)
+IPC: TEA_OFF=2.273 → TEA_ON=2.235 (-1.65%)
 ```
+
+### 다중 H2P (Work F) 검증 (2026-04-21, Periodic stats)
+
+**leela (spec2017/rate_int, simpoint 118750)**
+```
+TEA_TRIGGER_ATTEMPTS        503,544
+TEA_TRIGGER_SKIP_FULL       243,166   (48.3% — 슬롯 4개 모두 사용 중)
+TEA_TRIGGER_SKIP_NO_CHAIN       778
+TEA_TRIGGERS                259,600
+TEA_CHAIN_TERMINATED        259,601   (≈ TRIGGERS — 정상 종료 확인)
+TEA_EARLY_FLUSHES            22,208   (8.6% of triggers)
+TEA_H2P_CORRECT              78,449
+TEA_RS_STALLS             4,111,772   (RS 경쟁 발생)
+IPC: TEA_OFF 대비 TEA_ON +4%
+```
+
+**xgboost (datacenter, simpoint 463)**
+```
+TEA_TRIGGER_ATTEMPTS        187,093
+TEA_TRIGGER_SKIP_FULL       133,302   (71.3% — 슬롯 포화)
+TEA_TRIGGER_SKIP_NO_CHAIN       107
+TEA_TRIGGERS                 53,684
+TEA_CHAIN_TERMINATED         53,684   (= TRIGGERS — 정상 종료 확인)
+TEA_EARLY_FLUSHES             7,817   (14.6% of triggers)
+TEA_H2P_CORRECT              34,281
+IPC: TEA_OFF 대비 TEA_ON +8.2%
+```
+
+**주요 확인 사항**:
+- `TEA_TRIGGER_SKIP_ACTIVE` stat 제거됨 → `TEA_TRIGGER_SKIP_FULL`로 대체 (슬롯 4개 모두 차있을 때만 거부)
+- `TEA_CHAIN_TERMINATED ≈ TEA_TRIGGERS`: chain이 올바르게 개별 종료됨
+- Early flush 비율 대폭 증가 (단일: 0.8% → 다중: 8.6%~14.6%)
+- IPC 개선 확인 (단일: -1.65% → 다중: +4% ~ +8.2%)
 
 ---
 
@@ -143,7 +178,7 @@ IPC: TEA_OFF=2.273 → TEA_ON=2.235 (-1.65%)  ← Work F로 개선 필요
 
 ---
 
-## 6. 작업 F: 다중 H2P+DC 동시 처리 ★ 현재 단계
+## 6. 작업 F: 다중 H2P+DC 동시 처리 ✅ 완료 (2026-04-21)
 
 **상세 계획 (구역별)**:
 - 전체 아키텍처 & Phase 구분: [`TEA_multi_h2p_plan.md`](TEA_implementation_plan/TEA_multi_h2p_plan.md)
@@ -180,21 +215,20 @@ IPC: TEA_OFF=2.273 → TEA_ON=2.235 (-1.65%)  ← Work F로 개선 필요
 - **Shadow RAT**: 모든 chain 공유 (첫 chain trigger 시 1회 snapshot, 이후 누적 갱신)
 - **Preg pool**: 전체 공유, per-chain 반환 안 함 (chain 종료 시 dangling 매핑 위험)
 - **SRT checkpoint**: oldest H2P만 유지 (방안 A) — `map_rename.c`의 `!checkpoint_is_valid()` guard 추가
-- **per-chain `tea_op_count`**: `tea_op_completed()`에서 감소, `update_tea_thread()` per-chain 루프에서 0 감지 시 `terminate_tea_chain()` 호출
+- **per-chain `tea_op_count`**: `node_retire_tea_ops()`에서 감소 (`op->h2p_chain_id`로 slot 조회 → `chains[slot].tea_op_count--`). `tea_op_completed()`는 `op->state = OS_DONE` 설정만 담당 (0-latency op use-after-free 방지를 위해 retire 시점까지 감소 지연). `node_retire_tea_ops()` per-chain 루프에서 `tea_op_count == 0` 감지 시 `terminate_tea_chain()` 호출 — 상세: `TEA_op_manage_plan.md §4`
 
 상세 설계: [`TEA_multi_h2p_plan.md`](TEA_implementation_plan/TEA_multi_h2p_plan.md)
 
-### 작업 F 완료 후 검증 체크리스트
+### 작업 F 완료 후 검증 체크리스트 (✅ 모두 통과, 2026-04-21)
 
 ```
-TEA_TRIGGER_SKIP_ACTIVE 대폭 감소 (< 50% 목표)
-TEA_TRIGGER_SKIP_FULL > 0 (모든 chain 슬롯 사용 중 → trigger 거부, 신규 stat)
-TEA_TRIGGERS 대폭 증가
-TEA_EARLY_FLUSHES 증가
-TEA_CHAIN_TERMINATED > 0 (개별 chain 정상 종료, 신규 stat)
-TEA_CHAINS_CONCURRENT_MAX > 1 (동시 활성 chain 최대 수, 신규 stat)
-SRT checkpoint ASSERT 미발생
-IPC TEA_ON > TEA_OFF (성능 개선 확인)
+✅ TEA_TRIGGER_SKIP_ACTIVE 제거됨 → TEA_TRIGGER_SKIP_FULL로 대체
+✅ TEA_TRIGGER_SKIP_FULL > 0 (leela: 243K, xgboost: 133K)
+✅ TEA_TRIGGERS 대폭 증가 (leela: 260K, xgboost: 54K)
+✅ TEA_EARLY_FLUSHES 증가 (leela: 22K, xgboost: 7.8K)
+✅ TEA_CHAIN_TERMINATED ≈ TEA_TRIGGERS (chain 정상 종료)
+✅ SRT checkpoint ASSERT 미발생
+✅ IPC TEA_ON > TEA_OFF (leela +4%, xgboost +8.2%)
 ```
 
 ---
@@ -235,7 +269,9 @@ IPC TEA_ON > TEA_OFF (성능 개선 확인)
 | 버그 | 파일 | 상태 | 해결 |
 |------|------|------|------|
 | FTQ deadlock (Case 1) | `decoupled_frontend.cc:280` | ✅ 해결 (2026-03-26) | `decode_cycle` 기반 Case 1a/1b 분기, `recover_at_exec` 이중 설정 제거 |
+| Case 1 성능 이득 없음 | `exec_stage.c`, `map_stage.c` | ✅ 해결 (2026-04-15) | `tea_pending_mispred` 플래그 + deferred-to-rename flush 구현 |
 | Op pool 고갈 ASSERT | `op_pool.c` | ✅ 해결 (2026-04-12) | Rename/Fetch stage backpressure stall 추가 — undispatched ops 덮어쓰기 방지 |
+| TEA ops exec/dcache stage에서 잘못 flush | `exec_stage.c`, `dcache_stage.c` | ✅ 해결 (2026-04-21) | TEA op_num(`0x8000000000000000+k`)이 항상 main-thread `recovery_op_num`보다 크므로, `recover_exec_stage()` / `recover_dcache_stage()`에서 모든 TEA op이 잘못 제거됨 → chain 영구 미종료 버그. `if (TEA_ENABLE && op->thread_id == 1) continue;` 추가로 해결 (TEA op cleanup은 `flush_tea_ops_by_chain_id()` 가 담당) |
 
 ---
 

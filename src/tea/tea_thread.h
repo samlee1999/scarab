@@ -24,7 +24,7 @@
  * Author       : TEA Implementation
  * Date         : 2025
  * Description  : TEA (Timely, Efficient, and Accurate) Thread state management
- *                for branch precomputation.
+ *                for branch precomputation. Supports multiple concurrent H2P chains.
  ***************************************************************************************/
 
 #ifndef __TEA_THREAD_H__
@@ -34,11 +34,44 @@
 #include "op.h"
 
 /**************************************************************************************/
-/* TEA Thread State */
+/* Maximum number of concurrent TEA chains (parameterized via TEA_MAX_CHAINS) */
+
+#define MAX_TEA_CHAINS 4
+
+/**************************************************************************************/
+/* TEA Chain State */
+
+typedef enum Tea_Chain_State_enum {
+  CHAIN_INACTIVE,    /* Slot empty */
+  CHAIN_FETCHING,    /* Fetch in progress */
+  CHAIN_EXECUTING,   /* Fetch complete, ops running in backend */
+} Tea_Chain_State;
+
+/**************************************************************************************/
+/* Per-chain H2P context */
+
+typedef struct Tea_H2P_Chain_struct {
+  Tea_Chain_State state;
+
+  /* H2P branch info */
+  Addr target_h2p_pc;
+  Counter target_h2p_op_num;       /* Main thread op_num (older/younger comparison) */
+  Op* main_h2p_op;                 /* Main thread H2P branch Op pointer */
+  Counter saved_unique_num;        /* main_h2p_op's unique_num (validity check) */
+  Op_Info h2p_oracle_info;         /* Oracle info snapshot at trigger time */
+  Recovery_Info h2p_recovery_info; /* Recovery info snapshot at trigger time */
+
+  /* Per-chain counters */
+  uns tea_op_count;                /* Ops currently in pipeline for this chain */
+  Counter tea_ops_fetched;         /* Total ops fetched for this chain */
+} Tea_H2P_Chain;
+
+/**************************************************************************************/
+/* TEA Thread State (legacy — used only for tea_is_active() compatibility) */
 
 typedef enum Tea_State_enum {
-  TEA_IDLE,       /* No TEA thread active */
-  TEA_FETCHING,   /* Fetching ops from Block Cache */
+  TEA_IDLE,       /* No TEA chain active */
+  TEA_FETCHING,   /* At least one chain fetching */
   TEA_EXECUTING,  /* TEA ops in pipeline */
 } Tea_State;
 
@@ -46,32 +79,23 @@ typedef enum Tea_State_enum {
 /* TEA Thread Structure */
 
 typedef struct Tea_Thread_struct {
-  uns8 proc_id;                    /* Processor ID */
-  Tea_State state;                 /* Current TEA state */
+  uns8 proc_id;
 
-  /* Target H2P branch info */
-  Addr target_h2p_pc;              /* PC of the H2P branch being precomputed */
-  Counter target_h2p_op_num;       /* Main thread's op_num for the H2P branch */
-  Op* main_h2p_op;                 /* Pointer to Main thread's H2P op (for recovery identity) */
-  Op_Info h2p_oracle_info;         /* Oracle info from main H2P op (saved at trigger) */
-  Recovery_Info h2p_recovery_info; /* Recovery info from main H2P op (for BP checkpoint) */
+  Tea_State state;                 /* Legacy state (TEA_IDLE when num_active_chains==0) */
 
-  /* Block Cache traversal */
-  Addr current_block_pc;           /* Current block being fetched from Block Cache */
-  int current_chain_idx;           /* Index within current dependency chain */
+  /* Multi-H2P chain tracking */
+  Tea_H2P_Chain chains[MAX_TEA_CHAINS];
+  uns num_active_chains;           /* Number of non-INACTIVE chains */
+  uns current_fetch_chain;         /* Index of chain currently being fetched */
 
-  /* TEA pipeline tracking */
-  uns tea_op_count;                /* Number of TEA ops currently in pipeline */
-  Counter tea_ops_fetched;         /* Total TEA ops fetched in current activation */
-  Counter tea_op_counter;          /* Counter for assigning TEA op_nums */
-
-  /* Timing */
-  Counter tea_start_cycle;         /* Cycle when TEA was triggered */
+  /* Shared resources */
+  Counter tea_op_counter;          /* Global TEA op_num counter (0x8000... namespace) */
+  Counter tea_start_cycle;
 
   /* Statistics */
-  Counter stat_tea_triggers;       /* Number of times TEA was triggered */
-  Counter stat_tea_early_flushes;  /* Number of early misprediction flushes */
-  Counter stat_tea_ops_executed;   /* Total TEA ops executed */
+  Counter stat_tea_triggers;
+  Counter stat_tea_early_flushes;
+  Counter stat_tea_ops_executed;
 
 } Tea_Thread;
 
@@ -89,6 +113,7 @@ void reset_tea_thread(uns proc_id);
 
 /* TEA thread control */
 void trigger_tea_thread(uns proc_id, Addr h2p_pc, Counter h2p_op_num, Op* h2p_op);
+void terminate_tea_chain(uns proc_id, int chain_id);
 void terminate_tea_thread(uns proc_id);
 
 /* State queries */

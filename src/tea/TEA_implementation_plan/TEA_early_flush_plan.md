@@ -103,48 +103,39 @@ void recover_tea_on_flush(uns proc_id, Counter recovery_op_num) {
 // cmp_model.c:445 — cmp_recover() 내부
 recover_tea_on_flush(bp_recovery_info->proc_id,
                      bp_recovery_info->recovery_op_num);
-
-// exec_stage.c:631 — Case 1 (Pre-rename, 양쪽 sub-case 공통)
-// Case 1a/1b 모두 recover_at_exec=TRUE를 유지한 채 TEA만 즉시 종료.
-// target_h2p_op_num >= target_h2p_op_num → TRUE → TEA 정상 종료.
-recover_tea_on_flush(op->proc_id, tea->target_h2p_op_num);
+// exec_stage.c Case 1은 terminate_tea_chain() + tea_pending_mispred 사용 (recover_tea_on_flush() 호출 없음)
 ```
 
-**Case 1 현재 구현**: 현재 `exec_stage.c`는 Case 1을 두 sub-case로 구분한다:
+**Case 1 현재 구현 (2026-04-15, deferred-to-rename)**: `exec_stage.c`는 Case 1에서
+`main_h2p->tea_pending_mispred = TRUE`를 세팅하고 chain을 종료한다.
+실제 `bp_sched_recovery()` 호출은 **`map_stage.c`의 `stage_process_op()`** 에서
+`reg_file_rename(op)` 직후 수행된다 — 이 시점에 SRT checkpoint가 방금 생성됨.
 
-- **Case 1a** (`main_h2p->decode_cycle > 0`): Main H2P가 decode를 통과했지만 아직
-  rename 전. `recover_at_exec = TRUE`를 유지하여 Main H2P가 exec에 도달할 때 정상
-  recovery 발동. TEA만 즉시 종료 (`TEA_EARLY_FLUSH_CASE1_NO_CHKPT`).
-- **Case 1b** (`main_h2p->decode_cycle == 0`): Main H2P가 아직 decode 전.
-  `recover_at_decode = TRUE`를 **사용하지 않음** — 이 경로는 `flush_mispredict()`와
-  SRT rollback을 건너뛰어 off-path preg allocation이 ALLOC orphan으로 누수되고
-  SRT 불일치가 발생하기 때문. `recover_at_exec = TRUE`를 유지하여 Main H2P가
-  rename → exec를 정상 통과할 때 proper recovery 발동. TEA만 즉시 종료
-  (`TEA_EARLY_FLUSH_CASE1_DECODE`).
+```c
+// exec_stage.c — Case 1 탐지
+main_h2p->tea_pending_mispred = TRUE;
+terminate_tea_chain(op->proc_id, chain_slot);
+STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1);
 
-두 sub-case 모두 `recover_tea_on_flush()` 단일 호출로 처리되며, EF-1 적용 후에도
-`recovery_op_num = target_h2p_op_num`을 전달하면 `>=` 조건에서 TRUE가 되어 TEA가 종료됨.
+// map_stage.c — stage_process_op() 내 reg_file_rename() 직후
+if (TEA_ENABLE && op->tea_pending_mispred && !op->off_path &&
+    !op->oracle_info.recovery_sch && reg_file_checkpoint_is_valid()) {
+  bp_sched_recovery(bp_recovery_info, op, cycle_count,
+                    FALSE, FALSE, EXTRA_LATE_RECOVERY_CYCLES);
+  if (op->oracle_info.recovery_sch) {
+    op->oracle_info.recover_at_exec = FALSE;
+    op->recovery_scheduled = TRUE;
+  }
+}
+```
+
+**이득**: Case 1에서도 Main H2P의 rename→exec 구간만큼 early flush benefit 획득.
+Case 2와 동일한 flush window (rename 직후 ~ exec 전)를 커버.
+`recover_at_exec = TRUE` fallback: `bp_sched_recovery()` 미발동 시 (older recovery 우선) exec 정상 처리.
 
 **참고**: `>=` 연산자 이유 — `>` 사용 시 `target_h2p_op_num == recovery_op_num`인 케이스
 (Case 1 + Case 2 모두 해당)에서 조건이 FALSE가 되어 TEA가 종료되지 않는 버그 발생.
 `>=`로 수정하여 두 케이스 모두에서 올바르게 동작한다.
-
-> **⚠️ 다중 H2P 전환 시 Case 1 경로 교체 필수**
->
-> 단일 H2P EF-1에서는 `exec_stage.c:631` Case 1이 `recover_tea_on_flush()`를 경유해도
-> chain이 1개뿐이라 결과적으로 `terminate_tea_thread()`로 수렴하지만, 다중 H2P에서는
-> `recover_tea_on_flush()`가 **모든 younger chain**을 종료하므로 mispredicted H2P 이외의
-> 정상 chain까지 불필요하게 종료된다. EF-2 전환 시 이 호출부를 다음과 같이 교체해야 함:
->
-> ```c
-> // 단일 H2P (EF-1):
-> recover_tea_on_flush(op->proc_id, tea->target_h2p_op_num);
->
-> // 다중 H2P (EF-2, 본 문서 §3.3): mispredicted chain만 직접 종료
-> terminate_tea_chain(op->proc_id, chain_idx);
-> ```
->
-> EF-1 구현 시 이 경로를 별도 래퍼나 주석으로 표시해두면 EF-2 전환 시 누락을 방지할 수 있다.
 
 ### 2.5 수정 파일
 
@@ -152,7 +143,6 @@ recover_tea_on_flush(op->proc_id, tea->target_h2p_op_num);
 |------|------|
 | `src/cmp_model.h` | 함수 선언 시그니처 변경 |
 | `src/cmp_model.c` | 함수 구현 변경 + `cmp_recover()` 내 호출 인자 변경 |
-| `src/exec_stage.c` | Case 1 호출 변경 |
 
 ---
 
@@ -231,13 +221,17 @@ static inline void exec_stage_bp_resolve(Op* op) {
                               EXTRA_LATE_RECOVERY_CYCLES);
             if (main_h2p->oracle_info.recovery_sch)
               main_h2p->recovery_scheduled = TRUE;
+            main_h2p->oracle_info.recover_at_exec = FALSE;  /* prevent double recovery */
+            STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE2_WITH_CHKPT);
           } else {
-            /* Case 1: Pre-rename */
-            main_h2p->oracle_info.recover_at_decode = TRUE;
-            /* 이 chain만 즉시 종료 (다른 chains는 cmp_recover()에서 처리) */
+            /* Case 1: Pre-rename — No SRT checkpoint.
+             * Set tea_pending_mispred so map_stage fires bp_sched_recovery
+             * immediately after rename (deferred-to-rename flush).
+             * recover_at_exec stays TRUE as fallback. */
+            main_h2p->tea_pending_mispred = TRUE;
             terminate_tea_chain(op->proc_id, chain_idx);
+            STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1);
           }
-          main_h2p->oracle_info.recover_at_exec = FALSE;
           STAT_EVENT(op->proc_id, TEA_EARLY_FLUSHES);
         }
       } else {

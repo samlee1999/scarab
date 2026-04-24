@@ -700,8 +700,12 @@ static void node_retire_tea_ops() {
        * by terminate_tea_thread(). */
       if (tea_threads && tea_threads[node->proc_id]) {
         Tea_Thread* tea_state = tea_threads[node->proc_id];
-        if (tea_state->tea_op_count > 0)
-          tea_state->tea_op_count--;
+        uns8 cid = op->h2p_chain_id;
+        if (cid > 0 && cid <= MAX_TEA_CHAINS) {
+          Tea_H2P_Chain* tc = &tea_state->chains[cid - 1];
+          if (tc->tea_op_count > 0)
+            tc->tea_op_count--;
+        }
       }
 
       DEBUG(node->proc_id, "TEA op retired op_num:%s\n", unsstr64(op->op_num));
@@ -1130,13 +1134,16 @@ void flush_tea_ops_from_node_stage(uns proc_id) {
   Op* op;
   Op** last;
 
-  /* 0a. Clear exec_stage->sd.ops[] FIRST - prevent use-after-free when ops are freed below */
+  /* 0a. Clear exec_stage->sd.ops[] FIRST - prevent use-after-free when ops are freed below.
+   * Also reset fu->avail_cycle so main thread is not blocked by stale TEA latency. */
   Exec_Stage* exec_local = &cmp_model.exec_stage[proc_id];
   for (uns ii = 0; ii < exec_local->sd.max_op_count; ii++) {
     op = exec_local->sd.ops[ii];
     if (op && op->thread_id == 1) {
       exec_local->sd.ops[ii] = NULL;
       exec_local->sd.op_count--;
+      exec_local->fus[ii].avail_cycle = cycle_count + 1;
+      exec_local->fus[ii].idle_cycle  = cycle_count + 1;
       /* Don't free here - will be freed from node table below */
     }
   }
@@ -1251,5 +1258,121 @@ void flush_tea_ops_from_node_stage(uns proc_id) {
       node_local->node_tail = op;
       op = op->next_node;
     }
+  }
+}
+
+/**************************************************************************************/
+/* flush_tea_ops_by_chain_id: Remove ops belonging to a specific TEA chain only.
+ * Used by terminate_tea_chain() for selective per-chain teardown. */
+
+void flush_tea_ops_by_chain_id(uns proc_id, uns8 chain_id) {
+  extern Cmp_Model cmp_model;
+  Node_Stage* node_local = &cmp_model.node_stage[proc_id];
+  Op* op;
+  Op** last;
+
+  /* 0a. Clear exec_stage->sd.ops[] for this chain.
+   * Also reset fu->avail_cycle so main thread is not blocked by stale TEA latency. */
+  Exec_Stage* exec_local = &cmp_model.exec_stage[proc_id];
+  for (uns ii = 0; ii < exec_local->sd.max_op_count; ii++) {
+    op = exec_local->sd.ops[ii];
+    if (op && op->thread_id == 1 && op->h2p_chain_id == chain_id) {
+      exec_local->sd.ops[ii] = NULL;
+      if (exec_local->sd.op_count > 0) exec_local->sd.op_count--;
+      exec_local->fus[ii].avail_cycle = cycle_count + 1;
+      exec_local->fus[ii].idle_cycle  = cycle_count + 1;
+    }
+  }
+
+  /* 0b. Clear dcache_stage->sd.ops[] for this chain */
+  Dcache_Stage* dc_local = &cmp_model.dcache_stage[proc_id];
+  for (uns ii = 0; ii < dc_local->sd.max_op_count; ii++) {
+    op = dc_local->sd.ops[ii];
+    if (op && op->thread_id == 1 && op->h2p_chain_id == chain_id) {
+      dc_local->sd.ops[ii] = NULL;
+      if (dc_local->sd.op_count > 0) dc_local->sd.op_count--;
+    }
+  }
+
+  /* 1. Flush ready list for this chain */
+  for (op = node_local->rdy_head, last = &node_local->rdy_head; op;) {
+    if (op->thread_id == 1 && op->h2p_chain_id == chain_id) {
+      *last = op->next_rdy;
+      op->in_rdy_list = FALSE;
+
+      if (op->state == OS_SCHEDULED || op->state == OS_MISS) {
+        if (node_local->rs[op->rs_id].rs_op_count > 0)
+          node_local->rs[op->rs_id].rs_op_count--;
+        if (node_local->rs[op->rs_id].tea_op_count > 0)
+          node_local->rs[op->rs_id].tea_op_count--;
+      }
+
+      op = op->next_rdy;
+    } else {
+      last = &op->next_rdy;
+      op = op->next_rdy;
+    }
+  }
+
+  /* 2. Flush scheduling buffer for this chain */
+  for (uns ii = 0; ii < node_local->sd.max_op_count; ii++) {
+    op = node_local->sd.ops[ii];
+    if (op && op->thread_id == 1 && op->h2p_chain_id == chain_id) {
+      node_local->sd.ops[ii] = NULL;
+      if (node_local->sd.op_count > 0) node_local->sd.op_count--;
+    }
+  }
+
+  /* 3. Advance next_op_into_rs past ops of this chain if needed */
+  op = node_local->next_op_into_rs;
+  if (op && op->thread_id == 1 && op->h2p_chain_id == chain_id) {
+    Op* next = op->next_node;
+    while (next && next->thread_id == 1 && next->h2p_chain_id == chain_id)
+      next = next->next_node;
+    node_local->next_op_into_rs = next;
+  }
+
+  /* 4. Flush node table for this chain */
+  node_local->node_tail = NULL;
+  for (op = node_local->node_head, last = &node_local->node_head; op;) {
+    Op* next = op->next_node;
+    if (op->thread_id == 1 && op->h2p_chain_id == chain_id) {
+      *last = next;
+      op->in_node_list = FALSE;
+
+      if (op->state == OS_IN_RS || op->state == OS_READY ||
+          op->state == OS_WAIT_FWD || op->state == OS_SLEEP ||
+          op->state == OS_LOW_PRIORITY || op->state == OS_TENTATIVE) {
+        if (node_local->rs[op->rs_id].rs_op_count > 0)
+          node_local->rs[op->rs_id].rs_op_count--;
+        if (node_local->rs[op->rs_id].tea_op_count > 0)
+          node_local->rs[op->rs_id].tea_op_count--;
+      }
+
+      /* Wake-up propagation: surviving ops from other chains may be waiting on this op.
+       * Clear their not-rdy bits so they are not stuck in RS indefinitely. */
+      for (Wake_Up_Entry* we = op->wake_up_head; we; we = we->next) {
+        Op* dep_op = we->op;
+        if (!dep_op || !dep_op->op_pool_valid || dep_op->unique_num != we->unique_num)
+          continue;
+        if (!test_not_rdy_bit(dep_op, we->rdy_bit))
+          continue;
+        clear_not_rdy_bit(dep_op, we->rdy_bit);
+        if (dep_op->srcs_not_rdy_vector == 0x0 &&
+            cycle_count >= dep_op->issue_cycle &&
+            !dep_op->in_rdy_list) {
+          dep_op->next_rdy = node_local->rdy_head;
+          node_local->rdy_head = dep_op;
+          dep_op->in_rdy_list = TRUE;
+        }
+      }
+
+      free_op(op);
+      STAT_EVENT(proc_id, TEA_OPS_FLUSHED);
+    } else {
+      last = &op->next_node;
+      node_local->node_tail = op;
+    }
+    op = next;
   }
 }

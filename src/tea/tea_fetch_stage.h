@@ -56,6 +56,7 @@ typedef struct Tea_Fetch_Stage_struct {
   /* Fetch state */
   Flag fetch_complete;                         /* All ops fetched from chain */
   Counter ops_fetched_this_cycle;              /* Ops fetched in current cycle */
+  uns current_chain_id;                        /* chains[] index of currently-fetching chain (0-based) */
 
 } Tea_Fetch_Stage;
 
@@ -76,6 +77,10 @@ void update_tea_fetch_stage(uns proc_id);
 
 /* Recovery */
 void recover_tea_fetch_stage(uns proc_id);
+void recover_tea_fetch_stage_by_chain(uns proc_id, uns8 h2p_chain_id);
+
+/* Chain setup (called by tea_thread.c trigger) */
+void setup_fetch_for_chain(uns proc_id, int chain_id, Dependency_Chain_Cache_Entry* dep_chain);
 
 /* Op creation from Block Cache */
 Op* tea_create_op_from_cache(uns proc_id, Op* cached_op, Flag is_h2p_branch);
