@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 ## What is Scarab?
 
 Scarab is a cycle accurate simulator for state-of-the-art, high performance, multicore CPU. Scarab's goal is to be highly accurate, while also being fast and easy to work with.
@@ -37,7 +39,7 @@ Key sections and their Scarab mapping:
 | §IV-C | Block Cache + Fill Buffer structures | `dependency_chain_cache.h`, `fill_buffer.h` |
 | §IV-D | TEA frontend (Fetch + Shadow RAT + Rename) | `tea_fetch_stage.c`, `tea_rename.c` |
 | §IV-E | TEA backend (shared RS/EU, 192 PR/RS reserved) | `node_stage.h`, `exec_ports.c`, `node_issue_queue.cc` |
-| §IV-F | Early misprediction flush mechanism | `exec_stage.c:554-627`, `map_stage.c:220-251`, `cmp_model.c:389` |
+| §IV-F | Early misprediction flush mechanism | `exec_stage.c:554-627`, `cmp_model.c:389` |
 | §IV-G | Poison bit (not implemented — oracle used instead) | — |
 | Table I-II | Core + TEA parameters | `core.param.def`, `PARAMS.golden_cove` |
 
@@ -59,15 +61,13 @@ TEA documentation lives in `src/tea/`:
 
 ### Current TEA State (critical context)
 
-TEA is **functional end-to-end** with multi-H2P support. Completed work (in order):
+TEA is **not yet functional end-to-end**. Key gaps (in priority order):
 1. ~~**Work A**: BW Walk Trigger~~ — ✅ 구현 완료 (`fill_buffer.c`, `core.param.def`)
 2. ~~**Work G**: TEA dependency wakeup missing~~ — ✅ 구현 완료 (`tea_rename.h/c`: Shadow RAT producer 추적 + `add_to_wake_up_lists()`)
 3. ~~**Work I**: Independent dispatch needed — TEA/Main share single dispatch stream, causing ASSERT failures~~ — ✅ 구현 완료 (`node_stage.c`: `tea_dispatch_to_rs()`, `tea_dispatch_retry()`; `node_issue_queue.cc`: TEA ops skip in dispatch, 2-pass scheduling)
-4. ~~**Work F**: Multi-H2P — only single H2P chain supported~~ — ✅ 구현 완료 (`tea_thread.h/c`: `Tea_H2P_Chain` struct + `chains[MAX_TEA_CHAINS]`; `tea_fetch_stage.c`: per-chain fetch switching; `exec_stage.c`: per-chain early flush; `node_stage.c`: `flush_tea_ops_by_chain_id()`; `cmp_model.c`: selective recovery)
+4. **Work F**: Multi-H2P — only single H2P chain supported
 
-Next priority: **Work C+HC** (periodically_reset + Hybrid Chain) → **Work B** (Iterative Walk)
-
-Implementation priority: **A → G → I → F(완료) → C+HC → B** (see master plan (`/home/lee/scarab/src/tea/TEA_implementation_plan.md`) §3)
+Implementation priority: **A → G → I → C → F → B** (see master plan (`/home/lee/scarab/src/tea/TEA_implementation_plan.md`) §3)
 
 ## Build & Run via scarab-infra (primary workflow)
 
@@ -144,7 +144,7 @@ cmp_cycle()
        ├── update_dcache_stage()   ← TEA store buffer full → terminate_tea_thread()
        ├── update_exec_stage()     ← TEA early flush detection
        ├── update_node_stage()     ← dispatch, issue, retire (Main + TEA)
-       ├── update_map_stage()      ← SRT checkpoint + Case 1 deferred flush (tea_pending_mispred → bp_sched_recovery)
+       ├── update_map_stage()      ← SRT checkpoint for early flush
        ├── ... (decode, icache)
        └── update_tea_thread()     ← TEA fetch → rename → state transition
 ```
