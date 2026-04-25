@@ -23,13 +23,14 @@
  * File         : tea/tea_thread.c
  * Author       : TEA Implementation
  * Date         : 2025
- * Description  : TEA Thread state management — multi-H2P chain support
+ * Description  : TEA (Timely, Efficient, and Accurate) Thread state management
  ***************************************************************************************/
 
 #include "tea/tea_thread.h"
 #include "tea/tea_fetch_stage.h"
 #include "tea/tea_rename.h"
 #include "globals/assert.h"
+#include "globals/global_vars.h"
 #include "globals/global_vars.h"
 #include "core.param.h"
 #include "dependency_chain_cache.h"
@@ -51,6 +52,7 @@ Tea_Thread** tea_threads = NULL;
 /* Initialization and Reset */
 
 void init_tea_thread(uns proc_id) {
+  /* Allocate per-core array on first call */
   if (!tea_threads) {
     tea_threads = (Tea_Thread**)calloc(NUM_CORES, sizeof(Tea_Thread*));
     ASSERT(0, tea_threads);
@@ -58,12 +60,14 @@ void init_tea_thread(uns proc_id) {
 
   ASSERT(proc_id, proc_id < NUM_CORES);
 
+  /* Allocate TEA thread state for this core */
   tea_threads[proc_id] = (Tea_Thread*)calloc(1, sizeof(Tea_Thread));
   ASSERT(proc_id, tea_threads[proc_id]);
 
   Tea_Thread* tea = tea_threads[proc_id];
   tea->proc_id = proc_id;
 
+  /* Phase 4.1: Initialize TEA store buffer */
   init_tea_store_buffer(proc_id);
 
   reset_tea_thread(proc_id);
@@ -76,20 +80,14 @@ void reset_tea_thread(uns proc_id) {
   Tea_Thread* tea = tea_threads[proc_id];
 
   tea->state = TEA_IDLE;
-  tea->num_active_chains = 0;
-  tea->current_fetch_chain = 0;
-
-  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
-    tea->chains[i].state = CHAIN_INACTIVE;
-    tea->chains[i].target_h2p_pc = 0;
-    tea->chains[i].target_h2p_op_num = 0;
-    tea->chains[i].main_h2p_op = NULL;
-    tea->chains[i].saved_unique_num = 0;
-    tea->chains[i].tea_op_count = 0;
-    tea->chains[i].tea_ops_fetched = 0;
-  }
-
-  tea->tea_op_counter = 0x8000000000000000ULL;
+  tea->target_h2p_pc = 0;
+  tea->target_h2p_op_num = 0;
+  tea->main_h2p_op = NULL;
+  tea->current_block_pc = 0;
+  tea->current_chain_idx = 0;
+  tea->tea_op_count = 0;
+  tea->tea_ops_fetched = 0;
+  tea->tea_op_counter = 0x8000000000000000ULL;  /* Large value to avoid Main op_num collision */
   tea->tea_start_cycle = 0;
 
   /* Don't reset statistics */
@@ -105,135 +103,85 @@ void trigger_tea_thread(uns proc_id, Addr h2p_pc, Counter h2p_op_num, Op* h2p_op
 
   Tea_Thread* tea = tea_threads[proc_id];
 
+  /* Track all trigger attempts */
   STAT_EVENT(proc_id, TEA_TRIGGER_ATTEMPTS);
 
-  /* Find an empty chain slot */
-  int slot = -1;
-  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
-    if (tea->chains[i].state == CHAIN_INACTIVE) {
-      slot = i;
-      break;
-    }
-  }
-  if (slot < 0) {
-    STAT_EVENT(proc_id, TEA_TRIGGER_SKIP_FULL);
+  /* Don't trigger if already active */
+  if (tea->state != TEA_IDLE) {
+    STAT_EVENT(proc_id, TEA_TRIGGER_SKIP_ACTIVE);
+    _DEBUG(0, DEBUG_TEA, "TEA trigger skipped: already active (state=%d) for PC=0x%llx\n",
+           tea->state, (unsigned long long)h2p_pc);
     return;
   }
 
-  /* Check dependency chain exists */
+  /* Check if we have a dependency chain for this H2P branch */
   Dependency_Chain_Cache_Entry* chain = get_dependency_chain(proc_id, h2p_pc);
   if (!chain || !chain->is_valid || chain->chain_length == 0) {
     STAT_EVENT(proc_id, TEA_TRIGGER_SKIP_NO_CHAIN);
-    return;
+    _DEBUG(0, DEBUG_TEA, "TEA trigger skipped: no chain for PC=0x%llx (chain=%p, valid=%d, len=%d)\n",
+           (unsigned long long)h2p_pc, (void*)chain,
+           chain ? chain->is_valid : 0, chain ? chain->chain_length : 0);
+    return;  /* No chain available */
   }
 
-  /* Fill the slot */
-  Tea_H2P_Chain* c = &tea->chains[slot];
-  c->state = CHAIN_FETCHING;
-  c->target_h2p_pc = h2p_pc;
-  c->target_h2p_op_num = h2p_op_num;
-  c->main_h2p_op = h2p_op;
-  c->saved_unique_num = h2p_op->unique_num;
-  c->h2p_oracle_info = h2p_op->oracle_info;
-  c->h2p_recovery_info = h2p_op->recovery_info;
-  c->tea_op_count = 0;
-  c->tea_ops_fetched = 0;
-  tea->num_active_chains++;
+  /* Activate TEA thread */
   tea->state = TEA_FETCHING;
+  tea->target_h2p_pc = h2p_pc;
+  tea->target_h2p_op_num = h2p_op_num;
+  tea->main_h2p_op = h2p_op;               /* Save pointer to Main H2P op for recovery identity */
+  tea->h2p_oracle_info = h2p_op->oracle_info;      /* Save oracle from main H2P op */
+  tea->h2p_recovery_info = h2p_op->recovery_info;  /* Save recovery info for BP checkpoint */
+  tea->current_block_pc = h2p_pc;
+  tea->current_chain_idx = 0;
+  tea->tea_op_count = 0;
+  tea->tea_ops_fetched = 0;
+  tea->tea_start_cycle = cycle_count;
 
-  /* First active chain: take Shadow RAT snapshot and start fetch */
-  if (tea->num_active_chains == 1) {
-    shadow_rat_snapshot(proc_id);
-    reset_tea_fetch_stage(proc_id);
-    tea->current_fetch_chain = slot;
-    setup_fetch_for_chain(proc_id, slot, chain);
-    tea->tea_start_cycle = cycle_count;
-  }
-  /* Otherwise: this chain waits as CHAIN_FETCHING; update_tea_fetch_stage()
-   * picks it up via find_next_fetching_chain() after the current chain completes. */
+  /* Initialize Shadow RAT with current Main RAT state (논문 IV-D 요구사항) */
+  shadow_rat_snapshot(proc_id);
+
+  /* Reset TEA fetch stage for new trigger */
+  reset_tea_fetch_stage(proc_id);
 
   tea->stat_tea_triggers++;
   STAT_EVENT(proc_id, TEA_TRIGGERS);
 
-  _DEBUG(0, DEBUG_TEA, "TEA TRIGGERED slot=%d: PC=0x%llx op_num=%llu chain_len=%d cycle=%llu\n",
-         slot, (unsigned long long)h2p_pc, (unsigned long long)h2p_op_num,
+  _DEBUG(0, DEBUG_TEA, "TEA TRIGGERED: PC=0x%llx, op_num=%llu, chain_len=%d, cycle=%llu\n",
+         (unsigned long long)h2p_pc, (unsigned long long)h2p_op_num,
          chain->chain_length, (unsigned long long)cycle_count);
 }
 
-/* terminate_tea_chain: Terminate a single H2P chain, flush its ops.
- * If it was the last active chain, also reset shared resources. */
-void terminate_tea_chain(uns proc_id, int chain_id) {
-  ASSERT(proc_id, proc_id < NUM_CORES);
-  ASSERT(proc_id, tea_threads && tea_threads[proc_id]);
-  ASSERT(proc_id, chain_id >= 0 && chain_id < MAX_TEA_CHAINS);
-
-  Tea_Thread* tea = tea_threads[proc_id];
-  Tea_H2P_Chain* c = &tea->chains[chain_id];
-  uns8 h2p_chain_id = (uns8)(chain_id + 1);  /* 1-based */
-
-  ASSERT(proc_id, c->state != CHAIN_INACTIVE);
-
-  /* Flush fetch stage if currently fetching this chain */
-  if (c->state == CHAIN_FETCHING &&
-      tea->current_fetch_chain == (uns)chain_id) {
-    recover_tea_fetch_stage_by_chain(proc_id, h2p_chain_id);
-  }
-
-  /* Flush rename stage output for this chain */
-  recover_tea_rename_stage_by_chain(proc_id, h2p_chain_id);
-
-  /* Flush node/exec/dcache/ready/sched for this chain */
-  flush_tea_ops_by_chain_id(proc_id, h2p_chain_id);
-
-  /* Invalidate store buffer entries for this chain */
-  tea_store_buffer_clear_by_chain_id(proc_id, h2p_chain_id);
-
-  /* Reset chain slot */
-  c->state = CHAIN_INACTIVE;
-  c->target_h2p_pc = 0;
-  c->target_h2p_op_num = 0;
-  c->main_h2p_op = NULL;
-  c->saved_unique_num = 0;
-  c->tea_op_count = 0;
-  c->tea_ops_fetched = 0;
-  tea->num_active_chains--;
-  STAT_EVENT(proc_id, TEA_CHAIN_TERMINATED);
-
-  /* When all chains are done, reset shared resources */
-  if (tea->num_active_chains == 0) {
-    reset_tea_preg_pool(proc_id);
-    reset_tea_store_buffer(proc_id);
-    recover_tea_rename_stage(proc_id);
-    tea->state = TEA_IDLE;
-  }
-}
-
-/* terminate_tea_thread: Terminate ALL active chains at once (fast path). */
 void terminate_tea_thread(uns proc_id) {
   ASSERT(proc_id, proc_id < NUM_CORES);
   ASSERT(proc_id, tea_threads && tea_threads[proc_id]);
 
   Tea_Thread* tea = tea_threads[proc_id];
 
-  /* Mark all chains inactive (skip individual per-chain cleanup) */
-  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
-    if (tea->chains[i].state != CHAIN_INACTIVE) {
-      tea->chains[i].state = CHAIN_INACTIVE;
-      tea->chains[i].main_h2p_op = NULL;
-      tea->chains[i].tea_op_count = 0;
-      tea->chains[i].tea_ops_fetched = 0;
-    }
-  }
-  tea->num_active_chains = 0;
+  /* Record statistics before terminating */
+  tea->stat_tea_ops_executed += tea->tea_ops_fetched;
 
-  /* Flush all stages (full flush) */
+  /* CRITICAL: Flush all orphan TEA ops from all stages */
+  /* Order matters: recover stages first (they hold ops not yet dispatched),
+   * then flush node stage (ops already dispatched) */
   recover_tea_fetch_stage(proc_id);
   recover_tea_rename_stage(proc_id);
   flush_tea_ops_from_node_stage(proc_id);
+
+  /* Phase 4: Reset TEA preg pool to reclaim physical registers */
   reset_tea_preg_pool(proc_id);
+
+  /* Phase 4.1: Clear TEA store buffer on termination */
   reset_tea_store_buffer(proc_id);
 
+  /* Reset state */
   tea->state = TEA_IDLE;
+  tea->target_h2p_pc = 0;
+  tea->target_h2p_op_num = 0;
+  tea->main_h2p_op = NULL;    /* Clear pointer to avoid dangling reference */
+  tea->current_block_pc = 0;
+  tea->current_chain_idx = 0;
+  tea->tea_op_count = 0;
+  tea->tea_ops_fetched = 0;
 }
 
 /**************************************************************************************/
@@ -246,7 +194,7 @@ Flag tea_is_active(uns proc_id) {
     return FALSE;
   }
 
-  return tea_threads[proc_id]->num_active_chains > 0;
+  return tea_threads[proc_id]->state != TEA_IDLE;
 }
 
 Tea_State tea_get_state(uns proc_id) {
@@ -268,30 +216,32 @@ void update_tea_thread(uns proc_id) {
 
   Tea_Thread* tea = tea_threads[proc_id];
 
-  if (tea->num_active_chains == 0) {
+  if (tea->state == TEA_IDLE) {
     return;
   }
 
-  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
-    Tea_H2P_Chain* c = &tea->chains[i];
+  /* State machine for TEA thread */
+  switch (tea->state) {
+    case TEA_FETCHING:
+      /* Transition to EXECUTING only when fetch is complete */
+      /* BUG FIX: Previous logic transitioned on first op (tea_op_count > 0),
+       * which caused fetch stage to stop prematurely for multi-op chains */
+      if (tea_fetch_stages && tea_fetch_stages[proc_id] &&
+          tea_fetch_stages[proc_id]->fetch_complete) {
+        tea->state = TEA_EXECUTING;
+      }
+      break;
 
-    switch (c->state) {
-      case CHAIN_FETCHING:
-        /* Fetch completion is detected by update_tea_fetch_stage() chain switching */
-        break;
+    case TEA_EXECUTING:
+      /* Check if all TEA ops have completed */
+      if (tea->tea_op_count == 0 && tea->tea_ops_fetched > 0) {
+        terminate_tea_thread(proc_id);
+      }
+      break;
 
-      case CHAIN_EXECUTING:
-        /* Terminate chain when all its ops have completed (retired or flushed) */
-        if (c->tea_op_count == 0 && c->tea_ops_fetched > 0) {
-          terminate_tea_chain(proc_id, i);
-          /* i may now point to a newly-set CHAIN_INACTIVE; loop continues safely */
-        }
-        break;
-
-      case CHAIN_INACTIVE:
-      default:
-        break;
-    }
+    case TEA_IDLE:
+    default:
+      break;
   }
 }
 
@@ -304,8 +254,11 @@ void tea_op_completed(uns proc_id, Op* op) {
   ASSERT(proc_id, op && op->thread_id == 1);
 
   /* Mark op as OS_DONE so node_retire_tea_ops() can safely free it.
-   * Per-chain tea_op_count is decremented in node_retire_tea_ops() at the
-   * moment the op is physically removed from the Node Table. */
+   * tea_op_count is NOT decremented here.  It is decremented in
+   * node_retire_tea_ops() at the moment the op is physically removed from
+   * the Node Table.  This is the only point where ALL op types — including
+   * 0-latency non-mem ops (done_cycle == issue_cycle, so OP_DONE fires before
+   * exec_stage_clear_fu can run) — are guaranteed to decrement exactly once. */
   op->state = OS_DONE;
 
   STAT_EVENT(proc_id, TEA_OPS_EXECUTED);
@@ -318,11 +271,7 @@ void tea_op_flushed(uns proc_id, Op* op) {
 
   Tea_Thread* tea = tea_threads[proc_id];
 
-  uns8 cid = op->h2p_chain_id;
-  if (cid > 0 && cid <= MAX_TEA_CHAINS) {
-    Tea_H2P_Chain* c = &tea->chains[cid - 1];
-    if (c->tea_op_count > 0) {
-      c->tea_op_count--;
-    }
+  if (tea->tea_op_count > 0) {
+    tea->tea_op_count--;
   }
 }

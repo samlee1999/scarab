@@ -1,6 +1,6 @@
 # TEA Early Flush 현재 구현 상태
 
-**최종 갱신**: 2026-04-15
+**최종 갱신**: 2026-04-12
 **관련 계획 문서**: `TEA_early_flush_plan.md`
 
 ---
@@ -23,32 +23,19 @@ case 2: Post-Rename (Main H2P가 Rename 통과, SRT Checkpoint 존재)
 
 | 항목 | 위치 | 상태 |
 |------|------|------|
-| `reg_file_checkpoint_is_valid() == FALSE` 분기 | `exec_stage.c` | ✅ |
-| `main_h2p->tea_pending_mispred = TRUE` 세팅 | `exec_stage.c` | ✅ |
-| TEA chain 즉시 종료 (`terminate_tea_chain`) | `exec_stage.c` | ✅ |
-| `TEA_EARLY_FLUSH_CASE1` stat 기록 | `exec_stage.c` | ✅ |
-| deferred flush hook in rename stage | `map_stage.c:stage_process_op()` | ✅ |
-| `bp_sched_recovery()` at rename (if checkpoint valid) | `map_stage.c` | ✅ |
-| `recover_at_exec = FALSE` + `recovery_scheduled = TRUE` | `map_stage.c` | ✅ |
-| `map_rename.c` SRT rollback guard (`!checkpoint_is_valid`) | `map_rename.c` | ✅ |
+| `reg_file_checkpoint_is_valid() == FALSE` 분기 | `exec_stage.c:614` | ✅ |
+| `decode_cycle` 기반 분기 | `exec_stage.c:616` | ✅ |
+| Case 1a: decode 통과 → `TEA_EARLY_FLUSH_CASE1_NO_CHKPT` stat 기록 + TEA 종료 | `exec_stage.c:617-622` | ✅ |
+| Case 1b: decode 미도달 → `TEA_EARLY_FLUSH_CASE1_DECODE` stat 기록 + TEA 종료 | `exec_stage.c:623-630` | ✅ |
+| 즉시 `recover_tea_on_flush()` 호출 | `exec_stage.c:631` | ✅ |
 
-**현재 구현 (2026-04-15, deferred-to-rename)**:
+**현재 구현 (2026-04-12)**:
 
-TEA가 Main H2P보다 먼저 H2P branch를 execute하여 mispred 탐지 (SRT checkpoint 없음):
-1. `exec_stage.c`: `main_h2p->tea_pending_mispred = TRUE` 세팅 후 chain 종료
-2. Main H2P가 rename 통과 → `reg_file_rename()` 내부에서 SRT checkpoint 생성
-3. `map_stage.c:stage_process_op()`: checkpoint 확인 후 즉시 `bp_sched_recovery()` 호출
-4. 다음 cycle `cmp_recover()`: SRT rollback + flush
+- **Case 1a** (decode 통과, rename 미통과): `TEA_EARLY_FLUSH_CASE1_NO_CHKPT` stat 기록 후 `recover_tea_on_flush()` 호출로 TEA 즉시 종료. Main H2P의 `recover_at_exec=TRUE`는 `bp_predict_op()`에서 이미 설정되어 있으므로 자연 recovery.
+- **Case 1b** (decode 미도달): `TEA_EARLY_FLUSH_CASE1_DECODE` stat 기록 후 `recover_tea_on_flush()` 호출로 TEA 즉시 종료. `recover_at_decode` flag를 **설정하지 않음** — Main H2P가 rename에 도달 시 SRT checkpoint가 취득되고, exec에서 `recover_at_exec=TRUE`로 정상 recovery.
+- **`map_rename.c`**: `reg_renaming_scheme_realistic_recover()`에 `!reg_file_checkpoint_is_valid()` guard 적용 — Case 1에서 SRT checkpoint 없을 때 rollback 안전 스킵.
 
-**Fallback**: `bp_sched_recovery()`가 older recovery 우선으로 no-op 되면 `recover_at_exec = TRUE` 유지 → exec_stage 정상 처리.
-
-**이전 구현 히스토리 (아카이브)**:
-- 2026-04-12: Case 1a (`decode_cycle > 0`) / Case 1b (`decode_cycle == 0`) 분기. flush timing 이득 없음 — no-TEA와 동일.
-  - Case 1a: `TEA_EARLY_FLUSH_CASE1_NO_CHKPT` stat, `recover_at_exec=TRUE` fallback
-  - Case 1b: `TEA_EARLY_FLUSH_CASE1_DECODE` stat, `recover_at_exec=TRUE` fallback
-- 2026-03-26 Phase 9 실패: exec_stage에서 즉시 `bp_sched_recovery()` 시도 → checkpoint 없어서 ASSERT
-
-**동작**: Main H2P의 rename→exec 구간만큼 early flush benefit 획득 (Case 2와 동등).
+**동작**: SRT checkpoint이 없으므로 즉시 SRT rollback 불가. 두 케이스 모두 TEA를 즉시 종료하고 Main H2P의 기존 `recover_at_exec` flag로 자연 recovery 진행.
 
 ### Case 2: Post-Rename (Main H2P가 Rename 통과, SRT Checkpoint 존재)
 

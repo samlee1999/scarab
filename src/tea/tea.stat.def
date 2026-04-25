@@ -25,11 +25,9 @@
 
 /* TEA activation statistics */
 DEF_STAT(TEA_TRIGGER_ATTEMPTS, COUNT, NO_RATIO)    /* trigger_tea_thread() called */
-DEF_STAT(TEA_TRIGGER_SKIP_ACTIVE, COUNT, NO_RATIO)   /* legacy: kept for compatibility */
-DEF_STAT(TEA_TRIGGER_SKIP_FULL, COUNT, NO_RATIO)     /* skipped: all chain slots full */
+DEF_STAT(TEA_TRIGGER_SKIP_ACTIVE, COUNT, NO_RATIO)   /* skipped: TEA already active */
 DEF_STAT(TEA_TRIGGER_SKIP_NO_CHAIN, COUNT, NO_RATIO) /* skipped: no dependency chain */
 DEF_STAT(TEA_TRIGGERS, COUNT, NO_RATIO)
-DEF_STAT(TEA_CHAIN_TERMINATED, COUNT, NO_RATIO)      /* Individual chain terminated */
 
 /* TEA Fetch Stage diagnostics */
 DEF_STAT(TEA_FETCH_CALLED, COUNT, NO_RATIO)        /* update_tea_fetch_stage() entered */

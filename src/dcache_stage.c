@@ -138,8 +138,6 @@ void recover_dcache_stage() {
   uns ii;
   for (ii = 0; ii < NUM_FUS; ii++) {
     Op* op = dc->sd.ops[ii];
-    if (TEA_ENABLE && op && op->thread_id == 1)
-      continue;  /* TEA ops skipped: cleaned up by flush_tea_ops_by_chain_id() */
     if (op && op->op_num > bp_recovery_info->recovery_op_num) {
       dc->sd.ops[ii] = NULL;
       dc->sd.op_count--;
@@ -236,8 +234,7 @@ void update_dcache_stage(Stage_Data* src_sd) {
         /* TEA Store: Write to buffer, not D-cache */
         if (!tea_store_buffer_write(op->proc_id, op->oracle_info.va,
                                     op->oracle_info.new_mem_value,
-                                    op->oracle_info.mem_size,
-                                    op->h2p_chain_id)) {
+                                    op->oracle_info.mem_size)) {
           /* Buffer full: terminate TEA thread immediately.
            * terminate_tea_thread() flushes all TEA ops, so skip further
            * processing of this op (it may already be freed). */

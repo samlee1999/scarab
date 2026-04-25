@@ -224,24 +224,29 @@ void shadow_rat_snapshot(uns proc_id) {
     }
   }
 
-  /* Clear producer op pointers: main-thread arch inputs are immediately ready.
-   * We do NOT copy speculative SRT producer ops (from map_data->reg_map).
-   * Those in-flight ops can be squashed by a main-thread recovery that does NOT
-   * terminate the TEA chain (older chains survive recover_tea_on_flush).  Any
-   * TEA op that registered a dependency on a squashed main-thread op would then
-   * wait in the RS forever, keeping tea_op_count > 0 and permanently occupying
-   * the chain slot.  Since arch pregs hold committed values, no wakeup wait is
-   * needed — set producer_op = NULL so all main-thread inputs are ready on
-   * dispatch.  Intra-chain producers are written by tea_rename_op() when each
-   * TEA destination register is renamed. */
-  if (srat->gp_producer_ops)
-    memset(srat->gp_producer_ops, 0, srat->gp_size * sizeof(Op*));
-  if (srat->gp_producer_unums)
-    memset(srat->gp_producer_unums, 0, srat->gp_size * sizeof(Counter));
-  if (srat->vec_producer_ops)
-    memset(srat->vec_producer_ops, 0, srat->vec_size * sizeof(Op*));
-  if (srat->vec_producer_unums)
-    memset(srat->vec_producer_unums, 0, srat->vec_size * sizeof(Counter));
+  /* Copy producer Op pointers from Main thread's reg_map[]
+   * map_data is valid here: set_map_data() is called before icache_stage update
+   * in cmp_model.c per-cycle loop, and shadow_rat_snapshot() is called from
+   * trigger_tea_thread() → bp_predict_op() → update_icache_stage().
+   */
+  for (uns i = 0; i < NUM_REG_IDS; i++) {
+    int reg_type = get_reg_type_for_rename(i);
+    if (reg_type < 0) continue;
+
+    uns ind = i << 1 | map_data->map_flags[i];
+    Map_Entry* entry = &map_data->reg_map[ind];
+
+    if (reg_type == REG_FILE_REG_TYPE_GENERAL_PURPOSE) {
+      srat->gp_producer_ops[i] = entry->op;
+      srat->gp_producer_unums[i] = entry->unique_num;
+    } else if (reg_type == REG_FILE_REG_TYPE_VECTOR) {
+      int vec_idx = i - REG_ZMM0;
+      if (vec_idx >= 0 && vec_idx < (int)srat->vec_size) {
+        srat->vec_producer_ops[vec_idx] = entry->op;
+        srat->vec_producer_unums[vec_idx] = entry->unique_num;
+      }
+    }
+  }
 
   srat->is_valid = TRUE;
 }
@@ -451,13 +456,8 @@ void update_tea_rename_stage(uns proc_id, Stage_Data* tea_fetch_sd) {
   /* Phase 4.1: Check if TEA preg pool has enough resources before processing */
   if (tea_fetch_sd->op_count > 0 &&
       !tea_preg_pool_available(proc_id, tea_fetch_sd->op_count)) {
-    /* Preg pool exhausted: terminate TEA thread entirely to break deadlock.
-     * Stalling indefinitely would leave tea_op_count > 0 (stuck fetch ops)
-     * so chains never terminate and the pool is never reset.
-     * terminate_tea_thread() flushes all stages, resets preg pool, and allows
-     * new TEA triggers in subsequent cycles. */
+    /* Stall: don't process ops this cycle, they will retry next cycle */
     STAT_EVENT(proc_id, TEA_RENAME_STALL_PREG);
-    terminate_tea_thread(proc_id);
     return;
   }
 
@@ -596,36 +596,8 @@ void tea_rename_op(uns proc_id, Op* op) {
 /* recover_tea_rename_stage */
 
 void recover_tea_rename_stage(uns proc_id) {
+  /* On flush, reset the rename stage */
   reset_tea_rename_stage(proc_id);
-}
-
-/* recover_tea_rename_stage_by_chain: Free only ops from a specific chain
- * that are sitting in the rename stage's output buffer. */
-void recover_tea_rename_stage_by_chain(uns proc_id, uns8 h2p_chain_id) {
-  ASSERT(proc_id, proc_id < NUM_CORES);
-
-  if (!tea_rename_stages || !tea_rename_stages[proc_id]) {
-    return;
-  }
-
-  Tea_Rename_Stage* rename = tea_rename_stages[proc_id];
-
-  for (int i = 0; i < rename->sd.op_count; i++) {
-    Op* op = rename->sd.ops[i];
-    if (op && op->h2p_chain_id == h2p_chain_id) {
-      free_op(op);
-      rename->sd.ops[i] = NULL;
-    }
-  }
-
-  /* Compact the ops array to remove NULLs */
-  int write = 0;
-  for (int i = 0; i < rename->sd.op_count; i++) {
-    if (rename->sd.ops[i]) {
-      rename->sd.ops[write++] = rename->sd.ops[i];
-    }
-  }
-  rename->sd.op_count = write;
 }
 
 /**************************************************************************************/

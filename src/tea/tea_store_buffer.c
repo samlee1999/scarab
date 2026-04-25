@@ -95,24 +95,26 @@ void reset_tea_store_buffer(uns proc_id) {
  * Returns: TRUE if write succeeded, FALSE if buffer full (TEA should terminate)
  */
 
-Flag tea_store_buffer_write(uns proc_id, Addr addr, Quad data, uns size, uns8 chain_id) {
+Flag tea_store_buffer_write(uns proc_id, Addr addr, Quad data, uns size) {
   ASSERT(proc_id, proc_id < NUM_CORES);
   ASSERT(proc_id, tea_store_buffers && tea_store_buffers[proc_id]);
   ASSERT(proc_id, size <= TEA_STORE_BUFFER_ENTRY_SIZE);
 
   Tea_Store_Buffer* buf = tea_store_buffers[proc_id];
 
-  /* Limit size to sizeof(Quad) since data is passed by value. */
+  /* Limit size to sizeof(Quad) since data is passed by value.
+   * Larger stores (SSE/AVX) would overflow the stack variable.
+   * This is safe because TEA precomputation only needs scalar values. */
   uns copy_size = (size <= sizeof(Quad)) ? size : sizeof(Quad);
 
-  /* Check if there's an existing entry for this address (update in place) */
+  /* First, check if there's an existing entry for this address (update in place) */
   for (uns i = 0; i < buf->capacity; i++) {
     Tea_Store_Buffer_Entry* entry = &buf->entries[i];
     if (entry->valid && entry->addr == addr) {
+      /* Update existing entry */
       memcpy(entry->data, &data, copy_size);
       entry->size = copy_size;
       entry->write_cycle = cycle_count;
-      entry->h2p_chain_id = chain_id;
       return TRUE;
     }
   }
@@ -121,37 +123,19 @@ Flag tea_store_buffer_write(uns proc_id, Addr addr, Quad data, uns size, uns8 ch
   for (uns i = 0; i < buf->capacity; i++) {
     Tea_Store_Buffer_Entry* entry = &buf->entries[i];
     if (!entry->valid) {
+      /* Use this slot */
       entry->addr = addr;
       memcpy(entry->data, &data, copy_size);
       entry->size = copy_size;
       entry->valid = TRUE;
       entry->write_cycle = cycle_count;
-      entry->h2p_chain_id = chain_id;
       buf->count++;
       return TRUE;
     }
   }
 
+  /* Buffer full - return FALSE to signal TEA termination */
   return FALSE;
-}
-
-/**************************************************************************************/
-/* tea_store_buffer_clear_by_chain_id - Invalidate all entries for a specific chain */
-
-void tea_store_buffer_clear_by_chain_id(uns proc_id, uns8 chain_id) {
-  ASSERT(proc_id, proc_id < NUM_CORES);
-
-  if (!tea_store_buffers || !tea_store_buffers[proc_id]) {
-    return;
-  }
-
-  Tea_Store_Buffer* buf = tea_store_buffers[proc_id];
-  for (uns i = 0; i < buf->capacity; i++) {
-    if (buf->entries[i].valid && buf->entries[i].h2p_chain_id == chain_id) {
-      buf->entries[i].valid = FALSE;
-      if (buf->count > 0) buf->count--;
-    }
-  }
 }
 
 /**************************************************************************************/
