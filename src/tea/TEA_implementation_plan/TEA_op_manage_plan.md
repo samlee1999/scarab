@@ -185,7 +185,53 @@ void flush_tea_ops_by_chain_id(uns proc_id, uns8 chain_id) {
 }
 ```
 
-### 2.3 `flush_tea_ops_from_node_stage()`와의 관계
+### 2.3 전제 조건: `recover_exec_stage()` / `recover_dcache_stage()` TEA op 스킵
+
+**파일**: `src/exec_stage.c` (`recover_exec_stage()`), `src/dcache_stage.c` (`recover_dcache_stage()`)
+
+**버그 설명**:
+
+`FLUSH_OP(op)`는 내부적으로 `op->op_num > recovery_op_num`을 검사한다.
+TEA op의 `op_num`은 `0x8000000000000000 + k`로, 어떤 main thread `recovery_op_num`보다도
+항상 크다. 따라서 main thread misprediction 복구 시 `recover_exec_stage()`와
+`recover_dcache_stage()`가 exec→dc 파이프라인에 있는 **모든** TEA op을 제거한다.
+
+이후 `recover_tea_on_flush()`가 호출되어 `target_h2p_op_num >= recovery_op_num`인 chain은
+`terminate_tea_chain()`으로 종료되지만, **생존 chain** (`target_h2p_op_num < recovery_op_num`)은
+종료되지 않는다. 이 chain의 TEA ops는 이미 exec/dc stage에서 제거된 상태이므로:
+
+- 실행 완료 신호(`tea_op_completed()`)가 발생하지 않음
+- `node_retire_tea_ops()`에서 `chains[slot].tea_op_count--`가 호출되지 않음
+- `tea_op_count`가 영원히 > 0 → `update_tea_thread()`의 종료 조건 미충족 → chain 영구 점유
+
+**수정**:
+
+두 함수 모두 동일한 패턴으로 TEA op을 건너뛴다:
+
+```c
+// recover_exec_stage() — exec->sd.ops[] 순회 중
+if (TEA_ENABLE && op->thread_id == 1)
+  continue;  // TEA op은 flush_tea_ops_by_chain_id()가 처리
+
+// recover_dcache_stage() — dc->sd.ops[] 순회 중
+if (TEA_ENABLE && op->thread_id == 1)
+  continue;  // TEA op은 flush_tea_ops_by_chain_id()가 처리
+```
+
+**동작 설명**:
+- **종료 chain**: `terminate_tea_chain()` → `flush_tea_ops_by_chain_id()` step 0a/0b에서 정리
+- **생존 chain**: TEA ops가 exec/dc stage에 그대로 남아 정상 실행 완료 →
+  `node_retire_tea_ops()`에서 `tea_op_count--` → `tea_op_count == 0` → `terminate_tea_chain()` 자연 호출
+
+> **주의**: 이 수정이 없으면 `flush_tea_ops_by_chain_id()` step 0a/0b는 종료 chain에 대해
+> no-op이 되고 (이미 제거됨), 생존 chain은 orphan ops로 인해 영구 정체된다.
+> **이 수정은 `flush_tea_ops_by_chain_id()`의 전제 조건이다.**
+
+**수정 파일**: `src/exec_stage.c`, `src/dcache_stage.c`
+
+---
+
+### 2.4 `flush_tea_ops_from_node_stage()`와의 관계
 
 - 단일 H2P: 기존 `flush_tea_ops_from_node_stage()` 그대로 사용 (성능상 유리)
 - 다중 H2P: 개별 chain 종료 시 `flush_tea_ops_by_chain_id()` 사용
@@ -426,6 +472,8 @@ bottleneck."
 | `src/tea/tea_store_buffer.h/c` | entry에 `chain_id` 필드, `tea_store_buffer_clear_by_chain_id()` 추가 |
 | `src/node_stage.c` | `flush_tea_ops_by_chain_id()` 추가, `node_retire_tea_ops()`의 `tea_op_count--`를 per-chain `chains[slot].tea_op_count--`로 변경 |
 | `src/node_stage.h` | `flush_tea_ops_by_chain_id()` 프로토타입 추가 |
+| `src/exec_stage.c` | `recover_exec_stage()` 내 TEA op 스킵 추가 (`§2.3`) |
+| `src/dcache_stage.c` | `recover_dcache_stage()` 내 TEA op 스킵 추가 (`§2.3`) |
 | `src/tea/tea.stat.def` | `TEA_CHAIN_TERMINATED` stat 추가 |
 
 ---

@@ -859,7 +859,8 @@ if (tea->num_active_chains > tea->stat_max_concurrent) {
 | `src/tea/tea_thread.c` | trigger/terminate/update를 per-chain으로 | F.2 | ~150줄 수정 |
 | `src/tea/tea_fetch_stage.h` | `current_chain_id` 추가 | F.1 | 1줄 |
 | `src/tea/tea_fetch_stage.c` | chain 전환 로직, chain_id 할당, per-chain oracle | F.3 | ~40줄 수정 |
-| `src/exec_stage.c` | `exec_stage_bp_resolve()` 다중 chain 매칭 | F.4 | ~30줄 수정 |
+| `src/exec_stage.c` | `exec_stage_bp_resolve()` 다중 chain 매칭 + `recover_exec_stage()` TEA op 스킵 | F.4 / F.5 | ~35줄 수정 |
+| `src/dcache_stage.c` | `recover_dcache_stage()` TEA op 스킵 | F.5 | ~5줄 수정 |
 | `src/node_stage.c` | `flush_tea_ops_by_chain_id()` 추가 | F.5 | ~50줄 추가 |
 | `src/tea/tea_store_buffer.h` | entry에 `h2p_chain_id` 추가 | F.1 | 1줄 |
 | `src/tea/tea_store_buffer.c` | `clear_by_chain_id()` 추가, insert에 chain_id 기록 | F.5 | ~15줄 |
@@ -875,12 +876,23 @@ if (tea->num_active_chains > tea->stat_max_concurrent) {
 | `node_issue_queue.cc` | `thread_id` 기반 RS 파티셔닝/스케줄링 |
 | `exec_ports.c` | RS 파티셔닝 |
 | `map_rename.c` | `thread_id` 기반 TEA 제외 |
-| `dcache_stage.c` | 주소 기반 처리 |
 | `bp/bp.c` | 트리거 위치/조건 동일 |
 | `bp/hbt.c` | H2P 감지 독립 |
 | `tea/tea_rename.h/c` | Shadow RAT 공유 설계 유지 |
 | `fill_buffer.c` | Main thread retire만 추적 |
 | `dependency_chain_cache.c/h` | PC 인덱싱, chain 조회 동일. **단, 작업 HC (Hybrid Chain)에서 `block_pcs[]` 필드 추가 및 chain 재구축 로직 변경 — [`TEA_hybrid_chain_plan.md`](TEA_hybrid_chain_plan.md) 참조** |
+
+> **⚠️ `dcache_stage.c` 및 `exec_stage.c` 추가 수정 필요**
+>
+> Main thread recovery 시 `recover_exec_stage()` / `recover_dcache_stage()`가
+> TEA op_num(`0x8000...`)을 main thread recovery_op_num보다 크다고 판단하여
+> 생존 chain의 TEA ops를 제거 → `tea_op_count` 영구 > 0 → chain 종료 불가.
+>
+> **두 함수 모두 TEA ops를 건너뛰도록 수정 필요** (`TEA_op_manage_plan.md §2.3` 참조):
+> ```c
+> if (TEA_ENABLE && op->thread_id == 1) continue;
+> ```
+> 이 수정이 없으면 `flush_tea_ops_by_chain_id()` step 0a/0b가 올바르게 동작하지 않는다.
 
 ---
 
