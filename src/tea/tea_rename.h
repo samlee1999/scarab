@@ -32,6 +32,7 @@
 #include "globals/global_types.h"
 #include "stage_data.h"
 #include "isa/isa_macros.h"
+#include "tea/tea_thread.h"  /* MAX_TEA_CHAINS */
 
 /**************************************************************************************/
 /* Forward Declarations */
@@ -56,15 +57,17 @@ typedef struct Tea_Preg_Free_List_struct {
 /**************************************************************************************/
 /* Shadow RAT Structure */
 
-/* Shadow RAT: Snapshot of Main RAT's architectural register mappings
- * Used to rename TEA thread ops independently from Main thread
+/* Shadow RAT: Per-chain snapshot of Main RAT's architectural register mappings.
+ * One instance per chain slot (MAX_TEA_CHAINS total).
+ * Each chain gets its own independent mapping state and PREG pool,
+ * eliminating cross-chain PREG dependencies and enabling safe per-chain reset.
  */
 typedef struct Shadow_RAT_struct {
   uns8 proc_id;
 
   /* Architectural to Physical register mappings
-   * Copied from Main RAT at TEA trigger time
-   * Updated as TEA ops are renamed
+   * Copied from Main RAT at TEA trigger time for this chain
+   * Updated as this chain's TEA ops are renamed
    */
   int* gp_mappings;      /* General-purpose register mappings */
   int* vec_mappings;     /* Vector register mappings */
@@ -73,22 +76,22 @@ typedef struct Shadow_RAT_struct {
   uns gp_size;           /* Number of GP arch registers */
   uns vec_size;          /* Number of VEC arch registers */
 
-  /* Phase 4: TEA dedicated preg pools */
-  Tea_Preg_Free_List* tea_gp_preg_pool;   /* TEA GP physical register pool */
-  Tea_Preg_Free_List* tea_vec_preg_pool;  /* TEA VEC physical register pool */
+  /* Per-chain TEA dedicated preg pools */
+  Tea_Preg_Free_List* tea_gp_preg_pool;
+  Tea_Preg_Free_List* tea_vec_preg_pool;
 
-  /* Phase 4: Partition boundaries */
-  int tea_gp_start_idx;    /* First TEA GP preg index */
-  int tea_vec_start_idx;   /* First TEA VEC preg index */
+  /* Partition boundaries for this chain slot's PREG sub-range */
+  int tea_gp_start_idx;
+  int tea_vec_start_idx;
 
-  /* Producer Op tracking (for dependency wakeup) */
-  Op**     gp_producer_ops;       /* GP reg별 마지막 write op */
-  Counter* gp_producer_unums;     /* 유효성 검증용 unique_num */
-  Op**     vec_producer_ops;      /* VEC reg별 마지막 write op */
+  /* Producer Op tracking (for intra-chain dependency wakeup only) */
+  Op**     gp_producer_ops;
+  Counter* gp_producer_unums;
+  Op**     vec_producer_ops;
   Counter* vec_producer_unums;
 
-  /* Validity flag */
-  Flag is_valid;         /* TRUE after snapshot, FALSE after reset */
+  /* Validity flag: TRUE after snapshot, FALSE after reset */
+  Flag is_valid;
 
 } Shadow_RAT;
 
@@ -101,8 +104,10 @@ typedef struct Tea_Rename_Stage_struct {
   /* Stage interface data - output to Node Stage (RS insertion) */
   Stage_Data sd;
 
-  /* Shadow RAT instance */
-  Shadow_RAT* shadow_rat;
+  /* Per-chain Shadow RATs: chain_srats[slot] owns its own mapping state and PREG pool.
+   * Indexed by chain slot (0-based). Initialized at startup, snapshotted per trigger,
+   * reset individually on per-chain termination. */
+  Shadow_RAT* chain_srats[MAX_TEA_CHAINS];
 
 } Tea_Rename_Stage;
 
@@ -121,12 +126,12 @@ void reset_tea_rename_stage(uns proc_id);
 /* Phase 4: TEA preg pool initialization (call after reg_file_init) */
 void init_tea_preg_pools(uns proc_id);
 
-/* Shadow RAT operations */
-void shadow_rat_snapshot(uns proc_id);
-void reset_tea_preg_pool(uns proc_id);
+/* Shadow RAT operations — now per-chain */
+void shadow_rat_snapshot(uns proc_id, int chain_slot);
+void reset_tea_preg_pool(uns proc_id, int chain_slot);
 
 /* Phase 4.1: Resource availability check for stalling */
-Flag tea_preg_pool_available(uns proc_id, uns ops_count);
+Flag tea_preg_pool_available(uns proc_id, int chain_slot, uns ops_count);
 
 /* Per-cycle update */
 void update_tea_rename_stage(uns proc_id, Stage_Data* tea_fetch_sd);

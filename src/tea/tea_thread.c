@@ -144,9 +144,12 @@ void trigger_tea_thread(uns proc_id, Addr h2p_pc, Counter h2p_op_num, Op* h2p_op
   c->tea_ops_fetched = 0;
   tea->num_active_chains++;
 
-  /* First active chain: take Shadow RAT snapshot and reset the shared counter */
+  /* Per-chain Shadow RAT snapshot: each chain gets its own independent mapping
+   * from the main thread's current RAT state at trigger time. */
+  shadow_rat_snapshot(proc_id, slot);
+
+  /* First active chain: reset shared counters and advance state machine */
   if (tea->num_active_chains == 1) {
-    shadow_rat_snapshot(proc_id);
     tea->tea_op_counter = 0x8000000000000000ULL;
     tea->state = TEA_FETCHING;
   }
@@ -236,11 +239,14 @@ void terminate_tea_chain(uns proc_id, int chain_slot) {
 
   STAT_EVENT(proc_id, TEA_CHAIN_TERMINATED);
 
-  /* 6. If no chains remain, clean up shared resources */
+  /* 6. Per-chain PREG pool reset: restore this slot's pool independently.
+   * Shadow RAT was already invalidated by recover_tea_rename_stage_by_chain (step 2). */
+  reset_tea_preg_pool(proc_id, chain_slot);
+
+  /* 7. If no chains remain, clean up shared resources */
   if (tea->num_active_chains == 0) {
-    reset_tea_preg_pool(proc_id);
     reset_tea_store_buffer(proc_id);
-    recover_tea_rename_stage(proc_id);  /* Invalidate Shadow RAT */
+    recover_tea_rename_stage(proc_id);
     tea->state = TEA_IDLE;
     tea->current_fetch_chain = -1;
   }
@@ -266,7 +272,8 @@ void terminate_tea_thread(uns proc_id) {
   recover_tea_fetch_stage(proc_id);
   recover_tea_rename_stage(proc_id);
   flush_tea_ops_from_node_stage(proc_id);
-  reset_tea_preg_pool(proc_id);
+  for (int i = 0; i < MAX_TEA_CHAINS; i++)
+    reset_tea_preg_pool(proc_id, i);
   reset_tea_store_buffer(proc_id);
 
   tea->state = TEA_IDLE;
