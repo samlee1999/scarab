@@ -136,6 +136,7 @@ void tea_rename_op(uns proc_id, Op* op);
 
 /* Recovery */
 void recover_tea_rename_stage(uns proc_id);
+void recover_tea_rename_stage_by_chain(uns proc_id, uns8 chain_id);
 
 /**************************************************************************************/
 

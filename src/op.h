@@ -133,6 +133,7 @@ struct Op_struct {
   // {{{ op numbers and info pointers
   uns proc_id;                  // processor id for cmp model
   uns thread_id;                // id number for the thread to which this op belongs
+  uns8 h2p_chain_id;            // 0 = main op, 1~MAX_TEA_CHAINS = TEA chain slot+1 (1-based)
   Flag bom;                     // begining of macro instruction when we use op as a uop
   Flag eom;                     // end of macro instruction when we use op as a uop
   Flag fetched_instruction;     // is this op fetched or a rep op?

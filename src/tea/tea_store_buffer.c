@@ -23,7 +23,7 @@
  * File         : tea/tea_store_buffer.c
  * Author       : TEA Implementation
  * Date         : 2025
- * Description  : TEA Store Buffer implementation
+ * Description  : TEA Store Buffer implementation — multi-H2P chain support
  ***************************************************************************************/
 
 #include "tea/tea_store_buffer.h"
@@ -47,12 +47,10 @@ Tea_Store_Buffer** tea_store_buffers = NULL;
 void init_tea_store_buffer(uns proc_id) {
   ASSERT(proc_id, proc_id < NUM_CORES);
 
-  /* Allocate global array if not already done */
   if (!tea_store_buffers) {
     tea_store_buffers = (Tea_Store_Buffer**)calloc(NUM_CORES, sizeof(Tea_Store_Buffer*));
   }
 
-  /* Allocate buffer structure */
   Tea_Store_Buffer* buf = (Tea_Store_Buffer*)calloc(1, sizeof(Tea_Store_Buffer));
   tea_store_buffers[proc_id] = buf;
 
@@ -60,61 +58,46 @@ void init_tea_store_buffer(uns proc_id) {
   buf->capacity = TEA_STORE_BUFFER_SIZE;
   buf->count = 0;
 
-  /* Allocate entries array */
   buf->entries = (Tea_Store_Buffer_Entry*)calloc(TEA_STORE_BUFFER_SIZE,
                                                   sizeof(Tea_Store_Buffer_Entry));
-
-  /* Initialize all entries as invalid */
-  for (uns i = 0; i < TEA_STORE_BUFFER_SIZE; i++) {
+  for (uns i = 0; i < TEA_STORE_BUFFER_SIZE; i++)
     buf->entries[i].valid = FALSE;
-  }
 }
 
 /**************************************************************************************/
-/* reset_tea_store_buffer - Clear all entries on TEA termination */
+/* reset_tea_store_buffer */
 
 void reset_tea_store_buffer(uns proc_id) {
   ASSERT(proc_id, proc_id < NUM_CORES);
 
-  if (!tea_store_buffers || !tea_store_buffers[proc_id]) {
+  if (!tea_store_buffers || !tea_store_buffers[proc_id])
     return;
-  }
 
   Tea_Store_Buffer* buf = tea_store_buffers[proc_id];
-
-  /* Invalidate all entries */
-  for (uns i = 0; i < buf->capacity; i++) {
+  for (uns i = 0; i < buf->capacity; i++)
     buf->entries[i].valid = FALSE;
-  }
   buf->count = 0;
 }
 
 /**************************************************************************************/
-/* tea_store_buffer_write - Write TEA store to buffer
- *
- * Returns: TRUE if write succeeded, FALSE if buffer full (TEA should terminate)
- */
+/* tea_store_buffer_write */
 
-Flag tea_store_buffer_write(uns proc_id, Addr addr, Quad data, uns size) {
+Flag tea_store_buffer_write(uns proc_id, Addr addr, Quad data, uns size, uns8 chain_id) {
   ASSERT(proc_id, proc_id < NUM_CORES);
   ASSERT(proc_id, tea_store_buffers && tea_store_buffers[proc_id]);
   ASSERT(proc_id, size <= TEA_STORE_BUFFER_ENTRY_SIZE);
 
   Tea_Store_Buffer* buf = tea_store_buffers[proc_id];
-
-  /* Limit size to sizeof(Quad) since data is passed by value.
-   * Larger stores (SSE/AVX) would overflow the stack variable.
-   * This is safe because TEA precomputation only needs scalar values. */
   uns copy_size = (size <= sizeof(Quad)) ? size : sizeof(Quad);
 
-  /* First, check if there's an existing entry for this address (update in place) */
+  /* Update existing entry for same address */
   for (uns i = 0; i < buf->capacity; i++) {
     Tea_Store_Buffer_Entry* entry = &buf->entries[i];
     if (entry->valid && entry->addr == addr) {
-      /* Update existing entry */
       memcpy(entry->data, &data, copy_size);
       entry->size = copy_size;
       entry->write_cycle = cycle_count;
+      entry->h2p_chain_id = chain_id;
       return TRUE;
     }
   }
@@ -123,45 +106,36 @@ Flag tea_store_buffer_write(uns proc_id, Addr addr, Quad data, uns size) {
   for (uns i = 0; i < buf->capacity; i++) {
     Tea_Store_Buffer_Entry* entry = &buf->entries[i];
     if (!entry->valid) {
-      /* Use this slot */
       entry->addr = addr;
       memcpy(entry->data, &data, copy_size);
       entry->size = copy_size;
       entry->valid = TRUE;
       entry->write_cycle = cycle_count;
+      entry->h2p_chain_id = chain_id;
       buf->count++;
       return TRUE;
     }
   }
 
-  /* Buffer full - return FALSE to signal TEA termination */
-  return FALSE;
+  return FALSE;  /* Buffer full */
 }
 
 /**************************************************************************************/
-/* tea_store_buffer_read - Read from TEA store buffer for forwarding
- *
- * Returns: TRUE if data found (forwarding hit), FALSE otherwise
- * data_out: If TRUE returned, contains the forwarded data
- */
+/* tea_store_buffer_read */
 
 Flag tea_store_buffer_read(uns proc_id, Addr addr, uns size, Quad* data_out) {
   ASSERT(proc_id, proc_id < NUM_CORES);
   ASSERT(proc_id, data_out);
 
-  if (!tea_store_buffers || !tea_store_buffers[proc_id]) {
+  if (!tea_store_buffers || !tea_store_buffers[proc_id])
     return FALSE;
-  }
 
   Tea_Store_Buffer* buf = tea_store_buffers[proc_id];
 
-  /* Search for matching entry */
   for (uns i = 0; i < buf->capacity; i++) {
     Tea_Store_Buffer_Entry* entry = &buf->entries[i];
     if (entry->valid) {
-      /* Check if load address is contained within store's address range */
       if (addr >= entry->addr && (addr + size) <= (entry->addr + entry->size)) {
-        /* Forwarding hit - extract data at correct offset */
         uns offset = addr - entry->addr;
         *data_out = 0;
         memcpy(data_out, &entry->data[offset], size);
@@ -174,30 +148,41 @@ Flag tea_store_buffer_read(uns proc_id, Addr addr, uns size, Quad* data_out) {
 }
 
 /**************************************************************************************/
-/* tea_store_buffer_scan - Check if address has a matching store (for forwarding check)
- *
- * Returns: TRUE if a matching store exists, FALSE otherwise
- */
+/* tea_store_buffer_scan */
 
 Flag tea_store_buffer_scan(uns proc_id, Addr addr, uns size) {
   ASSERT(proc_id, proc_id < NUM_CORES);
 
-  if (!tea_store_buffers || !tea_store_buffers[proc_id]) {
+  if (!tea_store_buffers || !tea_store_buffers[proc_id])
     return FALSE;
-  }
 
   Tea_Store_Buffer* buf = tea_store_buffers[proc_id];
 
-  /* Search for matching entry */
   for (uns i = 0; i < buf->capacity; i++) {
     Tea_Store_Buffer_Entry* entry = &buf->entries[i];
     if (entry->valid) {
-      /* Check if load address overlaps with store's address range */
-      if (addr >= entry->addr && (addr + size) <= (entry->addr + entry->size)) {
+      if (addr >= entry->addr && (addr + size) <= (entry->addr + entry->size))
         return TRUE;
-      }
     }
   }
 
   return FALSE;
+}
+
+/**************************************************************************************/
+/* tea_store_buffer_clear_by_chain_id */
+
+void tea_store_buffer_clear_by_chain_id(uns proc_id, uns8 chain_id) {
+  if (!tea_store_buffers || !tea_store_buffers[proc_id])
+    return;
+
+  Tea_Store_Buffer* buf = tea_store_buffers[proc_id];
+  for (uns i = 0; i < buf->capacity; i++) {
+    Tea_Store_Buffer_Entry* entry = &buf->entries[i];
+    if (entry->valid && entry->h2p_chain_id == chain_id) {
+      entry->valid = FALSE;
+      if (buf->count > 0)
+        buf->count--;
+    }
+  }
 }

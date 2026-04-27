@@ -88,7 +88,7 @@ void cmp_done(void);
 void cmp_wake(Op*, Op*, uns8);
 void cmp_retire_hook(Op*);
 void cmp_warmup(Op*);
-void recover_tea_on_flush(uns proc_id);  /* TEA termination on flush (used by exec_stage Case 1) */
+void recover_tea_on_flush(uns proc_id, Counter recovery_op_num);  /* Selective TEA chain termination on flush */
 
 /**************************************************************************************/
 

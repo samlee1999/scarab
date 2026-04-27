@@ -596,8 +596,23 @@ void tea_rename_op(uns proc_id, Op* op) {
 /* recover_tea_rename_stage */
 
 void recover_tea_rename_stage(uns proc_id) {
-  /* On flush, reset the rename stage */
   reset_tea_rename_stage(proc_id);
+}
+
+/* recover_tea_rename_stage_by_chain: free rename-stage ops belonging to chain_id */
+void recover_tea_rename_stage_by_chain(uns proc_id, uns8 chain_id) {
+  Tea_Rename_Stage* rename = tea_rename_stages[proc_id];
+  if (!rename) return;
+
+  for (uns i = 0; i < rename->sd.max_op_count; i++) {
+    Op* op = rename->sd.ops[i];
+    if (op && op->h2p_chain_id == chain_id) {
+      free_op(op);
+      rename->sd.ops[i] = NULL;
+      if (rename->sd.op_count > 0)
+        rename->sd.op_count--;
+    }
+  }
 }
 
 /**************************************************************************************/

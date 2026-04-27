@@ -155,7 +155,11 @@ void recover_exec_stage() {
   for (ii = 0; ii < NUM_FUS; ii++) {
     Func_Unit* fu = &exec->fus[ii];
     Op* op = exec->sd.ops[ii];
-    if (op && op->op_num > bp_recovery_info->recovery_op_num) {
+    if (!op) continue;
+    /* TEA ops are managed by flush_tea_ops_by_chain_id() via terminate_tea_chain().
+     * Skipping here prevents surviving chains from losing their exec-stage ops. */
+    if (TEA_ENABLE && op->thread_id == 1) continue;
+    if (op->op_num > bp_recovery_info->recovery_op_num) {
       exec->sd.ops[ii] = NULL;
       exec->sd.op_count--;
       fu->avail_cycle = cycle_count + 1;
@@ -567,79 +571,71 @@ static inline void exec_stage_process_op(Op* op) {
 }
 
 static inline void exec_stage_bp_resolve(Op* op) {
-  /* TEA H2P branch: early misprediction detection and flush */
+  /* TEA H2P branch: early misprediction detection and per-chain flush */
   if (TEA_ENABLE && op->thread_id == 1) {
-    if (tea_is_active(op->proc_id)) {
-      Tea_Thread* tea = tea_threads[op->proc_id];
+    STAT_EVENT(op->proc_id, TEA_OPS_EXECUTED);
 
-      /* Check if this is the target H2P branch */
-      if (op->inst_info->addr == tea->target_h2p_pc) {
-        /* Misprediction detected: trigger early flush */
-        if (op->oracle_info.mispred || op->oracle_info.misfetch) {
-          DEBUG(op->proc_id, "TEA early flush: H2P mispred detected op_num:%s\n",
-                unsstr64(op->op_num));
+    if (!tea_is_active(op->proc_id))
+      return;
 
-          Op* main_h2p = tea->main_h2p_op;
-          ASSERT(op->proc_id, main_h2p != NULL);
-          ASSERT(op->proc_id, main_h2p->op_pool_valid);
+    Tea_Thread* tea = tea_threads[op->proc_id];
 
-          /* Guard: Main H2P is off-path → an earlier recovery will flush it anyway,
-           * no need to schedule another recovery. TEA terminates when that flush fires. */
-          if (main_h2p->off_path) {
-            return;
-          }
+    /* Identify which chain this op belongs to */
+    int chain_slot = (int)op->h2p_chain_id - 1;  /* 1-based → 0-based */
+    if (chain_slot < 0 || chain_slot >= MAX_TEA_CHAINS)
+      return;
 
-          /* Guard: Main H2P already scheduled its own recovery → skip */
-          if (!main_h2p->oracle_info.recovery_sch) {
-            if (reg_file_checkpoint_is_valid()) {
-              /* Case 2: Main H2P past rename → SRT checkpoint exists.
-               * Use Main H2P as recovery_op: thread_id==0 allows correct SRT rollback (Bug 1),
-               * uses Main H2P's branch_id for BP checkpoint restore (Bug 2),
-               * and uses Main H2P's op_num for FLUSH_OP comparison (Bug 3).
-               *
-               * CRITICAL: set recovery_scheduled=TRUE to prevent Main H2P from
-               * retiring before cmp_recover() fires.
-               * TEA termination happens inside cmp_recover()->recover_tea_on_flush(). */
-              bp_sched_recovery(bp_recovery_info, main_h2p, op->exec_cycle,
-                                FALSE, FALSE, EXTRA_LATE_RECOVERY_CYCLES);
-              /* Only block retirement if bp_sched_recovery() actually registered
-               * this op as recovery_op. If an older recovery was already pending,
-               * bp_sched_recovery() silently returns without setting recovery_sch,
-               * and main_h2p will be flushed by that earlier recovery anyway. */
-              if (main_h2p->oracle_info.recovery_sch) {
-                main_h2p->recovery_scheduled = TRUE;
-              }
-              main_h2p->oracle_info.recover_at_exec = FALSE;  /* Prevent double recovery */
-              STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE2_WITH_CHKPT);
-            } else {
-              /* Case 1: No SRT checkpoint available (Main H2P not yet past rename). */
-              if (main_h2p->decode_cycle) {
-                /* Case 1a: Main H2P already past decode but not yet renamed.
-                 * Main H2P's recover_at_exec was already set by bp_predict_op()
-                 * if it was mispredicted, so it will naturally recover at exec.
-                 * Just terminate TEA and let Main H2P proceed normally. */
-                STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_NO_CHKPT);
-              } else {
-                /* Case 1b: Main H2P not yet decoded.
-                 * DO NOT use recover_at_decode: that path skips flush_mispredict and
-                 * SRT rollback, leaving off-path preg allocations as ALLOC orphans and
-                 * SRT in an inconsistent state, causing COMMIT orphan accumulation.
-                 * Instead, keep recover_at_exec=TRUE so Main H2P proceeds normally:
-                 * at rename → SRT checkpoint taken; at exec → proper recovery fires. */
-                STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_DECODE);
-              }
-              recover_tea_on_flush(op->proc_id);
-            }
-            STAT_EVENT(op->proc_id, TEA_EARLY_FLUSHES);
-          }
-        } else {
-          /* TEA H2P correct prediction: record for statistics */
-          STAT_EVENT(op->proc_id, TEA_H2P_CORRECT);
-        }
+    Tea_H2P_Chain* c = &tea->chains[chain_slot];
+    if (c->state == CHAIN_INACTIVE)
+      return;  /* Chain already terminated; residual op finishing exec */
+
+    /* Only the H2P branch (whose addr matches target_h2p_pc) triggers early flush */
+    if (op->inst_info->addr != c->target_h2p_pc)
+      return;
+
+    if (op->oracle_info.mispred || op->oracle_info.misfetch) {
+      DEBUG(op->proc_id, "TEA early flush: chain=%d H2P mispred op_num:%s\n",
+            chain_slot, unsstr64(op->op_num));
+
+      Op* main_h2p = c->main_h2p_op;
+
+      /* Validate: main_h2p may have been retired/freed */
+      if (!main_h2p || !main_h2p->op_pool_valid ||
+          main_h2p->unique_num != c->saved_unique_num) {
+        terminate_tea_chain(op->proc_id, chain_slot);
+        return;
       }
-      STAT_EVENT(op->proc_id, TEA_OPS_EXECUTED);
+
+      /* Guard: if Main H2P is off-path an earlier recovery handles it */
+      if (main_h2p->off_path)
+        return;
+
+      if (!main_h2p->oracle_info.recovery_sch) {
+        if (reg_file_checkpoint_is_valid()) {
+          /* Case 2: SRT checkpoint present → schedule recovery at Main H2P */
+          bp_sched_recovery(bp_recovery_info, main_h2p, op->exec_cycle,
+                            FALSE, FALSE, EXTRA_LATE_RECOVERY_CYCLES);
+          if (main_h2p->oracle_info.recovery_sch)
+            main_h2p->recovery_scheduled = TRUE;
+          main_h2p->oracle_info.recover_at_exec = FALSE;
+          STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE2_WITH_CHKPT);
+          /* cmp_recover() → recover_tea_on_flush(proc_id, recovery_op_num)
+           * will terminate chains with target_h2p_op_num >= recovery_op_num. */
+        } else {
+          /* Case 1: No SRT checkpoint — terminate only this chain immediately */
+          if (main_h2p->decode_cycle)
+            STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_NO_CHKPT);
+          else
+            STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_DECODE);
+          terminate_tea_chain(op->proc_id, chain_slot);
+        }
+        STAT_EVENT(op->proc_id, TEA_EARLY_FLUSHES);
+      }
+    } else {
+      /* Correct prediction: TEA precomputation done, terminate this chain */
+      STAT_EVENT(op->proc_id, TEA_H2P_CORRECT);
+      terminate_tea_chain(op->proc_id, chain_slot);
     }
-    /* TEA ops do not update BP structures */
     return;
   }
 

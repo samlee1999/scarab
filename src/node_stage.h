@@ -96,6 +96,7 @@ Flag is_node_stage_stalled(void);
 
 /* TEA Thread support */
 void flush_tea_ops_from_node_stage(uns proc_id);
+void flush_tea_ops_by_chain_id(uns proc_id, uns8 chain_id);
 
 /**************************************************************************************/
 

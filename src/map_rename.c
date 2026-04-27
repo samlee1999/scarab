@@ -957,8 +957,13 @@ void reg_renaming_scheme_realistic_rename(Op *op) {
   reg_file_write_dst(op, REG_TABLE_TYPE_PHYSICAL, REG_TABLE_TYPE_ARCHITECTURAL);
 
   // checkpoint the speculative register table for recovering
-  if (!op->off_path && op->table_info->cf_type && op->oracle_info.recover_at_exec)
-    reg_file_snapshot_srt();
+  /* Multi-H2P (EF-3): Only snapshot once — oldest H2P holds the checkpoint.
+   * Subsequent H2P chains skip snapshot; recovery rolls back to oldest checkpoint,
+   * which flushes all younger ops including younger chains. */
+  if (!op->off_path && op->table_info->cf_type && op->oracle_info.recover_at_exec) {
+    if (!reg_file_checkpoint_is_valid())
+      reg_file_snapshot_srt();
+  }
 }
 
 // do not check the reg file when issuing
@@ -1088,8 +1093,11 @@ void reg_renaming_scheme_late_allocation_rename(Op *op) {
   reg_file_write_dst(op, REG_TABLE_TYPE_VIRTUAL, REG_TABLE_TYPE_ARCHITECTURAL);
 
   // checkpoint the speculative register table for recovering
-  if (!op->off_path && op->table_info->cf_type && op->oracle_info.recover_at_exec)
-    reg_file_snapshot_srt();
+  /* Multi-H2P (EF-3): Same guard as realistic scheme above. */
+  if (!op->off_path && op->table_info->cf_type && op->oracle_info.recover_at_exec) {
+    if (!reg_file_checkpoint_is_valid())
+      reg_file_snapshot_srt();
+  }
 }
 
 /*

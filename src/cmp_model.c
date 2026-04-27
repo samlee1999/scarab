@@ -384,18 +384,22 @@ void cmp_wake(Op* src_op, Op* dep_op, uns8 rdy_bit) {
 }
 
 /**************************************************************************************/
-/* recover_tea_on_flush: Handle TEA thread termination on flush */
-
-void recover_tea_on_flush(uns proc_id) {
-  if (!TEA_ENABLE || !tea_is_active(proc_id)) {
+/* recover_tea_on_flush: Terminate chains whose H2P is at or after the recovery point. */
+void recover_tea_on_flush(uns proc_id, Counter recovery_op_num) {
+  if (!TEA_ENABLE || !tea_is_active(proc_id))
     return;
-  }
 
-  /* Terminate TEA thread and reset all TEA stages */
-  terminate_tea_thread(proc_id);
-  reset_tea_fetch_stage(proc_id);
-  reset_tea_rename_stage(proc_id);
-  reset_tea_preg_pool(proc_id);
+  Tea_Thread* tea = tea_threads[proc_id];
+
+  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
+    Tea_H2P_Chain* c = &tea->chains[i];
+    if (c->state == CHAIN_INACTIVE) continue;
+
+    /* Chains whose H2P is at or after the recovery point must be flushed */
+    if (c->target_h2p_op_num >= recovery_op_num) {
+      terminate_tea_chain(proc_id, i);
+    }
+  }
 }
 
 /**************************************************************************************/
@@ -440,9 +444,10 @@ void cmp_recover() {
   recover_dcache_stage();
   recover_memory();
 
-  /* TEA Thread recovery: Terminate TEA on any flush */
+  /* TEA Thread recovery: Terminate chains younger than recovery point */
   if (TEA_ENABLE) {
-    recover_tea_on_flush(bp_recovery_info->proc_id);
+    recover_tea_on_flush(bp_recovery_info->proc_id,
+                         bp_recovery_info->recovery_op_num);
   }
 
   log_recovery_end(node, cycle_count, bp_recovery_info);

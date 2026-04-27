@@ -700,8 +700,11 @@ static void node_retire_tea_ops() {
        * by terminate_tea_thread(). */
       if (tea_threads && tea_threads[node->proc_id]) {
         Tea_Thread* tea_state = tea_threads[node->proc_id];
-        if (tea_state->tea_op_count > 0)
-          tea_state->tea_op_count--;
+        int slot = (int)op->h2p_chain_id - 1;  /* 1-based → 0-based */
+        if (slot >= 0 && slot < MAX_TEA_CHAINS &&
+            tea_state->chains[slot].tea_op_count > 0) {
+          tea_state->chains[slot].tea_op_count--;
+        }
       }
 
       DEBUG(node->proc_id, "TEA op retired op_num:%s\n", unsstr64(op->op_num));
@@ -717,6 +720,18 @@ static void node_retire_tea_ops() {
         else if (residence < 500) STAT_EVENT(node->proc_id, TEA_OP_NODE_CYCLES_100);
         else                      STAT_EVENT(node->proc_id, TEA_OP_NODE_CYCLES_500);
       }
+
+      /* DEBUG: detect if op is still in rdy_head when being retired.
+       * If in_rdy_list is TRUE here, clear() missed it (OS_DONE not in clear() condition)
+       * and RS counters (rs_op_count, tea_op_count) were never decremented → RS leak. */
+      ASSERTM(0, !op->in_rdy_list,
+              "retire_tea: op still in rdy_head! op_num=%s state=%d rs=%d "
+              "rs_op=%d main=%d tea=%d C=%llu\n",
+              unsstr64(op->op_num), op->state, (int)op->rs_id,
+              node->rs[op->rs_id].rs_op_count,
+              node->rs[op->rs_id].main_op_count,
+              node->rs[op->rs_id].tea_op_count,
+              (unsigned long long)cycle_count);
 
       Op* next = op->next_node;
       free_op(op);
@@ -1241,12 +1256,138 @@ void flush_tea_ops_from_node_stage(uns proc_id) {
       }
 
       Op* next = op->next_node;
-      tea_op_flushed(proc_id, op);  /* decrement tea_op_count for flush path */
       free_op(op);
       STAT_EVENT(proc_id, TEA_OPS_FLUSHED);
       op = next;
     } else {
       /* Keep main thread op */
+      last = &op->next_node;
+      node_local->node_tail = op;
+      op = op->next_node;
+    }
+  }
+}
+
+/**************************************************************************************/
+/* flush_tea_ops_by_chain_id: Selective flush for one TEA chain */
+
+void flush_tea_ops_by_chain_id(uns proc_id, uns8 chain_id) {
+  extern Cmp_Model cmp_model;
+  Node_Stage* node_local = &cmp_model.node_stage[proc_id];
+  Op* op;
+  Op** last;
+
+  /* 0a. exec_stage: remove ops from this chain */
+  Exec_Stage* exec_local = &cmp_model.exec_stage[proc_id];
+  for (uns ii = 0; ii < exec_local->sd.max_op_count; ii++) {
+    op = exec_local->sd.ops[ii];
+    if (op && op->h2p_chain_id == chain_id) {
+      exec_local->sd.ops[ii] = NULL;
+      exec_local->sd.op_count--;
+    }
+  }
+
+  /* 0b. dcache_stage: remove ops from this chain */
+  Dcache_Stage* dc_local = &cmp_model.dcache_stage[proc_id];
+  for (uns ii = 0; ii < dc_local->sd.max_op_count; ii++) {
+    op = dc_local->sd.ops[ii];
+    if (op && op->h2p_chain_id == chain_id) {
+      dc_local->sd.ops[ii] = NULL;
+      dc_local->sd.op_count--;
+    }
+  }
+
+  /* 1. Ready list: remove this chain's ops and sync RS counters */
+  for (op = node_local->rdy_head, last = &node_local->rdy_head; op;) {
+    if (op->h2p_chain_id == chain_id) {
+      *last = op->next_rdy;
+      op->in_rdy_list = FALSE;
+      if (op->state == OS_SCHEDULED || op->state == OS_MISS) {
+        if (node_local->rs[op->rs_id].rs_op_count > 0)
+          node_local->rs[op->rs_id].rs_op_count--;
+        if (node_local->rs[op->rs_id].tea_op_count > 0)
+          node_local->rs[op->rs_id].tea_op_count--;
+      } else {
+        /* DEBUG: log unexpected TEA op states in rdy_head during flush.
+         * OS_DONE here means node_retire_tea_ops() freed this op without
+         * removing it from rdy_head first — confirms RS counter leak path. */
+        _DEBUG(proc_id, DEBUG_TEA,
+               "flush_by_chain step1: unexpected state op_num=%s state=%d "
+               "rs=%d rs_op=%d main=%d tea=%d C=%llu\n",
+               unsstr64(op->op_num), op->state, (int)op->rs_id,
+               node_local->rs[op->rs_id].rs_op_count,
+               node_local->rs[op->rs_id].main_op_count,
+               node_local->rs[op->rs_id].tea_op_count,
+               (unsigned long long)cycle_count);
+      }
+      op = op->next_rdy;
+    } else {
+      last = &op->next_rdy;
+      op = op->next_rdy;
+    }
+  }
+
+  /* 2. Scheduling buffer */
+  for (uns ii = 0; ii < node_local->sd.max_op_count; ii++) {
+    op = node_local->sd.ops[ii];
+    if (op && op->h2p_chain_id == chain_id) {
+      node_local->sd.ops[ii] = NULL;
+      node_local->sd.op_count--;
+    }
+  }
+
+  /* 3. next_op_into_rs: advance past this chain's op if needed */
+  op = node_local->next_op_into_rs;
+  if (op && op->h2p_chain_id == chain_id) {
+    Op* next = op->next_node;
+    while (next && next->h2p_chain_id == chain_id)
+      next = next->next_node;
+    node_local->next_op_into_rs = next;
+  }
+
+  /* 4. Node table: remove this chain's ops, propagate wake-ups, free */
+  node_local->node_tail = NULL;
+  for (op = node_local->node_head, last = &node_local->node_head; op;) {
+    if (op->h2p_chain_id == chain_id) {
+      *last = op->next_node;
+      op->in_node_list = FALSE;
+
+      /* RS counter: only pre-scheduling states need adjustment */
+      if (op->state == OS_IN_RS || op->state == OS_READY ||
+          op->state == OS_WAIT_FWD || op->state == OS_SLEEP ||
+          op->state == OS_LOW_PRIORITY || op->state == OS_TENTATIVE) {
+        if (node_local->rs[op->rs_id].rs_op_count > 0)
+          node_local->rs[op->rs_id].rs_op_count--;
+        if (node_local->rs[op->rs_id].tea_op_count > 0)
+          node_local->rs[op->rs_id].tea_op_count--;
+      }
+
+      /* Wake-up propagation: clear not-rdy bits in ops that were waiting
+       * on this flushed producer.  Surviving chain ops or main-thread ops
+       * may be blocked; unblocking them lets execution continue.
+       * Skip same-chain dependents — they are freed in this same loop pass
+       * and re-adding them to rdy_head would create a dangling pointer. */
+      for (Wake_Up_Entry* we = op->wake_up_head; we; we = we->next) {
+        Op* dep_op = we->op;
+        if (!dep_op || !dep_op->op_pool_valid ||
+            dep_op->unique_num != we->unique_num)
+          continue;
+        if (dep_op->h2p_chain_id == chain_id)
+          continue;
+        clear_not_rdy_bit(dep_op, we->rdy_bit);
+        if (dep_op->srcs_not_rdy_vector == 0x0 &&
+            dep_op->state == OS_IN_RS && !dep_op->in_rdy_list) {
+          dep_op->next_rdy = node_local->rdy_head;
+          node_local->rdy_head = dep_op;
+          dep_op->in_rdy_list = TRUE;
+        }
+      }
+
+      Op* next = op->next_node;
+      free_op(op);
+      STAT_EVENT(proc_id, TEA_OPS_FLUSHED);
+      op = next;
+    } else {
       last = &op->next_node;
       node_local->node_tail = op;
       op = op->next_node;

@@ -25,7 +25,10 @@
 
 /* TEA activation statistics */
 DEF_STAT(TEA_TRIGGER_ATTEMPTS, COUNT, NO_RATIO)    /* trigger_tea_thread() called */
-DEF_STAT(TEA_TRIGGER_SKIP_ACTIVE, COUNT, NO_RATIO)   /* skipped: TEA already active */
+DEF_STAT(TEA_TRIGGER_SKIP_ACTIVE, COUNT, NO_RATIO)   /* skipped: TEA already active (single-H2P legacy) */
+DEF_STAT(TEA_TRIGGER_SKIP_FULL, COUNT, NO_RATIO)     /* skipped: all chain slots in use */
+DEF_STAT(TEA_CHAIN_TERMINATED, COUNT, NO_RATIO)      /* individual chain terminated */
+DEF_STAT(TEA_CHAINS_CONCURRENT_MAX, COUNT, NO_RATIO) /* high-watermark of simultaneous chains */
 DEF_STAT(TEA_TRIGGER_SKIP_NO_CHAIN, COUNT, NO_RATIO) /* skipped: no dependency chain */
 DEF_STAT(TEA_TRIGGERS, COUNT, NO_RATIO)
 

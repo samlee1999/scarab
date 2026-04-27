@@ -50,6 +50,7 @@ typedef struct Tea_Store_Buffer_Entry_struct {
   uns    size;           /* Actual data size (1, 2, 4, 8, etc.) */
   Flag   valid;          /* Entry valid flag */
   Counter write_cycle;   /* Cycle when store was written */
+  uns8   h2p_chain_id;   /* Which TEA chain wrote this entry (1-based) */
 } Tea_Store_Buffer_Entry;
 
 /**************************************************************************************/
@@ -75,9 +76,10 @@ void init_tea_store_buffer(uns proc_id);
 void reset_tea_store_buffer(uns proc_id);
 
 /* Store buffer operations */
-Flag tea_store_buffer_write(uns proc_id, Addr addr, Quad data, uns size);
+Flag tea_store_buffer_write(uns proc_id, Addr addr, Quad data, uns size, uns8 chain_id);
 Flag tea_store_buffer_read(uns proc_id, Addr addr, uns size, Quad* data_out);
 Flag tea_store_buffer_scan(uns proc_id, Addr addr, uns size);
+void tea_store_buffer_clear_by_chain_id(uns proc_id, uns8 chain_id);
 
 /**************************************************************************************/
 
