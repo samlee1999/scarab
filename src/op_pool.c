@@ -209,6 +209,7 @@ void op_pool_setup_op(uns proc_id, Op* op) {
   op->unique_num_per_proc = unique_count_per_core[proc_id];
   op->proc_id = proc_id;
   op->thread_id = 0;
+  op->h2p_chain_id = 0;
   op->off_path = FALSE;  // FIXME: check
   op->state = OS_FETCHED;
   op->fu_num = -1;
