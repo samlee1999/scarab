@@ -386,7 +386,14 @@ void cmp_wake(Op* src_op, Op* dep_op, uns8 rdy_bit) {
 /**************************************************************************************/
 /* recover_tea_on_flush: Terminate chains whose H2P is at or after the recovery point. */
 void recover_tea_on_flush(uns proc_id, Counter recovery_op_num) {
-  if (!TEA_ENABLE || !tea_is_active(proc_id))
+  if (!TEA_ENABLE) return;
+  /* Selectively clear pending Case 1 flushes whose H2P is at or after the recovery
+   * point — those will be flushed by main recovery anyway.  Older H2P pending entries
+   * (op_num < recovery_op_num) are preserved so they can still fire at rename time.
+   * Must run outside tea_is_active() guard: last chain may have terminated while a
+   * pending entry is still live. */
+  tea_selective_clear_pending_case1_flushes(proc_id, recovery_op_num);
+  if (!tea_is_active(proc_id))
     return;
 
   Tea_Thread* tea = tea_threads[proc_id];

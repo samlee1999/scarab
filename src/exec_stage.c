@@ -622,7 +622,9 @@ static inline void exec_stage_bp_resolve(Op* op) {
           /* cmp_recover() → recover_tea_on_flush(proc_id, recovery_op_num)
            * will terminate chains with target_h2p_op_num >= recovery_op_num. */
         } else {
-          /* Case 1: No SRT checkpoint — terminate only this chain immediately */
+          /* Case 1: No SRT checkpoint yet — record pending flush so recovery
+           * fires when main H2P reaches rename and the checkpoint is created. */
+          tea_record_pending_case1_flush(op->proc_id, main_h2p);
           if (main_h2p->decode_cycle)
             STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_NO_CHKPT);
           else
@@ -670,4 +672,53 @@ static inline void exec_stage_bp_resolve(Op* op) {
     ASSERT(0, 0);
   }
 #endif
+}
+
+/**************************************************************************************/
+/* exec_stage_tea_pending_flush_at_rename
+ * Called ONLY from inside the `!reg_file_checkpoint_is_valid()` branch of the rename
+ * stage, immediately after reg_file_snapshot_srt().  This guarantees the SRT checkpoint
+ * was just created by 'op' — i.e., the checkpoint belongs to 'op'.
+ *
+ * Safety invariant: do NOT call this when a checkpoint already exists.  If the existing
+ * checkpoint belongs to an older H2P_A but we call bp_sched_recovery(H2P_B), the SRT
+ * rollback would revert to A's RAT state while main pipeline only flushes from B onwards,
+ * corrupting the mappings of ops between A and B.
+ *
+ * The unique_num match below then confirms 'op' is the exact pending Case 1 main H2P. */
+void exec_stage_tea_pending_flush_at_rename(uns proc_id, Op* op) {
+  if (!TEA_ENABLE) return;
+  if (!tea_threads || !tea_threads[proc_id]) return;
+
+  Tea_Thread* tea = tea_threads[proc_id];
+
+  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
+    Tea_Pending_Case1_Flush* pf = &tea->pending_case1_flushes[i];
+    if (!pf->valid) continue;
+
+    Op* h2p = pf->main_h2p_op;
+
+    /* Validate stored pointer is still live */
+    if (!h2p || !h2p->op_pool_valid || h2p->unique_num != pf->main_h2p_unique_num) {
+      pf->valid = FALSE;
+      continue;
+    }
+
+    /* Check if the op being renamed is the pending main H2P */
+    if (op->unique_num != pf->main_h2p_unique_num) continue;
+
+    /* Safety guards (same as Case 2) */
+    if (!h2p->off_path && !h2p->oracle_info.recovery_sch) {
+      /* Use cycle_count (current cycle at rename time), not the past TEA exec cycle.
+       * The earliest recovery can fire is now — using a past cycle would set
+       * recovery_cycle in the past and distort latency statistics. */
+      bp_sched_recovery(bp_recovery_info, h2p, cycle_count,
+                        FALSE, FALSE, EXTRA_LATE_RECOVERY_CYCLES);
+      if (h2p->oracle_info.recovery_sch)
+        h2p->recovery_scheduled = TRUE;
+      h2p->oracle_info.recover_at_exec = FALSE;
+      STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_PENDING_TRIGGERED);
+    }
+    pf->valid = FALSE;
+  }
 }

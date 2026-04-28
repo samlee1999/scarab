@@ -43,6 +43,20 @@ typedef enum Tea_State_enum {
 } Tea_State;
 
 /**************************************************************************************/
+/* Case 1 Pending Early Flush */
+
+/* When TEA detects a mispredicted H2P branch (Case 1) before the main thread's
+ * SRT checkpoint exists, we cannot call bp_sched_recovery immediately.  Instead
+ * we record the intent here and trigger recovery the moment the main H2P reaches
+ * rename and its SRT checkpoint is created. */
+typedef struct Tea_Pending_Case1_Flush_struct {
+  Flag    valid;
+  Op*     main_h2p_op;
+  Counter main_h2p_unique_num;  /* validity stamp — matches main_h2p_op->unique_num */
+  Counter main_h2p_op_num;      /* for selective clear on recovery flush */
+} Tea_Pending_Case1_Flush;
+
+/**************************************************************************************/
 /* Per-Chain State */
 
 typedef enum Tea_Chain_State_enum {
@@ -85,6 +99,9 @@ typedef struct Tea_Thread_struct {
   Counter tea_op_counter;         /* Global TEA op_num counter (starts at 0x8000...0) */
   Counter tea_start_cycle;
 
+  /* Case 1 pending early flushes (max one per chain slot) */
+  Tea_Pending_Case1_Flush pending_case1_flushes[MAX_TEA_CHAINS];
+
   /* Statistics */
   Counter stat_tea_triggers;
   Counter stat_tea_early_flushes;
@@ -118,6 +135,11 @@ void update_tea_thread(uns proc_id);
 
 /* Op management */
 void tea_op_completed(uns proc_id, Op* op);
+
+/* Case 1 pending early flush management */
+void tea_record_pending_case1_flush(uns proc_id, Op* main_h2p);
+void tea_clear_pending_case1_flushes(uns proc_id);
+void tea_selective_clear_pending_case1_flushes(uns proc_id, Counter recovery_op_num);
 
 /**************************************************************************************/
 

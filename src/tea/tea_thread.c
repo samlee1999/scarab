@@ -98,6 +98,7 @@ void reset_tea_thread(uns proc_id) {
     memset(&tea->chains[i], 0, sizeof(Tea_H2P_Chain));
     tea->chains[i].state = CHAIN_INACTIVE;
   }
+  memset(tea->pending_case1_flushes, 0, sizeof(tea->pending_case1_flushes));
 }
 
 /**************************************************************************************/
@@ -279,6 +280,7 @@ void terminate_tea_thread(uns proc_id) {
   for (int i = 0; i < MAX_TEA_CHAINS; i++)
     reset_tea_preg_pool(proc_id, i);
   reset_tea_store_buffer(proc_id);
+  memset(tea->pending_case1_flushes, 0, sizeof(tea->pending_case1_flushes));
 
   tea->state = TEA_IDLE;
 }
@@ -331,4 +333,38 @@ void tea_op_completed(uns proc_id, Op* op) {
    * to prevent use-after-free for 0-latency ops. */
   op->state = OS_DONE;
   STAT_EVENT(proc_id, TEA_OPS_EXECUTED);
+}
+
+/**************************************************************************************/
+/* Case 1 Pending Early Flush */
+
+void tea_record_pending_case1_flush(uns proc_id, Op* main_h2p) {
+  ASSERT(proc_id, tea_threads && tea_threads[proc_id]);
+  Tea_Thread* tea = tea_threads[proc_id];
+  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
+    if (!tea->pending_case1_flushes[i].valid) {
+      tea->pending_case1_flushes[i].valid               = TRUE;
+      tea->pending_case1_flushes[i].main_h2p_op         = main_h2p;
+      tea->pending_case1_flushes[i].main_h2p_unique_num = main_h2p->unique_num;
+      tea->pending_case1_flushes[i].main_h2p_op_num     = main_h2p->op_num;
+      return;
+    }
+  }
+  /* All slots occupied (rare): silently drop — conservative, no worse than before */
+}
+
+void tea_clear_pending_case1_flushes(uns proc_id) {
+  if (!tea_threads || !tea_threads[proc_id]) return;
+  memset(tea_threads[proc_id]->pending_case1_flushes, 0,
+         sizeof(tea_threads[proc_id]->pending_case1_flushes));
+}
+
+void tea_selective_clear_pending_case1_flushes(uns proc_id, Counter recovery_op_num) {
+  if (!tea_threads || !tea_threads[proc_id]) return;
+  Tea_Thread* tea = tea_threads[proc_id];
+  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
+    Tea_Pending_Case1_Flush* pf = &tea->pending_case1_flushes[i];
+    if (pf->valid && pf->main_h2p_op_num >= recovery_op_num)
+      pf->valid = FALSE;
+  }
 }

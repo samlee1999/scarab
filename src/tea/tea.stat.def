@@ -68,6 +68,7 @@ DEF_STAT(TEA_H2P_CORRECT, COUNT, NO_RATIO)
 DEF_STAT(TEA_EARLY_FLUSH_CASE1_DECODE, COUNT, NO_RATIO)  /* Case 1: no SRT checkpoint -> recover_at_decode */
 DEF_STAT(TEA_EARLY_FLUSH_CASE1_NO_CHKPT, COUNT, NO_RATIO) /* Case 1: no SRT checkpoint, passed decode */
 DEF_STAT(TEA_EARLY_FLUSH_CASE2_WITH_CHKPT, COUNT, NO_RATIO) /* Case 2: SRT checkpoint present */
+DEF_STAT(TEA_EARLY_FLUSH_CASE1_PENDING_TRIGGERED, COUNT, NO_RATIO) /* Case 1 pending: fired at rename time */
 
 /* Debug: Preg recovery efficiency */
 DEF_STAT(TEA_RECOVER_PREGS_FREED, COUNT, NO_RATIO)   /* total Pregs freed by reg_file_recover() */

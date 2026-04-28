@@ -28,6 +28,7 @@
  ***************************************************************************************/
 
 #include "map_rename.h"
+#include "exec_stage.h"
 
 #include "globals/assert.h"
 #include "globals/global_defs.h"
@@ -961,8 +962,14 @@ void reg_renaming_scheme_realistic_rename(Op *op) {
    * Subsequent H2P chains skip snapshot; recovery rolls back to oldest checkpoint,
    * which flushes all younger ops including younger chains. */
   if (!op->off_path && op->table_info->cf_type && op->oracle_info.recover_at_exec) {
-    if (!reg_file_checkpoint_is_valid())
+    if (!reg_file_checkpoint_is_valid()) {
       reg_file_snapshot_srt();
+      /* TEA Case 1 pending flush: called here — inside !valid branch — so the
+       * checkpoint was just created by 'op'.  Do NOT move this call outside the
+       * branch; using a foreign (older H2P) checkpoint for a younger H2P would
+       * corrupt RAT state on recovery. */
+      exec_stage_tea_pending_flush_at_rename(op->proc_id, op);
+    }
   }
 }
 
@@ -1093,10 +1100,13 @@ void reg_renaming_scheme_late_allocation_rename(Op *op) {
   reg_file_write_dst(op, REG_TABLE_TYPE_VIRTUAL, REG_TABLE_TYPE_ARCHITECTURAL);
 
   // checkpoint the speculative register table for recovering
-  /* Multi-H2P (EF-3): Same guard as realistic scheme above. */
+  /* Multi-H2P (EF-3): Same guard as realistic scheme above.
+   * TEA pending flush hook is inside !valid branch for the same safety reason. */
   if (!op->off_path && op->table_info->cf_type && op->oracle_info.recover_at_exec) {
-    if (!reg_file_checkpoint_is_valid())
+    if (!reg_file_checkpoint_is_valid()) {
       reg_file_snapshot_srt();
+      exec_stage_tea_pending_flush_at_rename(op->proc_id, op);
+    }
   }
 }
 

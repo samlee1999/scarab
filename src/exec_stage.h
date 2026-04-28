@@ -72,6 +72,9 @@ void debug_exec_stage(void);
 void update_exec_stage(Stage_Data*);
 void finalize_exec_stage(void);
 
+/* TEA Case 1 pending flush: called from map_rename after SRT checkpoint creation */
+void exec_stage_tea_pending_flush_at_rename(uns proc_id, Op* op);
+
 /**************************************************************************************/
 
 #endif /* #ifndef __EXEC_STAGE_H__ */
