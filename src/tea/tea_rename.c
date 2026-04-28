@@ -347,6 +347,54 @@ void init_tea_preg_pools(uns proc_id) {
 }
 
 /**************************************************************************************/
+/* tea_preg_pool_return_prev: Return a retired op's prev-mapping PREGs to the chain pool.
+ * Standard RAT behavior: the old physical register (overwritten by this op's rename)
+ * becomes free when the op that overwrote it retires.
+ * Only TEA PREGs within this chain's sub-range are returned; the initial snapshot
+ * mapping (main-thread PREGs) are skipped. */
+
+void tea_preg_pool_return_prev(uns proc_id, int chain_slot, Op* op) {
+  ASSERT(proc_id, tea_rename_stages && tea_rename_stages[proc_id]);
+  ASSERT(proc_id, chain_slot >= 0 && chain_slot < MAX_TEA_CHAINS);
+  ASSERT(proc_id, op);
+
+  Shadow_RAT* srat = tea_rename_stages[proc_id]->chain_srats[chain_slot];
+  if (!srat) return;
+
+  Inst_Info*  inst_info  = op->inst_info;
+  Table_Info* table_info = op->table_info;
+
+  for (uns i = 0; i < table_info->num_dest_regs; i++) {
+    int arch_reg_id = inst_info->dests[i].id;
+    int reg_type    = get_reg_type_for_rename(arch_reg_id);
+    if (reg_type < 0) continue;
+
+    int prev_preg = op->prev_dst_reg_id[i][REG_TABLE_TYPE_PHYSICAL];
+    if (prev_preg == REG_TABLE_REG_ID_INVALID) continue;
+
+    if (reg_type == REG_FILE_REG_TYPE_GENERAL_PURPOSE && srat->tea_gp_preg_pool) {
+      Tea_Preg_Free_List* pool = srat->tea_gp_preg_pool;
+      if (prev_preg >= srat->tea_gp_start_idx &&
+          prev_preg < srat->tea_gp_start_idx + (int)pool->size) {
+        ASSERT(proc_id, pool->count < pool->size);
+        pool->indices[pool->tail] = (uns)prev_preg;
+        pool->tail  = (pool->tail + 1) % pool->size;
+        pool->count++;
+      }
+    } else if (reg_type == REG_FILE_REG_TYPE_VECTOR && srat->tea_vec_preg_pool) {
+      Tea_Preg_Free_List* pool = srat->tea_vec_preg_pool;
+      if (prev_preg >= srat->tea_vec_start_idx &&
+          prev_preg < srat->tea_vec_start_idx + (int)pool->size) {
+        ASSERT(proc_id, pool->count < pool->size);
+        pool->indices[pool->tail] = (uns)prev_preg;
+        pool->tail  = (pool->tail + 1) % pool->size;
+        pool->count++;
+      }
+    }
+  }
+}
+
+/**************************************************************************************/
 /* reset_tea_preg_pool: Reset one chain slot's PREG pool to full */
 
 void reset_tea_preg_pool(uns proc_id, int chain_slot) {

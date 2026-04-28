@@ -134,6 +134,9 @@ void reset_tea_preg_pool(uns proc_id, int chain_slot);
 Flag tea_preg_pool_available(uns proc_id, int chain_slot,
                               uns required_gp, uns required_vec);
 
+/* PREG recycling: return a retired op's prev-mapping PREGs to the chain pool */
+void tea_preg_pool_return_prev(uns proc_id, int chain_slot, Op* op);
+
 /* Per-cycle update */
 void update_tea_rename_stage(uns proc_id, Stage_Data* tea_fetch_sd);
 

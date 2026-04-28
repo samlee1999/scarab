@@ -704,6 +704,10 @@ static void node_retire_tea_ops() {
         if (slot >= 0 && slot < MAX_TEA_CHAINS &&
             tea_state->chains[slot].tea_op_count > 0) {
           tea_state->chains[slot].tea_op_count--;
+          /* Return prev-mapping PREGs to the chain's pool (standard RAT recycling).
+           * The old physical register freed by this op's rename becomes available
+           * for the next rename pass, preventing pool exhaustion on long dep chains. */
+          tea_preg_pool_return_prev(node->proc_id, slot, op);
         }
       }
 
