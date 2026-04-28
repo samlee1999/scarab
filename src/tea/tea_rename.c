@@ -203,14 +203,18 @@ void shadow_rat_snapshot(uns proc_id, int chain_slot) {
     }
   }
 
-  /* Copy VEC register mappings from Main RAT */
+  /* Copy VEC register mappings from Main RAT.
+   * arch_table is indexed by absolute arch_reg_id (size=NUM_REG_IDS).
+   * vec_mappings uses compact index (0=ZMM0) to match shadow_rat_read/write_mapping. */
   if (reg_file && reg_file[REG_FILE_REG_TYPE_VECTOR]) {
     struct reg_table* arch_table =
       reg_file[REG_FILE_REG_TYPE_VECTOR]->reg_table[REG_TABLE_TYPE_ARCHITECTURAL];
 
     if (arch_table && arch_table->entries) {
-      for (uns i = 0; i < arch_table->size && i < srat->vec_size; i++) {
-        srat->vec_mappings[i] = arch_table->entries[i].child_reg_id;
+      for (int i = (int)REG_ZMM0; i < (int)REG_K0 && i < (int)arch_table->size; i++) {
+        int compact_idx = i - (int)REG_ZMM0;
+        if (compact_idx < (int)srat->vec_size)
+          srat->vec_mappings[compact_idx] = arch_table->entries[i].child_reg_id;
       }
     }
   }
@@ -303,7 +307,8 @@ void init_tea_preg_pools(uns proc_id) {
   Tea_Rename_Stage* rename = tea_rename_stages[proc_id];
 
   /* TEA_PREG_RESERVATION / MAX_TEA_CHAINS PREGs per chain slot.
-   * All TEA indices are still removed from main free list as one contiguous block. */
+   * Must divide evenly; remainder would be removed from main list but wasted. */
+  ASSERT(proc_id, TEA_PREG_RESERVATION % MAX_TEA_CHAINS == 0);
   uns per_chain = TEA_PREG_RESERVATION / MAX_TEA_CHAINS;
   ASSERT(proc_id, per_chain > 0);
 
@@ -370,9 +375,10 @@ void reset_tea_preg_pool(uns proc_id, int chain_slot) {
 }
 
 /**************************************************************************************/
-/* tea_preg_pool_available: Check if chain_slot has enough PREGs for ops_count */
+/* tea_preg_pool_available: Check if chain_slot has enough PREGs for exact dest counts */
 
-Flag tea_preg_pool_available(uns proc_id, int chain_slot, uns ops_count) {
+Flag tea_preg_pool_available(uns proc_id, int chain_slot,
+                              uns required_gp, uns required_vec) {
   ASSERT(proc_id, tea_rename_stages && tea_rename_stages[proc_id]);
   ASSERT(proc_id, chain_slot >= 0 && chain_slot < MAX_TEA_CHAINS);
 
@@ -380,10 +386,6 @@ Flag tea_preg_pool_available(uns proc_id, int chain_slot, uns ops_count) {
 
   if (!srat || !srat->is_valid)
     return FALSE;
-
-  /* Conservative: up to 2 GP + 1 VEC dest per op */
-  uns required_gp  = ops_count * 2;
-  uns required_vec = ops_count * 1;
 
   Flag gp_ok  = (!srat->tea_gp_preg_pool  || srat->tea_gp_preg_pool->count  >= required_gp);
   Flag vec_ok = (!srat->tea_vec_preg_pool || srat->tea_vec_preg_pool->count >= required_vec);
@@ -409,20 +411,43 @@ void update_tea_rename_stage(uns proc_id, Stage_Data* tea_fetch_sd) {
 
   rename->sd.op_count = 0;
 
-  /* PREG stall check: find which chain's ops are in the fetch SD */
+  /* PREG stall check: count exact GP/VEC dest regs in this batch */
   if (tea_fetch_sd->op_count > 0) {
     int chain_slot = -1;
+    uns required_gp = 0, required_vec = 0;
     for (uns i = 0; i < (uns)tea_fetch_sd->max_op_count; i++) {
-      if (tea_fetch_sd->ops[i]) {
-        chain_slot = (int)tea_fetch_sd->ops[i]->h2p_chain_id - 1;
-        break;
+      Op* op = tea_fetch_sd->ops[i];
+      if (!op) continue;
+      if (chain_slot < 0) chain_slot = (int)op->h2p_chain_id - 1;
+      for (uns j = 0; j < op->table_info->num_dest_regs; j++) {
+        int rtype = get_reg_type_for_rename(op->inst_info->dests[j].id);
+        if (rtype == REG_FILE_REG_TYPE_GENERAL_PURPOSE) required_gp++;
+        else if (rtype == REG_FILE_REG_TYPE_VECTOR)     required_vec++;
       }
     }
 
-    if (chain_slot >= 0 &&
-        !tea_preg_pool_available(proc_id, chain_slot, tea_fetch_sd->op_count)) {
-      STAT_EVENT(proc_id, TEA_RENAME_STALL_PREG);
-      return;
+    if (chain_slot >= 0) {
+      Shadow_RAT* srat = rename->chain_srats[chain_slot];
+      if (!srat || !srat->is_valid) {
+        /* Chain was terminated while ops were in-flight in tf->sd.
+         * This should only happen after terminate_tea_chain() has run
+         * (chain INACTIVE), meaning these ops are truly orphaned. */
+        Tea_Thread* tea = tea_threads[proc_id];
+        ASSERT(proc_id, tea->chains[chain_slot].state == CHAIN_INACTIVE);
+        for (uns i = 0; i < (uns)tea_fetch_sd->max_op_count; i++) {
+          if (tea_fetch_sd->ops[i]) {
+            free_op(tea_fetch_sd->ops[i]);
+            tea_fetch_sd->ops[i] = NULL;
+          }
+        }
+        tea_fetch_sd->op_count = 0;
+        return;
+      }
+
+      if (!tea_preg_pool_available(proc_id, chain_slot, required_gp, required_vec)) {
+        STAT_EVENT(proc_id, TEA_RENAME_STALL_PREG);
+        return;
+      }
     }
   }
 

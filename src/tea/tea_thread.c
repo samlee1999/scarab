@@ -191,10 +191,14 @@ void terminate_tea_chain(uns proc_id, int chain_slot) {
 
   uns8 h2p_chain_id = (uns8)(chain_slot + 1);  /* 1-based */
 
-  /* 1. If this chain is currently being fetched, clear it from the fetch stage */
-  if (c->state == CHAIN_FETCHING && tea->current_fetch_chain == chain_slot) {
-    recover_tea_fetch_stage_by_chain(proc_id, h2p_chain_id);
+  /* 1. Flush any ops for this chain still buffered in the fetch stage's SD.
+   * Must run unconditionally: the fetch_complete transition (FETCHING→EXECUTING)
+   * can fire while ops are still in tf->sd due to a PREG stall in rename.
+   * If the chain is then terminated while in CHAIN_EXECUTING, those stale ops
+   * would otherwise never be freed. */
+  recover_tea_fetch_stage_by_chain(proc_id, h2p_chain_id);
 
+  if (c->state == CHAIN_FETCHING && tea->current_fetch_chain == chain_slot) {
     /* Point current_fetch_chain at the next FETCHING chain, if any */
     int next = find_next_fetching_chain(proc_id);
     tea->current_fetch_chain = next;

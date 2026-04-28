@@ -130,8 +130,9 @@ void init_tea_preg_pools(uns proc_id);
 void shadow_rat_snapshot(uns proc_id, int chain_slot);
 void reset_tea_preg_pool(uns proc_id, int chain_slot);
 
-/* Phase 4.1: Resource availability check for stalling */
-Flag tea_preg_pool_available(uns proc_id, int chain_slot, uns ops_count);
+/* Phase 4.1: Resource availability check for stalling (exact dest reg counts) */
+Flag tea_preg_pool_available(uns proc_id, int chain_slot,
+                              uns required_gp, uns required_vec);
 
 /* Per-cycle update */
 void update_tea_rename_stage(uns proc_id, Stage_Data* tea_fetch_sd);
