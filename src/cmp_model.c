@@ -420,6 +420,24 @@ void cmp_recover() {
   ASSERT(bp_recovery_info->proc_id, bp_recovery_info->recovery_cycle != MAX_CTR);
   ASSERT(bp_recovery_info->proc_id, bp_recovery_info->proc_id == g_bp_data->proc_id);
   ASSERT(bp_recovery_info->proc_id, bp_recovery_info->proc_id == map_data->proc_id);
+
+  if (TEA_ENABLE && bp_recovery_info->recovery_op &&
+      bp_recovery_info->recovery_op->tea_case1_pending_recovery) {
+    Op* recovery_op = bp_recovery_info->recovery_op;
+    if (recovery_op->tea_case1_detect_cycle != MAX_CTR &&
+        cycle_count >= recovery_op->tea_case1_detect_cycle) {
+      STAT_EVENT(bp_recovery_info->proc_id,
+                 TEA_EARLY_FLUSH_CASE1_TO_RECOVERY_SAMPLES);
+      INC_STAT_EVENT(bp_recovery_info->proc_id,
+                     TEA_EARLY_FLUSH_CASE1_TO_RECOVERY_TOTAL,
+                     cycle_count - recovery_op->tea_case1_detect_cycle);
+      INC_STAT_EVENT(bp_recovery_info->proc_id,
+                     TEA_EARLY_FLUSH_CASE1_TO_RECOVERY_AVG,
+                     cycle_count - recovery_op->tea_case1_detect_cycle);
+    }
+    recovery_op->tea_case1_pending_recovery = FALSE;
+  }
+
   bp_recover_op(g_bp_data, bp_recovery_info->recovery_cf_type, &bp_recovery_info->recovery_info);
 
   if (USE_LATE_BP && bp_recovery_info->late_bp_recovery) {

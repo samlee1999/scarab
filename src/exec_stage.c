@@ -85,6 +85,12 @@ static inline void exec_stage_clear_fu(int ii);
 static inline void exec_stage_dep_wakeup(Op* op);
 static inline void exec_stage_process_op(Op* op);
 static inline void exec_stage_bp_resolve(Op* op);
+static inline void tea_record_h2p_main_exec_delta(uns proc_id,
+                                                  Counter tea_exec_cycle,
+                                                  Counter main_exec_cycle);
+static inline void tea_mark_early_flush_detection(Op* main_h2p,
+                                                  Counter tea_exec_cycle);
+static inline void tea_record_main_h2p_exec_delta_if_needed(Op* op);
 
 /**************************************************************************************/
 /* set_exec_stage: */
@@ -570,6 +576,59 @@ static inline void exec_stage_process_op(Op* op) {
         op->fu_num, unsstr64(op->exec_cycle), unsstr64(op->done_cycle), op->off_path);
 }
 
+static inline void tea_record_h2p_main_exec_delta(uns proc_id,
+                                                  Counter tea_exec_cycle,
+                                                  Counter main_exec_cycle) {
+  if (tea_exec_cycle == MAX_CTR || main_exec_cycle == MAX_CTR) {
+    STAT_EVENT(proc_id, TEA_H2P_MAIN_EXEC_UNKNOWN);
+    return;
+  }
+
+  STAT_EVENT(proc_id, TEA_H2P_MAIN_EXEC_DELTA_SAMPLES);
+
+  if (tea_exec_cycle < main_exec_cycle) {
+    STAT_EVENT(proc_id, TEA_H2P_EXEC_BEFORE_MAIN);
+    INC_STAT_EVENT(proc_id, TEA_H2P_EXEC_SAVED_CYCLES_TOTAL,
+                   main_exec_cycle - tea_exec_cycle);
+    INC_STAT_EVENT(proc_id, TEA_H2P_EXEC_SAVED_CYCLES_AVG,
+                   main_exec_cycle - tea_exec_cycle);
+  } else if (tea_exec_cycle == main_exec_cycle) {
+    STAT_EVENT(proc_id, TEA_H2P_EXEC_SAME_AS_MAIN);
+  } else {
+    STAT_EVENT(proc_id, TEA_H2P_EXEC_AFTER_MAIN);
+    INC_STAT_EVENT(proc_id, TEA_H2P_EXEC_LATE_CYCLES_TOTAL,
+                   tea_exec_cycle - main_exec_cycle);
+    INC_STAT_EVENT(proc_id, TEA_H2P_EXEC_LATE_CYCLES_AVG,
+                   tea_exec_cycle - main_exec_cycle);
+  }
+}
+
+static inline void tea_mark_early_flush_detection(Op* main_h2p,
+                                                  Counter tea_exec_cycle) {
+  if (!main_h2p)
+    return;
+
+  if (!main_h2p->tea_early_flush_detected ||
+      main_h2p->tea_h2p_exec_cycle == MAX_CTR ||
+      tea_exec_cycle < main_h2p->tea_h2p_exec_cycle) {
+    main_h2p->tea_early_flush_detected = TRUE;
+    main_h2p->tea_h2p_exec_cycle = tea_exec_cycle;
+    main_h2p->tea_early_flush_delta_recorded = FALSE;
+  }
+}
+
+static inline void tea_record_main_h2p_exec_delta_if_needed(Op* op) {
+  if (!TEA_ENABLE || !op || op->thread_id == 1)
+    return;
+
+  if (!op->tea_early_flush_detected || op->tea_early_flush_delta_recorded)
+    return;
+
+  tea_record_h2p_main_exec_delta(op->proc_id, op->tea_h2p_exec_cycle,
+                                 op->exec_cycle);
+  op->tea_early_flush_delta_recorded = TRUE;
+}
+
 static inline void exec_stage_bp_resolve(Op* op) {
   /* TEA H2P branch: early misprediction detection and per-chain flush */
   if (TEA_ENABLE && op->thread_id == 1) {
@@ -608,16 +667,23 @@ static inline void exec_stage_bp_resolve(Op* op) {
       }
 
       /* Guard: if Main H2P is off-path an earlier recovery handles it */
-      if (main_h2p->off_path)
+      if (main_h2p->off_path) {
+        STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_MAIN_OFFPATH);
         return;
+      }
+
+      STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_ATTEMPTS);
 
       if (!main_h2p->oracle_info.recovery_sch) {
         if (reg_file_checkpoint_is_valid()) {
           /* Case 2: SRT checkpoint present → schedule recovery at Main H2P */
           bp_sched_recovery(bp_recovery_info, main_h2p, op->exec_cycle,
                             FALSE, FALSE, EXTRA_LATE_RECOVERY_CYCLES);
-          if (main_h2p->oracle_info.recovery_sch)
+          if (main_h2p->oracle_info.recovery_sch) {
             main_h2p->recovery_scheduled = TRUE;
+            tea_mark_early_flush_detection(main_h2p, op->exec_cycle);
+            STAT_EVENT(op->proc_id, TEA_EARLY_FLUSHES);
+          }
           main_h2p->oracle_info.recover_at_exec = FALSE;
           STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE2_WITH_CHKPT);
           /* cmp_recover() → recover_tea_on_flush(proc_id, recovery_op_num)
@@ -625,7 +691,14 @@ static inline void exec_stage_bp_resolve(Op* op) {
         } else {
           /* Case 1: No SRT checkpoint yet — record pending flush so recovery
            * fires when main H2P reaches rename and the checkpoint is created. */
-          tea_record_pending_case1_flush(op->proc_id, main_h2p);
+          Flag pending_recorded =
+            tea_record_pending_case1_flush(op->proc_id, main_h2p,
+                                           op->exec_cycle);
+          if (pending_recorded) {
+            tea_mark_early_flush_detection(main_h2p, op->exec_cycle);
+            main_h2p->tea_case1_detect_cycle = op->exec_cycle;
+            STAT_EVENT(op->proc_id, TEA_EARLY_FLUSHES);
+          }
           if (main_h2p->decode_cycle)
             STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_NO_CHKPT);
           else
@@ -633,7 +706,13 @@ static inline void exec_stage_bp_resolve(Op* op) {
           terminate_tea_chain_with_reason(op->proc_id, chain_slot,
                                           TEA_CHAIN_TERM_REASON_EARLY_FLUSH_CASE1);
         }
-        STAT_EVENT(op->proc_id, TEA_EARLY_FLUSHES);
+      } else {
+        if (!main_h2p->tea_early_flush_detected) {
+          STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_TOO_LATE_MAIN_RECOVERY);
+          STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_TOO_LATE_MAIN_RECOVERY_PCT);
+          tea_record_h2p_main_exec_delta(op->proc_id, op->exec_cycle,
+                                         main_h2p->exec_cycle);
+        }
       }
     } else {
       /* Correct prediction: TEA precomputation done, terminate this chain */
@@ -645,6 +724,8 @@ static inline void exec_stage_bp_resolve(Op* op) {
   }
 
   /* Main thread branch resolution */
+  tea_record_main_h2p_exec_delta_if_needed(op);
+
   if (!BP_UPDATE_AT_RETIRE) {
     // this code updates the branch prediction structures
     if (op->table_info->cf_type >= CF_IBR)
@@ -721,6 +802,18 @@ void exec_stage_tea_pending_flush_at_rename(uns proc_id, Op* op) {
       if (h2p->oracle_info.recovery_sch)
         h2p->recovery_scheduled = TRUE;
       h2p->oracle_info.recover_at_exec = FALSE;
+      if (h2p->oracle_info.recovery_sch &&
+          pf->detect_cycle != MAX_CTR && cycle_count >= pf->detect_cycle) {
+        STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_TO_SCHEDULE_SAMPLES);
+        INC_STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_TO_SCHEDULE_TOTAL,
+                       cycle_count - pf->detect_cycle);
+        INC_STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_TO_SCHEDULE_AVG,
+                       cycle_count - pf->detect_cycle);
+      }
+      if (h2p->oracle_info.recovery_sch) {
+        h2p->tea_case1_pending_recovery = TRUE;
+        h2p->tea_case1_detect_cycle = pf->detect_cycle;
+      }
       STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_PENDING_TRIGGERED);
     }
     pf->valid = FALSE;

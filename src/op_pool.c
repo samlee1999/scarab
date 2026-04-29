@@ -53,6 +53,7 @@ allocates them once and then hands out pointers every time 'alloc_op' is called.
 #include "map.h"
 #include "model.h"
 #include "sim.h"
+#include "statistics.h"
 #include "decoupled_frontend.h"
 #include "uop_cache.h"
 #include "idq_stage.h"
@@ -152,6 +153,10 @@ void free_op(Op* op) {
   if (PIPEVIEW)
     pipeview_print_op(op);
 
+  if (TEA_ENABLE && op->tea_early_flush_detected &&
+      !op->tea_early_flush_delta_recorded)
+    STAT_EVENT(op->proc_id, TEA_H2P_MAIN_EXEC_UNKNOWN);
+
   op->op_pool_valid = FALSE;
   op_pool_active_ops--;
   total_free_count++;
@@ -224,6 +229,11 @@ void op_pool_setup_op(uns proc_id, Op* op) {
   op->replay_cycle = MAX_CTR;
   op->precommit_cycle = MAX_CTR;
   op->decode_cycle = 0;
+  op->tea_h2p_exec_cycle = MAX_CTR;
+  op->tea_case1_detect_cycle = MAX_CTR;
+  op->tea_early_flush_detected = FALSE;
+  op->tea_early_flush_delta_recorded = FALSE;
+  op->tea_case1_pending_recovery = FALSE;
   op->replay = FALSE;
   op->replay_count = 0;
   op->dont_cause_replays = FALSE;

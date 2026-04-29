@@ -528,7 +528,8 @@ void tea_op_completed(uns proc_id, Op* op) {
 /**************************************************************************************/
 /* Case 1 Pending Early Flush */
 
-void tea_record_pending_case1_flush(uns proc_id, Op* main_h2p) {
+Flag tea_record_pending_case1_flush(uns proc_id, Op* main_h2p,
+                                    Counter detect_cycle) {
   ASSERT(proc_id, tea_threads && tea_threads[proc_id]);
   Tea_Thread* tea = tea_threads[proc_id];
   int max_chains = (int)tea_max_chains(proc_id);
@@ -538,10 +539,13 @@ void tea_record_pending_case1_flush(uns proc_id, Op* main_h2p) {
       tea->pending_case1_flushes[i].main_h2p_op         = main_h2p;
       tea->pending_case1_flushes[i].main_h2p_unique_num = main_h2p->unique_num;
       tea->pending_case1_flushes[i].main_h2p_op_num     = main_h2p->op_num;
-      return;
+      tea->pending_case1_flushes[i].detect_cycle        = detect_cycle;
+      return TRUE;
     }
   }
-  /* All slots occupied (rare): silently drop — conservative, no worse than before */
+  /* All slots occupied: drop conservatively and expose it in stats. */
+  STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_PENDING_DROPPED);
+  return FALSE;
 }
 
 void tea_clear_pending_case1_flushes(uns proc_id) {

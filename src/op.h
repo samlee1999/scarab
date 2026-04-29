@@ -167,6 +167,14 @@ struct Op_struct {
   Counter pred_cycle;
   Counter precommit_cycle;  // cycle when the op is precommit (will eventually retire)
   Counter decode_cycle;     // cycle when decode completes
+
+  /* TEA early-flush diagnostics for Main H2P ops.
+   * Set when a TEA H2P resolves before this Main H2P's normal recovery path. */
+  Counter tea_h2p_exec_cycle;
+  Counter tea_case1_detect_cycle;
+  Flag tea_early_flush_detected;
+  Flag tea_early_flush_delta_recorded;
+  Flag tea_case1_pending_recovery;
   // }}}
 
   // {{{ path and fetch info

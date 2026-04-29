@@ -54,6 +54,7 @@ typedef struct Tea_Pending_Case1_Flush_struct {
   Op*     main_h2p_op;
   Counter main_h2p_unique_num;  /* validity stamp — matches main_h2p_op->unique_num */
   Counter main_h2p_op_num;      /* for selective clear on recovery flush */
+  Counter detect_cycle;         /* TEA H2P exec cycle that created this pending flush */
 } Tea_Pending_Case1_Flush;
 
 /**************************************************************************************/
@@ -159,7 +160,8 @@ void update_tea_thread(uns proc_id);
 void tea_op_completed(uns proc_id, Op* op);
 
 /* Case 1 pending early flush management */
-void tea_record_pending_case1_flush(uns proc_id, Op* main_h2p);
+Flag tea_record_pending_case1_flush(uns proc_id, Op* main_h2p,
+                                    Counter detect_cycle);
 void tea_clear_pending_case1_flushes(uns proc_id);
 void tea_selective_clear_pending_case1_flushes(uns proc_id, Counter recovery_op_num);
 
