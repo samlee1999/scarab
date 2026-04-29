@@ -701,7 +701,7 @@ static void node_retire_tea_ops() {
       if (tea_threads && tea_threads[node->proc_id]) {
         Tea_Thread* tea_state = tea_threads[node->proc_id];
         int slot = (int)op->h2p_chain_id - 1;  /* 1-based → 0-based */
-        if (slot >= 0 && slot < MAX_TEA_CHAINS &&
+        if (tea_chain_slot_is_valid(node->proc_id, slot) &&
             tea_state->chains[slot].tea_op_count > 0) {
           tea_state->chains[slot].tea_op_count--;
           /* Return prev-mapping PREGs to the chain's pool (standard RAT recycling).

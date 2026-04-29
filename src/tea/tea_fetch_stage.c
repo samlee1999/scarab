@@ -111,7 +111,8 @@ static void setup_fetch_for_chain(uns proc_id, int slot) {
   Dependency_Chain_Cache_Entry* dep = get_dependency_chain(proc_id, c->target_h2p_pc);
   if (!dep || !dep->is_valid || dep->chain_length == 0) {
     STAT_EVENT(proc_id, TEA_FETCH_CHAIN_MISS);
-    terminate_tea_chain(proc_id, slot);
+    terminate_tea_chain_with_reason(proc_id, slot,
+                                    TEA_CHAIN_TERM_REASON_DEP_CHAIN_LOST);
     return;
   }
   STAT_EVENT(proc_id, TEA_FETCH_CHAIN_HIT);
@@ -168,11 +169,15 @@ void update_tea_fetch_stage(uns proc_id) {
   /* Fetch complete for current chain → transition + switch to next */
   if (tf->fetch_complete) {
     chain->state = CHAIN_EXECUTING;
+    if (chain->fetch_done_cycle == 0)
+      chain->fetch_done_cycle = cycle_count;
+    STAT_EVENT(proc_id, TEA_FETCH_CHAIN_COMPLETED);
 
     /* Find next CHAIN_FETCHING chain (skip current) */
     int next = -1;
-    for (int i = 1; i <= MAX_TEA_CHAINS; i++) {
-      int idx = (slot + i) % MAX_TEA_CHAINS;
+    int max_chains = (int)tea_max_chains(proc_id);
+    for (int i = 1; i <= max_chains; i++) {
+      int idx = (slot + i) % max_chains;
       if (tea->chains[idx].state == CHAIN_FETCHING) {
         next = idx;
         break;
@@ -181,15 +186,20 @@ void update_tea_fetch_stage(uns proc_id) {
 
     tea->current_fetch_chain = next;
     if (next >= 0) {
+      STAT_EVENT(proc_id, TEA_FETCH_SWITCH_NEXT_CHAIN);
       setup_fetch_for_chain(proc_id, next);
+    } else {
+      STAT_EVENT(proc_id, TEA_FETCH_NO_NEXT_CHAIN);
     }
     /* Whether or not there's a next chain, stop for this cycle */
     return;
   }
 
   /* Backpressure: rename stage hasn't consumed last batch */
-  if (tf->sd.op_count > 0)
+  if (tf->sd.op_count > 0) {
+    STAT_EVENT(proc_id, TEA_FETCH_BACKPRESSURE_RENAME);
     return;
+  }
 
   tf->sd.op_count = 0;
   tf->ops_fetched_this_cycle = 0;
@@ -225,7 +235,7 @@ Op* tea_create_op_from_cache(uns proc_id, Op* cached_op, Flag is_h2p_branch) {
   Tea_Thread* tea = tea_threads[proc_id];
   Tea_Fetch_Stage* tf = tea_fetch_stages[proc_id];
   ASSERT(proc_id, tea && tf);
-  ASSERT(proc_id, tf->current_chain_id >= 0 && tf->current_chain_id < MAX_TEA_CHAINS);
+  ASSERT(proc_id, tea_chain_slot_is_valid(proc_id, tf->current_chain_id));
 
   Tea_H2P_Chain* c = &tea->chains[tf->current_chain_id];
 

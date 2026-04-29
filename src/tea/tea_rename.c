@@ -182,7 +182,7 @@ void reset_tea_rename_stage(uns proc_id) {
 void shadow_rat_snapshot(uns proc_id, int chain_slot) {
   ASSERT(proc_id, proc_id < NUM_CORES);
   ASSERT(proc_id, tea_rename_stages && tea_rename_stages[proc_id]);
-  ASSERT(proc_id, chain_slot >= 0 && chain_slot < MAX_TEA_CHAINS);
+  ASSERT(proc_id, tea_chain_slot_is_valid(proc_id, chain_slot));
 
   Tea_Rename_Stage* rename = tea_rename_stages[proc_id];
   Shadow_RAT* srat = rename->chain_srats[chain_slot];
@@ -306,10 +306,14 @@ void init_tea_preg_pools(uns proc_id) {
 
   Tea_Rename_Stage* rename = tea_rename_stages[proc_id];
 
-  /* TEA_PREG_RESERVATION / MAX_TEA_CHAINS PREGs per chain slot.
+  /* TEA_PREG_RESERVATION / TEA_MAX_CHAINS PREGs per active chain slot.
    * Must divide evenly; remainder would be removed from main list but wasted. */
-  ASSERT(proc_id, TEA_PREG_RESERVATION % MAX_TEA_CHAINS == 0);
-  uns per_chain = TEA_PREG_RESERVATION / MAX_TEA_CHAINS;
+  uns max_chains = tea_max_chains(proc_id);
+  ASSERT(proc_id, TEA_PREG_RESERVATION > 0);
+  ASSERT(proc_id, TEA_PREG_RESERVATION <= REG_TABLE_INTEGER_PHYSICAL_SIZE);
+  ASSERT(proc_id, TEA_PREG_RESERVATION <= REG_TABLE_VECTOR_PHYSICAL_SIZE);
+  ASSERT(proc_id, TEA_PREG_RESERVATION % max_chains == 0);
+  uns per_chain = TEA_PREG_RESERVATION / max_chains;
   ASSERT(proc_id, per_chain > 0);
 
   int gp_base  = REG_TABLE_INTEGER_PHYSICAL_SIZE - TEA_PREG_RESERVATION;
@@ -323,8 +327,8 @@ void init_tea_preg_pools(uns proc_id) {
     /* Remove all TEA GP indices from main free list (one contiguous block) */
     remove_tea_entries_from_main_free_list(gp_phys, gp_base);
 
-    /* Create one sub-pool per chain slot */
-    for (int i = 0; i < MAX_TEA_CHAINS; i++) {
+    /* Create one sub-pool per runtime-active chain slot */
+    for (uns i = 0; i < max_chains; i++) {
       Shadow_RAT* srat = rename->chain_srats[i];
       srat->tea_gp_start_idx = gp_base + i * (int)per_chain;
       srat->tea_gp_preg_pool = create_tea_preg_pool(srat->tea_gp_start_idx, per_chain);
@@ -338,7 +342,7 @@ void init_tea_preg_pools(uns proc_id) {
 
     remove_tea_entries_from_main_free_list(vec_phys, vec_base);
 
-    for (int i = 0; i < MAX_TEA_CHAINS; i++) {
+    for (uns i = 0; i < max_chains; i++) {
       Shadow_RAT* srat = rename->chain_srats[i];
       srat->tea_vec_start_idx = vec_base + i * (int)per_chain;
       srat->tea_vec_preg_pool = create_tea_preg_pool(srat->tea_vec_start_idx, per_chain);
@@ -355,7 +359,7 @@ void init_tea_preg_pools(uns proc_id) {
 
 void tea_preg_pool_return_prev(uns proc_id, int chain_slot, Op* op) {
   ASSERT(proc_id, tea_rename_stages && tea_rename_stages[proc_id]);
-  ASSERT(proc_id, chain_slot >= 0 && chain_slot < MAX_TEA_CHAINS);
+  ASSERT(proc_id, tea_chain_slot_is_valid(proc_id, chain_slot));
   ASSERT(proc_id, op);
 
   Shadow_RAT* srat = tea_rename_stages[proc_id]->chain_srats[chain_slot];
@@ -399,7 +403,7 @@ void tea_preg_pool_return_prev(uns proc_id, int chain_slot, Op* op) {
 
 void reset_tea_preg_pool(uns proc_id, int chain_slot) {
   ASSERT(proc_id, tea_rename_stages && tea_rename_stages[proc_id]);
-  ASSERT(proc_id, chain_slot >= 0 && chain_slot < MAX_TEA_CHAINS);
+  ASSERT(proc_id, tea_chain_slot_is_valid(proc_id, chain_slot));
 
   Shadow_RAT* srat = tea_rename_stages[proc_id]->chain_srats[chain_slot];
 
@@ -428,7 +432,7 @@ void reset_tea_preg_pool(uns proc_id, int chain_slot) {
 Flag tea_preg_pool_available(uns proc_id, int chain_slot,
                               uns required_gp, uns required_vec) {
   ASSERT(proc_id, tea_rename_stages && tea_rename_stages[proc_id]);
-  ASSERT(proc_id, chain_slot >= 0 && chain_slot < MAX_TEA_CHAINS);
+  ASSERT(proc_id, tea_chain_slot_is_valid(proc_id, chain_slot));
 
   Shadow_RAT* srat = tea_rename_stages[proc_id]->chain_srats[chain_slot];
 
@@ -462,10 +466,11 @@ void update_tea_rename_stage(uns proc_id, Stage_Data* tea_fetch_sd) {
   /* PREG stall check: count exact GP/VEC dest regs in this batch */
   if (tea_fetch_sd->op_count > 0) {
     int chain_slot = -1;
-    uns required_gp = 0, required_vec = 0;
+    uns batch_ops = 0, required_gp = 0, required_vec = 0;
     for (uns i = 0; i < (uns)tea_fetch_sd->max_op_count; i++) {
       Op* op = tea_fetch_sd->ops[i];
       if (!op) continue;
+      batch_ops++;
       if (chain_slot < 0) chain_slot = (int)op->h2p_chain_id - 1;
       for (uns j = 0; j < op->table_info->num_dest_regs; j++) {
         int rtype = get_reg_type_for_rename(op->inst_info->dests[j].id);
@@ -475,6 +480,11 @@ void update_tea_rename_stage(uns proc_id, Stage_Data* tea_fetch_sd) {
     }
 
     if (chain_slot >= 0) {
+      STAT_EVENT(proc_id, TEA_RENAME_BATCHES);
+      INC_STAT_EVENT(proc_id, TEA_RENAME_BATCH_OPS_TOTAL, batch_ops);
+      INC_STAT_EVENT(proc_id, TEA_RENAME_BATCH_GP_DESTS_TOTAL, required_gp);
+      INC_STAT_EVENT(proc_id, TEA_RENAME_BATCH_VEC_DESTS_TOTAL, required_vec);
+
       Shadow_RAT* srat = rename->chain_srats[chain_slot];
       if (!srat || !srat->is_valid) {
         /* Chain was terminated while ops were in-flight in tf->sd.
@@ -489,11 +499,15 @@ void update_tea_rename_stage(uns proc_id, Stage_Data* tea_fetch_sd) {
           }
         }
         tea_fetch_sd->op_count = 0;
+        STAT_EVENT(proc_id, TEA_RENAME_ORPHANED_BATCHES);
         return;
       }
 
       if (!tea_preg_pool_available(proc_id, chain_slot, required_gp, required_vec)) {
         STAT_EVENT(proc_id, TEA_RENAME_STALL_PREG);
+        INC_STAT_EVENT(proc_id, TEA_RENAME_STALL_PREG_BATCH_OPS_TOTAL, batch_ops);
+        INC_STAT_EVENT(proc_id, TEA_RENAME_STALL_PREG_GP_REQ_TOTAL, required_gp);
+        INC_STAT_EVENT(proc_id, TEA_RENAME_STALL_PREG_VEC_REQ_TOTAL, required_vec);
         return;
       }
     }
@@ -539,7 +553,7 @@ void tea_rename_op(uns proc_id, Op* op) {
   ASSERT(proc_id, op->thread_id == 1);
 
   int slot = (int)op->h2p_chain_id - 1;
-  ASSERT(proc_id, slot >= 0 && slot < MAX_TEA_CHAINS);
+  ASSERT(proc_id, tea_chain_slot_is_valid(proc_id, slot));
 
   Tea_Rename_Stage* rename = tea_rename_stages[proc_id];
   Shadow_RAT* srat = rename->chain_srats[slot];
@@ -644,7 +658,7 @@ void recover_tea_rename_stage_by_chain(uns proc_id, uns8 chain_id) {
 
   /* Invalidate this chain's Shadow RAT (PREG pool reset done separately) */
   int slot = (int)chain_id - 1;
-  if (slot >= 0 && slot < MAX_TEA_CHAINS)
+  if (tea_chain_slot_is_valid(proc_id, slot))
     reset_shadow_rat(rename->chain_srats[slot]);
 }
 

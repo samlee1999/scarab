@@ -398,13 +398,15 @@ void recover_tea_on_flush(uns proc_id, Counter recovery_op_num) {
 
   Tea_Thread* tea = tea_threads[proc_id];
 
-  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
+  int max_chains = (int)tea_max_chains(proc_id);
+  for (int i = 0; i < max_chains; i++) {
     Tea_H2P_Chain* c = &tea->chains[i];
     if (c->state == CHAIN_INACTIVE) continue;
 
     /* Chains whose H2P is at or after the recovery point must be flushed */
     if (c->target_h2p_op_num >= recovery_op_num) {
-      terminate_tea_chain(proc_id, i);
+      terminate_tea_chain_with_reason(proc_id, i,
+                                      TEA_CHAIN_TERM_REASON_MAIN_RECOVERY);
     }
   }
 }

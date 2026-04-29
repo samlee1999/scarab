@@ -582,7 +582,7 @@ static inline void exec_stage_bp_resolve(Op* op) {
 
     /* Identify which chain this op belongs to */
     int chain_slot = (int)op->h2p_chain_id - 1;  /* 1-based → 0-based */
-    if (chain_slot < 0 || chain_slot >= MAX_TEA_CHAINS)
+    if (!tea_chain_slot_is_valid(op->proc_id, chain_slot))
       return;
 
     Tea_H2P_Chain* c = &tea->chains[chain_slot];
@@ -602,7 +602,8 @@ static inline void exec_stage_bp_resolve(Op* op) {
       /* Validate: main_h2p may have been retired/freed */
       if (!main_h2p || !main_h2p->op_pool_valid ||
           main_h2p->unique_num != c->saved_unique_num) {
-        terminate_tea_chain(op->proc_id, chain_slot);
+        terminate_tea_chain_with_reason(op->proc_id, chain_slot,
+                                        TEA_CHAIN_TERM_REASON_INVALID_MAIN_H2P);
         return;
       }
 
@@ -629,14 +630,16 @@ static inline void exec_stage_bp_resolve(Op* op) {
             STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_NO_CHKPT);
           else
             STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_DECODE);
-          terminate_tea_chain(op->proc_id, chain_slot);
+          terminate_tea_chain_with_reason(op->proc_id, chain_slot,
+                                          TEA_CHAIN_TERM_REASON_EARLY_FLUSH_CASE1);
         }
         STAT_EVENT(op->proc_id, TEA_EARLY_FLUSHES);
       }
     } else {
       /* Correct prediction: TEA precomputation done, terminate this chain */
       STAT_EVENT(op->proc_id, TEA_H2P_CORRECT);
-      terminate_tea_chain(op->proc_id, chain_slot);
+      terminate_tea_chain_with_reason(op->proc_id, chain_slot,
+                                      TEA_CHAIN_TERM_REASON_H2P_CORRECT);
     }
     return;
   }
@@ -692,7 +695,8 @@ void exec_stage_tea_pending_flush_at_rename(uns proc_id, Op* op) {
 
   Tea_Thread* tea = tea_threads[proc_id];
 
-  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
+  int max_chains = (int)tea_max_chains(proc_id);
+  for (int i = 0; i < max_chains; i++) {
     Tea_Pending_Case1_Flush* pf = &tea->pending_case1_flushes[i];
     if (!pf->valid) continue;
 

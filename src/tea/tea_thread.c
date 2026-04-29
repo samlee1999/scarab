@@ -50,15 +50,181 @@ Tea_Thread** tea_threads = NULL;
 /**************************************************************************************/
 /* Static helpers */
 
+uns tea_max_chains(uns proc_id) {
+  ASSERT(proc_id, TEA_MAX_CHAINS > 0);
+  ASSERT(proc_id, TEA_MAX_CHAINS <= MAX_TEA_CHAINS);
+  return TEA_MAX_CHAINS;
+}
+
+Flag tea_chain_slot_is_valid(uns proc_id, int chain_slot) {
+  return chain_slot >= 0 && (uns)chain_slot < tea_max_chains(proc_id);
+}
+
 static int find_next_fetching_chain(uns proc_id) {
   Tea_Thread* tea = tea_threads[proc_id];
+  int max_chains = (int)tea_max_chains(proc_id);
   int start = (tea->current_fetch_chain < 0) ? 0 : tea->current_fetch_chain;
-  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
-    int idx = (start + 1 + i) % MAX_TEA_CHAINS;
+  for (int i = 0; i < max_chains; i++) {
+    int idx = (start + 1 + i) % max_chains;
     if (tea->chains[idx].state == CHAIN_FETCHING)
       return idx;
   }
   return -1;
+}
+
+static void count_chain_states(Tea_Thread* tea, int max_chains,
+                               uns* active, uns* fetching, uns* executing) {
+  *active = 0;
+  *fetching = 0;
+  *executing = 0;
+
+  for (int i = 0; i < max_chains; i++) {
+    switch (tea->chains[i].state) {
+      case CHAIN_FETCHING:
+        (*active)++;
+        (*fetching)++;
+        break;
+      case CHAIN_EXECUTING:
+        (*active)++;
+        (*executing)++;
+        break;
+      case CHAIN_INACTIVE:
+      default:
+        break;
+    }
+  }
+}
+
+static void record_chain_depth_bucket(uns proc_id, uns active, Flag trigger_bucket) {
+  if (trigger_bucket) {
+    if      (active == 0) STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_0);
+    else if (active == 1) STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_1);
+    else if (active == 2) STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_2);
+    else if (active == 3) STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_3);
+    else if (active == 4) STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_4);
+    else if (active <= 8) STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_5_8);
+    else if (active <= 12) STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_9_12);
+    else                  STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_13_16);
+  } else {
+    if      (active == 1) STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_1);
+    else if (active == 2) STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_2);
+    else if (active == 3) STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_3);
+    else if (active == 4) STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_4);
+    else if (active <= 8) STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_5_8);
+    else if (active <= 12) STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_9_12);
+    else                  STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_13_16);
+  }
+}
+
+static void update_max_active_chains(uns proc_id, Tea_Thread* tea, uns active) {
+  if (active > tea->stat_max_active_chains) {
+    INC_STAT_EVENT(proc_id, TEA_CHAINS_CONCURRENT_MAX,
+                   active - tea->stat_max_active_chains);
+    tea->stat_max_active_chains = active;
+  }
+}
+
+static void record_trigger_chain_pressure(uns proc_id, Tea_Thread* tea,
+                                          int max_chains) {
+  uns active, fetching, executing;
+  count_chain_states(tea, max_chains, &active, &fetching, &executing);
+
+  INC_STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_TOTAL, active);
+  INC_STAT_EVENT(proc_id, TEA_TRIGGER_FETCHING_CHAINS_TOTAL, fetching);
+  INC_STAT_EVENT(proc_id, TEA_TRIGGER_EXECUTING_CHAINS_TOTAL, executing);
+  INC_STAT_EVENT(proc_id, TEA_TRIGGER_FREE_SLOTS_TOTAL, max_chains - active);
+  record_chain_depth_bucket(proc_id, active, TRUE);
+
+  if (active >= (uns)max_chains) {
+    INC_STAT_EVENT(proc_id, TEA_TRIGGER_FULL_FETCHING_CHAINS_TOTAL, fetching);
+    INC_STAT_EVENT(proc_id, TEA_TRIGGER_FULL_EXECUTING_CHAINS_TOTAL, executing);
+  }
+}
+
+static void record_active_chain_cycle_stats(uns proc_id, Tea_Thread* tea,
+                                            int max_chains) {
+  uns active, fetching, executing;
+  count_chain_states(tea, max_chains, &active, &fetching, &executing);
+  if (active == 0)
+    return;
+
+  STAT_EVENT(proc_id, TEA_ACTIVE_CYCLES);
+  INC_STAT_EVENT(proc_id, TEA_ACTIVE_CHAIN_SLOTS_TOTAL, active);
+  INC_STAT_EVENT(proc_id, TEA_FETCHING_CHAIN_SLOTS_TOTAL, fetching);
+  INC_STAT_EVENT(proc_id, TEA_EXECUTING_CHAIN_SLOTS_TOTAL, executing);
+  record_chain_depth_bucket(proc_id, active, FALSE);
+  update_max_active_chains(proc_id, tea, active);
+}
+
+static void record_chain_length_bucket(uns proc_id, uns length) {
+  INC_STAT_EVENT(proc_id, TEA_CHAIN_LENGTH_TOTAL, length);
+  if      (length <= 8)  STAT_EVENT(proc_id, TEA_CHAIN_LENGTH_1_8);
+  else if (length <= 16) STAT_EVENT(proc_id, TEA_CHAIN_LENGTH_9_16);
+  else if (length <= 32) STAT_EVENT(proc_id, TEA_CHAIN_LENGTH_17_32);
+  else if (length <= 64) STAT_EVENT(proc_id, TEA_CHAIN_LENGTH_33_64);
+  else                   STAT_EVENT(proc_id, TEA_CHAIN_LENGTH_65_PLUS);
+}
+
+static void record_chain_lifetime_bucket(uns proc_id, Counter lifetime) {
+  INC_STAT_EVENT(proc_id, TEA_CHAIN_LIFETIME_TOTAL, lifetime);
+  if      (lifetime < 10)   STAT_EVENT(proc_id, TEA_CHAIN_LIFETIME_0_9);
+  else if (lifetime < 50)   STAT_EVENT(proc_id, TEA_CHAIN_LIFETIME_10_49);
+  else if (lifetime < 100)  STAT_EVENT(proc_id, TEA_CHAIN_LIFETIME_50_99);
+  else if (lifetime < 500)  STAT_EVENT(proc_id, TEA_CHAIN_LIFETIME_100_499);
+  else if (lifetime < 1000) STAT_EVENT(proc_id, TEA_CHAIN_LIFETIME_500_999);
+  else                      STAT_EVENT(proc_id, TEA_CHAIN_LIFETIME_1000_PLUS);
+}
+
+static void record_termination_reason(uns proc_id,
+                                      Tea_Chain_Termination_Reason reason) {
+  switch (reason) {
+    case TEA_CHAIN_TERM_REASON_NATURAL:
+      STAT_EVENT(proc_id, TEA_CHAIN_TERM_NATURAL);
+      break;
+    case TEA_CHAIN_TERM_REASON_H2P_CORRECT:
+      STAT_EVENT(proc_id, TEA_CHAIN_TERM_H2P_CORRECT);
+      break;
+    case TEA_CHAIN_TERM_REASON_EARLY_FLUSH_CASE1:
+      STAT_EVENT(proc_id, TEA_CHAIN_TERM_EARLY_FLUSH_CASE1);
+      break;
+    case TEA_CHAIN_TERM_REASON_MAIN_RECOVERY:
+      STAT_EVENT(proc_id, TEA_CHAIN_TERM_MAIN_RECOVERY);
+      break;
+    case TEA_CHAIN_TERM_REASON_INVALID_MAIN_H2P:
+      STAT_EVENT(proc_id, TEA_CHAIN_TERM_INVALID_MAIN_H2P);
+      break;
+    case TEA_CHAIN_TERM_REASON_DEP_CHAIN_LOST:
+      STAT_EVENT(proc_id, TEA_CHAIN_TERM_DEP_CHAIN_LOST);
+      break;
+    case TEA_CHAIN_TERM_REASON_FULL_THREAD:
+      STAT_EVENT(proc_id, TEA_CHAIN_TERM_FULL_THREAD);
+      break;
+    case TEA_CHAIN_TERM_REASON_UNKNOWN:
+    default:
+      STAT_EVENT(proc_id, TEA_CHAIN_TERM_UNKNOWN);
+      break;
+  }
+}
+
+static void record_chain_termination_stats(uns proc_id, Tea_H2P_Chain* c,
+                                           Tea_Chain_Termination_Reason reason) {
+  record_termination_reason(proc_id, reason);
+
+  if (c->trigger_cycle > 0 && cycle_count >= c->trigger_cycle) {
+    Counter lifetime = cycle_count - c->trigger_cycle;
+    record_chain_lifetime_bucket(proc_id, lifetime);
+
+    if (c->fetch_done_cycle > 0 && c->fetch_done_cycle >= c->trigger_cycle) {
+      INC_STAT_EVENT(proc_id, TEA_CHAIN_FETCH_WAIT_TOTAL,
+                     c->fetch_done_cycle - c->trigger_cycle);
+      if (cycle_count >= c->fetch_done_cycle) {
+        INC_STAT_EVENT(proc_id, TEA_CHAIN_EXEC_WAIT_TOTAL,
+                       cycle_count - c->fetch_done_cycle);
+      }
+    } else if (c->state == CHAIN_FETCHING) {
+      INC_STAT_EVENT(proc_id, TEA_CHAIN_FETCH_WAIT_TOTAL, lifetime);
+    }
+  }
 }
 
 /**************************************************************************************/
@@ -76,6 +242,7 @@ void init_tea_thread(uns proc_id) {
   ASSERT(proc_id, tea_threads[proc_id]);
 
   Tea_Thread* tea = tea_threads[proc_id];
+  tea_max_chains(proc_id);
   tea->proc_id = proc_id;
 
   init_tea_store_buffer(proc_id);
@@ -93,6 +260,7 @@ void reset_tea_thread(uns proc_id) {
   tea->current_fetch_chain = -1;
   tea->tea_op_counter = 0x8000000000000000ULL;
   tea->tea_start_cycle = 0;
+  tea->stat_max_active_chains = 0;
 
   for (int i = 0; i < MAX_TEA_CHAINS; i++) {
     memset(&tea->chains[i], 0, sizeof(Tea_H2P_Chain));
@@ -114,7 +282,9 @@ void trigger_tea_thread(uns proc_id, Addr h2p_pc, Counter h2p_op_num, Op* h2p_op
 
   /* Find an empty chain slot */
   int slot = -1;
-  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
+  int max_chains = (int)tea_max_chains(proc_id);
+  record_trigger_chain_pressure(proc_id, tea, max_chains);
+  for (int i = 0; i < max_chains; i++) {
     if (tea->chains[i].state == CHAIN_INACTIVE) {
       slot = i;
       break;
@@ -131,6 +301,7 @@ void trigger_tea_thread(uns proc_id, Addr h2p_pc, Counter h2p_op_num, Op* h2p_op
     STAT_EVENT(proc_id, TEA_TRIGGER_SKIP_NO_CHAIN);
     return;
   }
+  record_chain_length_bucket(proc_id, chain->chain_length);
 
   /* Fill chain slot */
   Tea_H2P_Chain* c = &tea->chains[slot];
@@ -143,7 +314,10 @@ void trigger_tea_thread(uns proc_id, Addr h2p_pc, Counter h2p_op_num, Op* h2p_op
   c->h2p_recovery_info = h2p_op->recovery_info;
   c->tea_op_count = 0;
   c->tea_ops_fetched = 0;
+  c->trigger_cycle = cycle_count;
+  c->fetch_done_cycle = 0;
   tea->num_active_chains++;
+  update_max_active_chains(proc_id, tea, tea->num_active_chains);
 
   /* Per-chain Shadow RAT snapshot: each chain gets its own independent mapping
    * from the main thread's current RAT state at trigger time. */
@@ -165,12 +339,6 @@ void trigger_tea_thread(uns proc_id, Addr h2p_pc, Counter h2p_op_num, Op* h2p_op
   tea->stat_tea_triggers++;
   STAT_EVENT(proc_id, TEA_TRIGGERS);
 
-  /* Update concurrent-chain high watermark stat */
-  if (tea->num_active_chains > 1) {
-    /* TEA_CHAINS_CONCURRENT_MAX is a high-watermark: we use INC_STAT_EVENT only
-     * if new count exceeds previous max (tracked via STAT buckets). */
-  }
-
   _DEBUG(0, DEBUG_TEA, "TEA TRIGGERED slot=%d PC=0x%llx op_num=%llu chain_len=%d cycle=%llu\n",
          slot, (unsigned long long)h2p_pc, (unsigned long long)h2p_op_num,
          chain->chain_length, (unsigned long long)cycle_count);
@@ -179,10 +347,11 @@ void trigger_tea_thread(uns proc_id, Addr h2p_pc, Counter h2p_op_num, Op* h2p_op
 /* terminate_tea_chain: Flush a single chain and reclaim its resources.
  * Called by: exec_stage_bp_resolve (per-chain result), update_tea_thread
  *             (natural completion), recover_tea_on_flush (main recovery). */
-void terminate_tea_chain(uns proc_id, int chain_slot) {
+void terminate_tea_chain_with_reason(uns proc_id, int chain_slot,
+                                     Tea_Chain_Termination_Reason reason) {
   ASSERT(proc_id, proc_id < NUM_CORES);
   ASSERT(proc_id, tea_threads && tea_threads[proc_id]);
-  ASSERT(proc_id, chain_slot >= 0 && chain_slot < MAX_TEA_CHAINS);
+  ASSERT(proc_id, tea_chain_slot_is_valid(proc_id, chain_slot));
 
   Tea_Thread* tea = tea_threads[proc_id];
   Tea_H2P_Chain* c = &tea->chains[chain_slot];
@@ -218,7 +387,8 @@ void terminate_tea_chain(uns proc_id, int chain_slot) {
       } else {
         /* Dep chain disappeared; terminate that chain too (recursive) */
         tea->current_fetch_chain = -1;
-        terminate_tea_chain(proc_id, next);
+        terminate_tea_chain_with_reason(proc_id, next,
+                                        TEA_CHAIN_TERM_REASON_DEP_CHAIN_LOST);
         /* After recursion, c may still be valid — continue */
       }
     }
@@ -233,6 +403,8 @@ void terminate_tea_chain(uns proc_id, int chain_slot) {
   /* 4. Invalidate this chain's store buffer entries */
   tea_store_buffer_clear_by_chain_id(proc_id, h2p_chain_id);
 
+  record_chain_termination_stats(proc_id, c, reason);
+
   /* 5. Reset chain state */
   c->state = CHAIN_INACTIVE;
   c->target_h2p_pc = 0;
@@ -240,6 +412,8 @@ void terminate_tea_chain(uns proc_id, int chain_slot) {
   c->main_h2p_op = NULL;
   c->tea_op_count = 0;
   c->tea_ops_fetched = 0;
+  c->trigger_cycle = 0;
+  c->fetch_done_cycle = 0;
   tea->num_active_chains--;
 
   STAT_EVENT(proc_id, TEA_CHAIN_TERMINATED);
@@ -257,18 +431,31 @@ void terminate_tea_chain(uns proc_id, int chain_slot) {
   }
 }
 
+void terminate_tea_chain(uns proc_id, int chain_slot) {
+  terminate_tea_chain_with_reason(proc_id, chain_slot,
+                                  TEA_CHAIN_TERM_REASON_UNKNOWN);
+}
+
 void terminate_tea_thread(uns proc_id) {
   ASSERT(proc_id, proc_id < NUM_CORES);
   ASSERT(proc_id, tea_threads && tea_threads[proc_id]);
 
   Tea_Thread* tea = tea_threads[proc_id];
+  int max_chains = (int)tea_max_chains(proc_id);
 
   /* Mark all chains inactive (skip per-chain teardown; full flush follows) */
-  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
+  for (int i = 0; i < max_chains; i++) {
+    if (tea->chains[i].state != CHAIN_INACTIVE) {
+      record_chain_termination_stats(proc_id, &tea->chains[i],
+                                     TEA_CHAIN_TERM_REASON_FULL_THREAD);
+      STAT_EVENT(proc_id, TEA_CHAIN_TERMINATED);
+    }
     tea->chains[i].state = CHAIN_INACTIVE;
     tea->chains[i].main_h2p_op = NULL;
     tea->chains[i].tea_op_count = 0;
     tea->chains[i].tea_ops_fetched = 0;
+    tea->chains[i].trigger_cycle = 0;
+    tea->chains[i].fetch_done_cycle = 0;
   }
   tea->num_active_chains = 0;
   tea->current_fetch_chain = -1;
@@ -277,7 +464,7 @@ void terminate_tea_thread(uns proc_id) {
   recover_tea_fetch_stage(proc_id);
   recover_tea_rename_stage(proc_id);
   flush_tea_ops_from_node_stage(proc_id);
-  for (int i = 0; i < MAX_TEA_CHAINS; i++)
+  for (int i = 0; i < max_chains; i++)
     reset_tea_preg_pool(proc_id, i);
   reset_tea_store_buffer(proc_id);
   memset(tea->pending_case1_flushes, 0, sizeof(tea->pending_case1_flushes));
@@ -312,11 +499,14 @@ void update_tea_thread(uns proc_id) {
     return;
 
   /* Detect CHAIN_EXECUTING chains whose ops all completed → terminate */
-  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
+  int max_chains = (int)tea_max_chains(proc_id);
+  record_active_chain_cycle_stats(proc_id, tea, max_chains);
+  for (int i = 0; i < max_chains; i++) {
     Tea_H2P_Chain* c = &tea->chains[i];
     if (c->state == CHAIN_EXECUTING &&
         c->tea_op_count == 0 && c->tea_ops_fetched > 0) {
-      terminate_tea_chain(proc_id, i);
+      terminate_tea_chain_with_reason(proc_id, i,
+                                      TEA_CHAIN_TERM_REASON_NATURAL);
     }
   }
 }
@@ -341,7 +531,8 @@ void tea_op_completed(uns proc_id, Op* op) {
 void tea_record_pending_case1_flush(uns proc_id, Op* main_h2p) {
   ASSERT(proc_id, tea_threads && tea_threads[proc_id]);
   Tea_Thread* tea = tea_threads[proc_id];
-  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
+  int max_chains = (int)tea_max_chains(proc_id);
+  for (int i = 0; i < max_chains; i++) {
     if (!tea->pending_case1_flushes[i].valid) {
       tea->pending_case1_flushes[i].valid               = TRUE;
       tea->pending_case1_flushes[i].main_h2p_op         = main_h2p;
@@ -362,7 +553,8 @@ void tea_clear_pending_case1_flushes(uns proc_id) {
 void tea_selective_clear_pending_case1_flushes(uns proc_id, Counter recovery_op_num) {
   if (!tea_threads || !tea_threads[proc_id]) return;
   Tea_Thread* tea = tea_threads[proc_id];
-  for (int i = 0; i < MAX_TEA_CHAINS; i++) {
+  int max_chains = (int)tea_max_chains(proc_id);
+  for (int i = 0; i < max_chains; i++) {
     Tea_Pending_Case1_Flush* pf = &tea->pending_case1_flushes[i];
     if (pf->valid && pf->main_h2p_op_num >= recovery_op_num)
       pf->valid = FALSE;

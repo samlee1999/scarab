@@ -65,6 +65,17 @@ typedef enum Tea_Chain_State_enum {
   CHAIN_EXECUTING,  /* Ops in OoO backend */
 } Tea_Chain_State;
 
+typedef enum Tea_Chain_Termination_Reason_enum {
+  TEA_CHAIN_TERM_REASON_UNKNOWN,
+  TEA_CHAIN_TERM_REASON_NATURAL,
+  TEA_CHAIN_TERM_REASON_H2P_CORRECT,
+  TEA_CHAIN_TERM_REASON_EARLY_FLUSH_CASE1,
+  TEA_CHAIN_TERM_REASON_MAIN_RECOVERY,
+  TEA_CHAIN_TERM_REASON_INVALID_MAIN_H2P,
+  TEA_CHAIN_TERM_REASON_DEP_CHAIN_LOST,
+  TEA_CHAIN_TERM_REASON_FULL_THREAD,
+} Tea_Chain_Termination_Reason;
+
 typedef struct Tea_H2P_Chain_struct {
   Tea_Chain_State state;
 
@@ -79,12 +90,14 @@ typedef struct Tea_H2P_Chain_struct {
   /* Per-chain counters */
   uns     tea_op_count;           /* Ops currently in pipeline (node stage) */
   Counter tea_ops_fetched;        /* Total ops fetched from dep chain */
+  Counter trigger_cycle;          /* Cycle this chain slot became active */
+  Counter fetch_done_cycle;       /* Cycle dependency-chain fetch completed */
 } Tea_H2P_Chain;
 
 /**************************************************************************************/
 /* TEA Thread Structure */
 
-#define MAX_TEA_CHAINS 4  /* Compile-time upper bound; runtime limit = TEA_MAX_CHAINS */
+#define MAX_TEA_CHAINS 16  /* Compile-time capacity; runtime limit = TEA_MAX_CHAINS */
 
 typedef struct Tea_Thread_struct {
   uns8 proc_id;
@@ -106,6 +119,7 @@ typedef struct Tea_Thread_struct {
   Counter stat_tea_triggers;
   Counter stat_tea_early_flushes;
   Counter stat_tea_ops_executed;
+  uns     stat_max_active_chains;
 
 } Tea_Thread;
 
@@ -113,6 +127,12 @@ typedef struct Tea_Thread_struct {
 /* Global Variables */
 
 extern Tea_Thread** tea_threads;   /* Per-core TEA thread state */
+
+/**************************************************************************************/
+/* Configuration Helpers */
+
+uns tea_max_chains(uns proc_id);
+Flag tea_chain_slot_is_valid(uns proc_id, int chain_slot);
 
 /**************************************************************************************/
 /* Function Prototypes */
@@ -124,6 +144,8 @@ void reset_tea_thread(uns proc_id);
 /* TEA thread control */
 void trigger_tea_thread(uns proc_id, Addr h2p_pc, Counter h2p_op_num, Op* h2p_op);
 void terminate_tea_chain(uns proc_id, int chain_slot);  /* Per-chain termination */
+void terminate_tea_chain_with_reason(uns proc_id, int chain_slot,
+                                     Tea_Chain_Termination_Reason reason);
 void terminate_tea_thread(uns proc_id);                  /* All chains termination */
 
 /* State queries */

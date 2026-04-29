@@ -99,6 +99,12 @@
 --reg_table_integer_physical_size   280
 --reg_table_vector_physical_size    332
 
+### TEA Thread
+### Runtime active chain count. C arrays are compiled with a higher fixed capacity.
+### tea_preg_reservation is split evenly across active chains in the current per-chain pool design.
+--tea_max_chains                4
+--tea_preg_reservation          192
+
 ### Issue Stage
 
 # Max number of instructions to be renamed, and issued per cycle.
