@@ -111,11 +111,86 @@ void node_precommit_retire(Op* op);
 
 void node_fuse_op(Op* op);
 
+static Flag node_remove_op_from_ready_list(Node_Stage* node_local, Op* target);
+
 /**************************************************************************************/
 /* set_node_stage:*/
 
 void set_node_stage(Node_Stage* new_node) {
   node = new_node;
+}
+
+Flag node_ready_op_should_clear_rs(Op* op) {
+  if (!op)
+    return FALSE;
+
+  if (op->state == OS_SCHEDULED || op->state == OS_MISS)
+    return TRUE;
+
+  /* TEA ops can be marked OS_DONE before node_issue_queue_clear() sees the
+   * ready-list entry.  Once done, the op has left the RS from the scheduler's
+   * perspective and must be counted like an issued ready-list entry. */
+  if (TEA_ENABLE && op->thread_id == 1 && op->state == OS_DONE)
+    return TRUE;
+
+  return FALSE;
+}
+
+Flag node_decrement_rs_counters_for_clear(Node_Stage* node_local, Op* op,
+                                          Flag strict) {
+  ASSERT(0, node_local);
+  ASSERT(node_local->proc_id, op);
+  ASSERT(node_local->proc_id, op->rs_id < NUM_RS);
+
+  Reservation_Station* rs = &node_local->rs[op->rs_id];
+  Flag decremented = FALSE;
+
+  if (strict)
+    ASSERT(node_local->proc_id, rs->rs_op_count > 0);
+  if (rs->rs_op_count > 0) {
+    rs->rs_op_count--;
+    decremented = TRUE;
+  }
+
+  if (op->thread_id == 1) {
+    if (strict)
+      ASSERT(node_local->proc_id, rs->tea_op_count > 0);
+    if (rs->tea_op_count > 0)
+      rs->tea_op_count--;
+  } else {
+    if (strict)
+      ASSERT(node_local->proc_id, rs->main_op_count > 0);
+    if (rs->main_op_count > 0)
+      rs->main_op_count--;
+  }
+
+  if (!strict && decremented)
+    STAT_EVENT(node_local->proc_id, TEA_RS_COUNTER_FIXUPS);
+
+  ASSERTM(node_local->proc_id,
+          rs->rs_op_count >= rs->main_op_count + rs->tea_op_count,
+          "RS counter divergence: rs=%d rs_op=%d main=%d tea=%d op_num=%s tid=%d st=%d C=%llu\n",
+          (int)op->rs_id, rs->rs_op_count, rs->main_op_count,
+          rs->tea_op_count, unsstr64(op->op_num), op->thread_id,
+          op->state, cycle_count);
+
+  return decremented;
+}
+
+static Flag node_remove_op_from_ready_list(Node_Stage* node_local, Op* target) {
+  Op** last = &node_local->rdy_head;
+  for (Op* op = node_local->rdy_head; op;) {
+    Op* next = op->next_rdy;
+    if (op == target) {
+      *last = next;
+      op->next_rdy = NULL;
+      op->in_rdy_list = FALSE;
+      return TRUE;
+    }
+    last = &op->next_rdy;
+    op = next;
+  }
+  return FALSE;
 }
 
 /**************************************************************************************/
@@ -689,6 +764,14 @@ static void node_retire_tea_ops() {
       *last = op->next_node;
       op->in_node_list = FALSE;
 
+      if (op->in_rdy_list) {
+        STAT_EVENT(node->proc_id, TEA_RETIRE_READY_LIST_ESCAPE);
+        Flag removed = node_remove_op_from_ready_list(node, op);
+        ASSERT(node->proc_id, removed);
+        if (node_ready_op_should_clear_rs(op))
+          node_decrement_rs_counters_for_clear(node, op, FALSE);
+      }
+
       /* Decrement tea_op_count: this is the authoritative decrement point.
        * tea_op_completed() (called from exec/dcache) only sets OS_DONE and
        * records EXECUTED — it no longer decrements the counter.  Moving the
@@ -823,6 +906,7 @@ void node_retire() {
       /* We need to retire sys calls, bar fetch instructions, and the last instruction.
        * All other retires are "optional" to release resources in the PIN frontend */
       inst_count[node->proc_id]++;
+      hbt_retire_instruction_tick(node->proc_id);
       STAT_EVENT(op->proc_id, NODE_INST_COUNT);
 
       if (op->fetched_instruction) {
@@ -1159,38 +1243,33 @@ void flush_tea_ops_from_node_stage(uns proc_id) {
     }
   }
 
-  /* 1. Flush ready list — also decrement RS counter for OS_SCHEDULED/OS_MISS TEA ops.
+  /* 1. Flush ready list — also decrement RS counter for TEA ops that have
+   *    already left the RS (OS_SCHEDULED/OS_MISS/OS_DONE).
    *    If found in ready list → clear() has NOT yet processed them (same-cycle case).
    *    In cross-cycle case, clear() already removed them → not found here → safe. */
   for (op = node_local->rdy_head, last = &node_local->rdy_head; op;) {
+    Op* next_rdy = op->next_rdy;
     if (op->thread_id == 1) {
       /* Remove TEA op from ready list */
-      *last = op->next_rdy;
+      *last = next_rdy;
+      op->next_rdy = NULL;
       op->in_rdy_list = FALSE;
 
-      /* RS counter decrement for OS_SCHEDULED/OS_MISS:
+      /* RS counter decrement for issued/done ready-list states:
        * Normally clear() does this, but we just removed op from ready list
        * so clear() will never see it. Must decrement here to prevent leak. */
-      if (op->state == OS_SCHEDULED || op->state == OS_MISS) {
-        if (node_local->rs[op->rs_id].rs_op_count > 0)
-          node_local->rs[op->rs_id].rs_op_count--;
-        if (node_local->rs[op->rs_id].tea_op_count > 0)
-          node_local->rs[op->rs_id].tea_op_count--;
-
-        /* DEBUG: detect divergence */
-        ASSERTM(0,
-                node_local->rs[op->rs_id].rs_op_count >= node_local->rs[op->rs_id].main_op_count + node_local->rs[op->rs_id].tea_op_count,
-                "flush_tea step1 divergence: rs=%d rs_op=%d main=%d tea=%d op_num=%s state=%d C=%llu\n",
-                (int)op->rs_id, node_local->rs[op->rs_id].rs_op_count,
-                node_local->rs[op->rs_id].main_op_count, node_local->rs[op->rs_id].tea_op_count,
-                unsstr64(op->op_num), op->state, cycle_count);
+      if (node_ready_op_should_clear_rs(op)) {
+        Flag tea_done_clear = (op->state == OS_DONE);
+        node_decrement_rs_counters_for_clear(node_local, op, FALSE);
+        if (tea_done_clear)
+          STAT_EVENT(proc_id, TEA_FLUSH_READY_LIST_DONE_CLEARED);
       }
 
-      op = op->next_rdy;
+      op = next_rdy;
       /* Don't free here - will be freed from node table below */
     } else {
       last = &op->next_rdy;
-      op = op->next_rdy;
+      op = next_rdy;
     }
   }
 
@@ -1291,20 +1370,21 @@ void flush_tea_ops_by_chain_id(uns proc_id, uns8 chain_id) {
 
   /* 1. Ready list: remove this chain's ops and sync RS counters */
   for (op = node_local->rdy_head, last = &node_local->rdy_head; op;) {
+    Op* next_rdy = op->next_rdy;
     if (op->thread_id == 1 && op->h2p_chain_id == chain_id) {
-      *last = op->next_rdy;
+      *last = next_rdy;
+      op->next_rdy = NULL;
       op->in_rdy_list = FALSE;
-      if (op->state == OS_SCHEDULED || op->state == OS_MISS) {
-        if (node_local->rs[op->rs_id].rs_op_count > 0)
-          node_local->rs[op->rs_id].rs_op_count--;
-        if (node_local->rs[op->rs_id].tea_op_count > 0)
-          node_local->rs[op->rs_id].tea_op_count--;
-      } else {
+      if (node_ready_op_should_clear_rs(op)) {
+        Flag tea_done_clear = (op->state == OS_DONE);
+        node_decrement_rs_counters_for_clear(node_local, op, FALSE);
+        if (tea_done_clear)
+          STAT_EVENT(proc_id, TEA_FLUSH_READY_LIST_DONE_CLEARED);
       }
-      op = op->next_rdy;
+      op = next_rdy;
     } else {
       last = &op->next_rdy;
-      op = op->next_rdy;
+      op = next_rdy;
     }
   }
 

@@ -49,6 +49,7 @@ Tea_Fetch_Stage** tea_fetch_stages = NULL;
 
 static void tea_fetch_stage_init_stage_data(Tea_Fetch_Stage* tea_fetch);
 static void setup_fetch_for_chain(uns proc_id, int slot);
+static void tea_copy_cached_dynamic_oracle_fields(Op* tea_op, Op* cached_op);
 
 /**************************************************************************************/
 /* Initialization and Reset */
@@ -229,6 +230,35 @@ void update_tea_fetch_stage(uns proc_id) {
 /**************************************************************************************/
 /* Op Creation from Block Cache */
 
+static void tea_copy_cached_dynamic_oracle_fields(Op* tea_op, Op* cached_op) {
+  ASSERT(0, tea_op && cached_op);
+
+  if (!cached_op->table_info || cached_op->table_info->mem_type == NOT_MEM)
+    return;
+
+  Op_Info* dst = &tea_op->oracle_info;
+  Op_Info* src = &cached_op->oracle_info;
+
+  dst->va                  = src->va;
+  dst->mem_size            = src->mem_size;
+  dst->old_mem_value       = src->old_mem_value;
+  dst->new_mem_value       = src->new_mem_value;
+  dst->inst_sim_cycle      = src->inst_sim_cycle;
+  dst->dcmiss              = src->dcmiss;
+  dst->l1_miss             = src->l1_miss;
+  dst->l1_miss_satisfied   = src->l1_miss_satisfied;
+  dst->mlc_miss            = src->mlc_miss;
+  dst->mlc_miss_satisfied  = src->mlc_miss_satisfied;
+  dst->dep_on_l1_miss      = src->dep_on_l1_miss;
+  dst->was_dep_on_l1_miss  = src->was_dep_on_l1_miss;
+
+  STAT_EVENT(tea_op->proc_id, TEA_MEM_ORACLE_COPIED);
+  if (dst->va == 0)
+    STAT_EVENT(tea_op->proc_id, TEA_MEM_ORACLE_ZERO_VA);
+  if (dst->mem_size == 0)
+    STAT_EVENT(tea_op->proc_id, TEA_MEM_ORACLE_ZERO_SIZE);
+}
+
 Op* tea_create_op_from_cache(uns proc_id, Op* cached_op, Flag is_h2p_branch) {
   ASSERT(proc_id, cached_op);
 
@@ -257,6 +287,8 @@ Op* tea_create_op_from_cache(uns proc_id, Op* cached_op, Flag is_h2p_branch) {
   if (is_h2p_branch) {
     tea_op->oracle_info = c->h2p_oracle_info;
     tea_op->recovery_info = c->h2p_recovery_info;
+  } else {
+    tea_copy_cached_dynamic_oracle_fields(tea_op, cached_op);
   }
 
   tea_op->unique_num = unique_count++;

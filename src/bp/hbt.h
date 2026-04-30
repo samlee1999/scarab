@@ -15,6 +15,7 @@
 #define HBT_CTR_BITS 3        // HBT 카운터의 비트 수 (논문: 3-bit)
 #define HBT_CTR_MAX ((1 << HBT_CTR_BITS) - 1) // HBT 카운터의 최댓값 (7)
 #define HBT_H2P_THRESHOLD 1   // counter > 1이면 H2P (논문 기준)
+#define HBT_DECAY_INTERVAL 50000
 
 // ==========================================================
 // HBT 자료구조 정의
@@ -30,6 +31,7 @@ typedef struct {
 // ==========================================================
 extern HbtEntry hbt_table[HBT_SIZE];
 extern uns64    retired_branch_count;
+extern uns64    hbt_retired_instruction_count;
 
 // ==========================================================
 // 외부 공개 함수 원형(Prototype) 선언
@@ -46,6 +48,11 @@ void hbt_init(void);
  * @param op Retire되는 브랜치 명령어 정보
  */
 void hbt_update(Op* op);
+
+/**
+ * @brief Main-thread instruction retirement tick used for paper-accurate HBT decay.
+ */
+void hbt_retire_instruction_tick(uns proc_id);
 
 /**
  * @brief 특정 주소(PC)의 브랜치가 'Hard-to-predict' 상태인지 확인합니다.

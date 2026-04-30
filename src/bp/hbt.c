@@ -5,11 +5,13 @@
 #include "debug/debug.param.h"
 #include "debug/debug_macros.h"
 #include "globals/utils.h"        
+#include "statistics.h"
 #include <string.h>               
 
 // .h 파일에 extern으로 선언된 전역 변수들의 실체를 정의
 HbtEntry hbt_table[HBT_SIZE];
 uns64    retired_branch_count = 0;
+uns64    hbt_retired_instruction_count = 0;
 
 // HBT의 모든 카운터를 주기적으로 1씩 감소시키는 내부 함수
 // 논문 기준: "All counters are decremented by 1 every 50K instructions"
@@ -28,7 +30,21 @@ void hbt_init(void) {
   // HBT 테이블 전체를 0으로 초기화
   memset(hbt_table, 0, sizeof(HbtEntry) * HBT_SIZE);
   retired_branch_count = 0;
+  hbt_retired_instruction_count = 0;
   _DEBUG(0, DEBUG_HBT, "HBT module initialized.\n");
+}
+
+void hbt_retire_instruction_tick(uns proc_id) {
+  hbt_retired_instruction_count++;
+  STAT_EVENT(proc_id, HBT_RETIRED_INST_TICKS);
+
+  if ((hbt_retired_instruction_count % HBT_DECAY_INTERVAL) == 0) {
+    _DEBUG(0, DEBUG_HBT,
+           "Triggering periodic decrement at retired instruction count = %llu\n",
+           hbt_retired_instruction_count);
+    hbt_periodic_decrement();
+    STAT_EVENT(proc_id, HBT_DECAY_EVENTS);
+  }
 }
 
 /**
@@ -77,14 +93,10 @@ void hbt_update(Op* op) {
   }
   // ※ 예측 성공 시에는 아무것도 하지 않는 것이 HBT의 핵심 로직입니다.
 
-  // 5. 주기적 감소 로직 트리거 (논문 기준: 50K instructions마다 -1)
-  // 논문: "All counters are decremented by 1 every 50K instructions"
-  // 구현: branches를 카운트하지만, 비슷한 효과를 위해 50000 branches마다 -1
+  // Branch-specific update count is diagnostic only.  Periodic decay is driven
+  // by hbt_retire_instruction_tick() at main instruction retirement.
   retired_branch_count++;
-  if ((retired_branch_count % 50000) == 0) {
-     _DEBUG(0, DEBUG_HBT, "Triggering periodic decrement at branch count = %llu\n", retired_branch_count);
-    hbt_periodic_decrement();
-  }
+  STAT_EVENT(op->proc_id, HBT_RETIRED_BRANCH_UPDATES);
 }
 
 /**

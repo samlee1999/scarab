@@ -44,6 +44,7 @@ extern "C" {
 
 #include "exec_ports.h"
 #include "node_stage.h"
+#include "statistics.h"
 #include "tea/tea_thread.h"
 }
 
@@ -244,37 +245,26 @@ void node_issue_queue_check_mem() {
 void node_issue_queue_clear() {
   // TODO: make this traversal more efficient since we know what ops we tried to schedule last cycle
   Op** last = &node->rdy_head;
-  for (Op* op = node->rdy_head; op; op = op->next_rdy) {
-    if (op->state != OS_SCHEDULED && op->state != OS_MISS) {
+  for (Op* op = node->rdy_head; op;) {
+    Op* next = op->next_rdy;
+    if (!node_ready_op_should_clear_rs(op)) {
       last = &op->next_rdy;
+      op = next;
       continue;
     }
 
     DEBUG(node->proc_id, "Removing from RS (and ready list)  op_num:%s op:%s l1:%d\n", unsstr64(op->op_num),
           disasm_op(op, TRUE), op->engine_info.l1_miss);
-    *last = op->next_rdy;
+    Flag tea_done_clear = (op->thread_id == 1 && op->state == OS_DONE);
+    *last = next;
+    op->next_rdy = NULL;
     op->in_rdy_list = FALSE;
-    ASSERT(node->proc_id, node->rs[op->rs_id].rs_op_count > 0);
-    node->rs[op->rs_id].rs_op_count--;
-
-    /* Phase 4: Update per-thread counter */
-    if (op->thread_id == 1) {
-      ASSERT(node->proc_id, node->rs[op->rs_id].tea_op_count > 0);
-      node->rs[op->rs_id].tea_op_count--;
-    } else {
-      ASSERT(node->proc_id, node->rs[op->rs_id].main_op_count > 0);
-      node->rs[op->rs_id].main_op_count--;
-    }
-
-    /* DEBUG: detect rs_op_count < main+tea divergence */
-    ASSERTM(node->proc_id,
-            node->rs[op->rs_id].rs_op_count >= node->rs[op->rs_id].main_op_count + node->rs[op->rs_id].tea_op_count,
-            "clear() divergence: rs=%d rs_op=%d main=%d tea=%d op_num=%s tid=%d C=%llu\n",
-            (int)op->rs_id, node->rs[op->rs_id].rs_op_count,
-            node->rs[op->rs_id].main_op_count, node->rs[op->rs_id].tea_op_count,
-            unsstr64(op->op_num), op->thread_id, cycle_count);
+    node_decrement_rs_counters_for_clear(node, op, TRUE);
+    if (tea_done_clear)
+      STAT_EVENT(node->proc_id, TEA_READY_LIST_DONE_CLEARED);
 
     STAT_EVENT(node->proc_id, OP_ISSUED);
+    op = next;
   }
 }
 

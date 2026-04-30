@@ -384,6 +384,82 @@ void cmp_wake(Op* src_op, Op* dep_op, uns8 rdy_bit) {
 }
 
 /**************************************************************************************/
+/* TEA stale dependency cleanup after main-thread recovery */
+
+static Flag tea_src_is_stale_flushed_main_dep(Src_Info* src,
+                                              Counter recovery_op_num) {
+  if (!src)
+    return FALSE;
+
+  /* TEA producers live in a separate high op_num namespace and are not flushed
+   * by the main-thread recovery_op_num comparison. */
+  if (src->op_num >= TEA_OP_NUM_BASE)
+    return FALSE;
+
+  if (src->op_num < recovery_op_num)
+    return FALSE;
+
+  return (!src->op || !src->op->op_pool_valid ||
+          src->op->unique_num != src->unique_num);
+}
+
+static Flag tea_clear_stale_main_deps_in_op(uns proc_id, Op* op,
+                                            Counter recovery_op_num,
+                                            Flag node_table_op) {
+  if (!op || op->thread_id != 1)
+    return FALSE;
+
+  Flag cleared_any = FALSE;
+  for (uns i = 0; i < op->oracle_info.num_srcs; i++) {
+    if (!(op->srcs_not_rdy_vector & (0x1u << i)))
+      continue;
+
+    Src_Info* src = &op->oracle_info.src_info[i];
+    if (!tea_src_is_stale_flushed_main_dep(src, recovery_op_num))
+      continue;
+
+    clear_not_rdy_bit(op, i);
+    cleared_any = TRUE;
+    STAT_EVENT(proc_id, TEA_STALE_MAIN_DEP_CLEARED);
+    if (node_table_op)
+      STAT_EVENT(proc_id, TEA_STALE_MAIN_DEP_NODE_CLEARED);
+    else
+      STAT_EVENT(proc_id, TEA_STALE_MAIN_DEP_RENAME_CLEARED);
+  }
+
+  if (node_table_op && cleared_any &&
+      op->srcs_not_rdy_vector == 0x0 &&
+      op->state == OS_IN_RS && !op->in_rdy_list) {
+    Node_Stage* node_local = &cmp_model.node_stage[proc_id];
+    op->next_rdy = node_local->rdy_head;
+    node_local->rdy_head = op;
+    op->in_rdy_list = TRUE;
+    STAT_EVENT(proc_id, TEA_STALE_MAIN_DEP_OPS_READIED);
+  }
+
+  return cleared_any;
+}
+
+static void tea_clear_stale_main_deps_after_recovery(uns proc_id,
+                                                     Counter recovery_op_num) {
+  if (!TEA_ENABLE || !tea_is_active(proc_id))
+    return;
+
+  if (tea_rename_stages && tea_rename_stages[proc_id]) {
+    Stage_Data* rename_sd = &tea_rename_stages[proc_id]->sd;
+    for (uns i = 0; i < rename_sd->max_op_count; i++) {
+      tea_clear_stale_main_deps_in_op(proc_id, rename_sd->ops[i],
+                                      recovery_op_num, FALSE);
+    }
+  }
+
+  Node_Stage* node_local = &cmp_model.node_stage[proc_id];
+  for (Op* op = node_local->node_head; op; op = op->next_node) {
+    tea_clear_stale_main_deps_in_op(proc_id, op, recovery_op_num, TRUE);
+  }
+}
+
+/**************************************************************************************/
 /* recover_tea_on_flush: Terminate chains whose H2P is at or after the recovery point. */
 void recover_tea_on_flush(uns proc_id, Counter recovery_op_num) {
   if (!TEA_ENABLE) return;
@@ -409,6 +485,8 @@ void recover_tea_on_flush(uns proc_id, Counter recovery_op_num) {
                                       TEA_CHAIN_TERM_REASON_MAIN_RECOVERY);
     }
   }
+
+  tea_clear_stale_main_deps_after_recovery(proc_id, recovery_op_num);
 }
 
 /**************************************************************************************/

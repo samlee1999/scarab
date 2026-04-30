@@ -97,6 +97,9 @@ Flag is_node_stage_stalled(void);
 /* TEA Thread support */
 void flush_tea_ops_from_node_stage(uns proc_id);
 void flush_tea_ops_by_chain_id(uns proc_id, uns8 chain_id);
+Flag node_ready_op_should_clear_rs(Op* op);
+Flag node_decrement_rs_counters_for_clear(Node_Stage* node_local, Op* op,
+                                          Flag strict);
 
 /**************************************************************************************/
 
