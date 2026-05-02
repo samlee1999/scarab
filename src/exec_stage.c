@@ -88,6 +88,24 @@ static inline void exec_stage_bp_resolve(Op* op);
 static inline void tea_record_h2p_main_exec_delta(uns proc_id,
                                                   Counter tea_exec_cycle,
                                                   Counter main_exec_cycle);
+static inline void tea_record_cycle_delta_stat(uns proc_id,
+                                               Counter start_cycle,
+                                               Counter end_cycle,
+                                               Stat_Enum samples_stat,
+                                               Stat_Enum total_stat,
+                                               Stat_Enum avg_stat);
+static inline void tea_record_h2p_time_to_exec(uns proc_id,
+                                               Tea_H2P_Chain* c,
+                                               Op* tea_h2p);
+static inline void tea_record_early_flush_time_to_detect(uns proc_id,
+                                                         Tea_H2P_Chain* c,
+                                                         Op* tea_h2p,
+                                                         Stat_Enum trigger_samples,
+                                                         Stat_Enum trigger_total,
+                                                         Stat_Enum trigger_avg,
+                                                         Stat_Enum fetch_samples,
+                                                         Stat_Enum fetch_total,
+                                                         Stat_Enum fetch_avg);
 static inline void tea_mark_early_flush_detection(Op* main_h2p,
                                                   Counter tea_exec_cycle);
 static inline void tea_record_main_h2p_exec_delta_if_needed(Op* op);
@@ -603,6 +621,49 @@ static inline void tea_record_h2p_main_exec_delta(uns proc_id,
   }
 }
 
+static inline void tea_record_cycle_delta_stat(uns proc_id,
+                                               Counter start_cycle,
+                                               Counter end_cycle,
+                                               Stat_Enum samples_stat,
+                                               Stat_Enum total_stat,
+                                               Stat_Enum avg_stat) {
+  if (start_cycle == MAX_CTR || end_cycle == MAX_CTR || end_cycle < start_cycle)
+    return;
+
+  Counter delta = end_cycle - start_cycle;
+  STAT_EVENT(proc_id, samples_stat);
+  INC_STAT_EVENT(proc_id, total_stat, delta);
+  INC_STAT_EVENT(proc_id, avg_stat, delta);
+}
+
+static inline void tea_record_h2p_time_to_exec(uns proc_id,
+                                               Tea_H2P_Chain* c,
+                                               Op* tea_h2p) {
+  tea_record_cycle_delta_stat(proc_id, c->trigger_cycle, tea_h2p->exec_cycle,
+                              TEA_H2P_TRIGGER_TO_EXEC_SAMPLES,
+                              TEA_H2P_TRIGGER_TO_EXEC_TOTAL,
+                              TEA_H2P_TRIGGER_TO_EXEC_AVG);
+  tea_record_cycle_delta_stat(proc_id, tea_h2p->fetch_cycle, tea_h2p->exec_cycle,
+                              TEA_H2P_FETCH_TO_EXEC_SAMPLES,
+                              TEA_H2P_FETCH_TO_EXEC_TOTAL,
+                              TEA_H2P_FETCH_TO_EXEC_AVG);
+}
+
+static inline void tea_record_early_flush_time_to_detect(uns proc_id,
+                                                         Tea_H2P_Chain* c,
+                                                         Op* tea_h2p,
+                                                         Stat_Enum trigger_samples,
+                                                         Stat_Enum trigger_total,
+                                                         Stat_Enum trigger_avg,
+                                                         Stat_Enum fetch_samples,
+                                                         Stat_Enum fetch_total,
+                                                         Stat_Enum fetch_avg) {
+  tea_record_cycle_delta_stat(proc_id, c->trigger_cycle, tea_h2p->exec_cycle,
+                              trigger_samples, trigger_total, trigger_avg);
+  tea_record_cycle_delta_stat(proc_id, tea_h2p->fetch_cycle, tea_h2p->exec_cycle,
+                              fetch_samples, fetch_total, fetch_avg);
+}
+
 static inline void tea_mark_early_flush_detection(Op* main_h2p,
                                                   Counter tea_exec_cycle) {
   if (!main_h2p)
@@ -652,6 +713,8 @@ static inline void exec_stage_bp_resolve(Op* op) {
     if (op->inst_info->addr != c->target_h2p_pc)
       return;
 
+    tea_record_h2p_time_to_exec(op->proc_id, c, op);
+
     if (op->oracle_info.mispred || op->oracle_info.misfetch) {
       DEBUG(op->proc_id, "TEA early flush: chain=%d H2P mispred op_num:%s\n",
             chain_slot, unsstr64(op->op_num));
@@ -683,6 +746,22 @@ static inline void exec_stage_bp_resolve(Op* op) {
             main_h2p->recovery_scheduled = TRUE;
             tea_mark_early_flush_detection(main_h2p, op->exec_cycle);
             STAT_EVENT(op->proc_id, TEA_EARLY_FLUSHES);
+            tea_record_early_flush_time_to_detect(
+              op->proc_id, c, op,
+              TEA_EARLY_FLUSH_TRIGGER_TO_DETECT_SAMPLES,
+              TEA_EARLY_FLUSH_TRIGGER_TO_DETECT_TOTAL,
+              TEA_EARLY_FLUSH_TRIGGER_TO_DETECT_AVG,
+              TEA_EARLY_FLUSH_FETCH_TO_DETECT_SAMPLES,
+              TEA_EARLY_FLUSH_FETCH_TO_DETECT_TOTAL,
+              TEA_EARLY_FLUSH_FETCH_TO_DETECT_AVG);
+            tea_record_early_flush_time_to_detect(
+              op->proc_id, c, op,
+              TEA_EARLY_FLUSH_CASE2_TRIGGER_TO_DETECT_SAMPLES,
+              TEA_EARLY_FLUSH_CASE2_TRIGGER_TO_DETECT_TOTAL,
+              TEA_EARLY_FLUSH_CASE2_TRIGGER_TO_DETECT_AVG,
+              TEA_EARLY_FLUSH_CASE2_FETCH_TO_DETECT_SAMPLES,
+              TEA_EARLY_FLUSH_CASE2_FETCH_TO_DETECT_TOTAL,
+              TEA_EARLY_FLUSH_CASE2_FETCH_TO_DETECT_AVG);
           }
           main_h2p->oracle_info.recover_at_exec = FALSE;
           STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE2_WITH_CHKPT);
@@ -698,6 +777,22 @@ static inline void exec_stage_bp_resolve(Op* op) {
             tea_mark_early_flush_detection(main_h2p, op->exec_cycle);
             main_h2p->tea_case1_detect_cycle = op->exec_cycle;
             STAT_EVENT(op->proc_id, TEA_EARLY_FLUSHES);
+            tea_record_early_flush_time_to_detect(
+              op->proc_id, c, op,
+              TEA_EARLY_FLUSH_TRIGGER_TO_DETECT_SAMPLES,
+              TEA_EARLY_FLUSH_TRIGGER_TO_DETECT_TOTAL,
+              TEA_EARLY_FLUSH_TRIGGER_TO_DETECT_AVG,
+              TEA_EARLY_FLUSH_FETCH_TO_DETECT_SAMPLES,
+              TEA_EARLY_FLUSH_FETCH_TO_DETECT_TOTAL,
+              TEA_EARLY_FLUSH_FETCH_TO_DETECT_AVG);
+            tea_record_early_flush_time_to_detect(
+              op->proc_id, c, op,
+              TEA_EARLY_FLUSH_CASE1_TRIGGER_TO_DETECT_SAMPLES,
+              TEA_EARLY_FLUSH_CASE1_TRIGGER_TO_DETECT_TOTAL,
+              TEA_EARLY_FLUSH_CASE1_TRIGGER_TO_DETECT_AVG,
+              TEA_EARLY_FLUSH_CASE1_FETCH_TO_DETECT_SAMPLES,
+              TEA_EARLY_FLUSH_CASE1_FETCH_TO_DETECT_TOTAL,
+              TEA_EARLY_FLUSH_CASE1_FETCH_TO_DETECT_AVG);
           }
           if (main_h2p->decode_cycle)
             STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_NO_CHKPT);
@@ -710,6 +805,14 @@ static inline void exec_stage_bp_resolve(Op* op) {
         if (!main_h2p->tea_early_flush_detected) {
           STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_TOO_LATE_MAIN_RECOVERY);
           STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_TOO_LATE_MAIN_RECOVERY_PCT);
+          tea_record_early_flush_time_to_detect(
+            op->proc_id, c, op,
+            TEA_EARLY_FLUSH_TOO_LATE_TRIGGER_TO_DETECT_SAMPLES,
+            TEA_EARLY_FLUSH_TOO_LATE_TRIGGER_TO_DETECT_TOTAL,
+            TEA_EARLY_FLUSH_TOO_LATE_TRIGGER_TO_DETECT_AVG,
+            TEA_EARLY_FLUSH_TOO_LATE_FETCH_TO_DETECT_SAMPLES,
+            TEA_EARLY_FLUSH_TOO_LATE_FETCH_TO_DETECT_TOTAL,
+            TEA_EARLY_FLUSH_TOO_LATE_FETCH_TO_DETECT_AVG);
           tea_record_h2p_main_exec_delta(op->proc_id, op->exec_cycle,
                                          main_h2p->exec_cycle);
         }
