@@ -529,7 +529,8 @@ void tea_op_completed(uns proc_id, Op* op) {
 /* Case 1 Pending Early Flush */
 
 Flag tea_record_pending_case1_flush(uns proc_id, Op* main_h2p,
-                                    Counter detect_cycle) {
+                                    Counter detect_cycle,
+                                    Tea_Case1_Main_Stage main_stage_at_detect) {
   ASSERT(proc_id, tea_threads && tea_threads[proc_id]);
   Tea_Thread* tea = tea_threads[proc_id];
   int max_chains = (int)tea_max_chains(proc_id);
@@ -540,6 +541,7 @@ Flag tea_record_pending_case1_flush(uns proc_id, Op* main_h2p,
       tea->pending_case1_flushes[i].main_h2p_unique_num = main_h2p->unique_num;
       tea->pending_case1_flushes[i].main_h2p_op_num     = main_h2p->op_num;
       tea->pending_case1_flushes[i].detect_cycle        = detect_cycle;
+      tea->pending_case1_flushes[i].main_stage_at_detect = main_stage_at_detect;
       return TRUE;
     }
   }

@@ -94,6 +94,13 @@ static inline void tea_record_cycle_delta_stat(uns proc_id,
                                                Stat_Enum samples_stat,
                                                Stat_Enum total_stat,
                                                Stat_Enum avg_stat);
+static inline Tea_Case1_Main_Stage tea_classify_case1_main_stage(Op* main_h2p);
+static inline void tea_record_case1_main_stage(uns proc_id,
+                                               Tea_Case1_Main_Stage stage);
+static inline void tea_record_case1_stage_to_schedule(uns proc_id,
+                                                      Tea_Case1_Main_Stage stage,
+                                                      Counter detect_cycle,
+                                                      Counter schedule_cycle);
 static inline void tea_record_h2p_time_to_exec(uns proc_id,
                                                Tea_H2P_Chain* c,
                                                Op* tea_h2p);
@@ -108,6 +115,7 @@ static inline void tea_record_early_flush_time_to_detect(uns proc_id,
                                                          Stat_Enum fetch_avg);
 static inline void tea_mark_early_flush_detection(Op* main_h2p,
                                                   Counter tea_exec_cycle);
+static inline void tea_record_main_h2p_fetch_to_exec(Op* op);
 static inline void tea_record_main_h2p_exec_delta_if_needed(Op* op);
 
 /**************************************************************************************/
@@ -636,6 +644,106 @@ static inline void tea_record_cycle_delta_stat(uns proc_id,
   INC_STAT_EVENT(proc_id, avg_stat, delta);
 }
 
+static inline Tea_Case1_Main_Stage tea_classify_case1_main_stage(Op* main_h2p) {
+  if (!main_h2p)
+    return TEA_CASE1_MAIN_STAGE_UNKNOWN;
+
+  if (main_h2p->decode_cycle == 0)
+    return TEA_CASE1_MAIN_STAGE_PRE_DECODE;
+
+  if (main_h2p->map_cycle == MAX_CTR)
+    return TEA_CASE1_MAIN_STAGE_DECODED_PRE_RENAME;
+
+  if (main_h2p->issue_cycle == MAX_CTR)
+    return TEA_CASE1_MAIN_STAGE_IN_RENAME;
+
+  if (main_h2p->exec_cycle == MAX_CTR)
+    return TEA_CASE1_MAIN_STAGE_IN_NODE_OR_RS;
+
+  if (cycle_count < main_h2p->exec_cycle)
+    return TEA_CASE1_MAIN_STAGE_SCHEDULED_OR_EXECUTING;
+
+  return TEA_CASE1_MAIN_STAGE_DONE_OR_LATER;
+}
+
+static inline void tea_record_case1_main_stage(uns proc_id,
+                                               Tea_Case1_Main_Stage stage) {
+  STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_SAMPLES);
+
+  switch (stage) {
+    case TEA_CASE1_MAIN_STAGE_PRE_DECODE:
+      STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_PRE_DECODE);
+      break;
+    case TEA_CASE1_MAIN_STAGE_DECODED_PRE_RENAME:
+      STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_DECODED_PRE_RENAME);
+      break;
+    case TEA_CASE1_MAIN_STAGE_IN_RENAME:
+      STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_IN_RENAME);
+      break;
+    case TEA_CASE1_MAIN_STAGE_IN_NODE_OR_RS:
+      STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_IN_NODE_OR_RS);
+      break;
+    case TEA_CASE1_MAIN_STAGE_SCHEDULED_OR_EXECUTING:
+      STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_SCHEDULED_OR_EXECUTING);
+      break;
+    case TEA_CASE1_MAIN_STAGE_DONE_OR_LATER:
+      STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_DONE_OR_LATER);
+      break;
+    case TEA_CASE1_MAIN_STAGE_UNKNOWN:
+    default:
+      STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_UNKNOWN);
+      break;
+  }
+}
+
+static inline void tea_record_case1_stage_to_schedule(uns proc_id,
+                                                      Tea_Case1_Main_Stage stage,
+                                                      Counter detect_cycle,
+                                                      Counter schedule_cycle) {
+  Stat_Enum samples_stat = TEA_EARLY_FLUSH_CASE1_UNKNOWN_TO_SCHEDULE_SAMPLES;
+  Stat_Enum total_stat   = TEA_EARLY_FLUSH_CASE1_UNKNOWN_TO_SCHEDULE_TOTAL;
+  Stat_Enum avg_stat     = TEA_EARLY_FLUSH_CASE1_UNKNOWN_TO_SCHEDULE_AVG;
+
+  switch (stage) {
+    case TEA_CASE1_MAIN_STAGE_PRE_DECODE:
+      samples_stat = TEA_EARLY_FLUSH_CASE1_PRE_DECODE_TO_SCHEDULE_SAMPLES;
+      total_stat   = TEA_EARLY_FLUSH_CASE1_PRE_DECODE_TO_SCHEDULE_TOTAL;
+      avg_stat     = TEA_EARLY_FLUSH_CASE1_PRE_DECODE_TO_SCHEDULE_AVG;
+      break;
+    case TEA_CASE1_MAIN_STAGE_DECODED_PRE_RENAME:
+      samples_stat = TEA_EARLY_FLUSH_CASE1_DECODED_PRE_RENAME_TO_SCHEDULE_SAMPLES;
+      total_stat   = TEA_EARLY_FLUSH_CASE1_DECODED_PRE_RENAME_TO_SCHEDULE_TOTAL;
+      avg_stat     = TEA_EARLY_FLUSH_CASE1_DECODED_PRE_RENAME_TO_SCHEDULE_AVG;
+      break;
+    case TEA_CASE1_MAIN_STAGE_IN_RENAME:
+      samples_stat = TEA_EARLY_FLUSH_CASE1_IN_RENAME_TO_SCHEDULE_SAMPLES;
+      total_stat   = TEA_EARLY_FLUSH_CASE1_IN_RENAME_TO_SCHEDULE_TOTAL;
+      avg_stat     = TEA_EARLY_FLUSH_CASE1_IN_RENAME_TO_SCHEDULE_AVG;
+      break;
+    case TEA_CASE1_MAIN_STAGE_IN_NODE_OR_RS:
+      samples_stat = TEA_EARLY_FLUSH_CASE1_IN_NODE_OR_RS_TO_SCHEDULE_SAMPLES;
+      total_stat   = TEA_EARLY_FLUSH_CASE1_IN_NODE_OR_RS_TO_SCHEDULE_TOTAL;
+      avg_stat     = TEA_EARLY_FLUSH_CASE1_IN_NODE_OR_RS_TO_SCHEDULE_AVG;
+      break;
+    case TEA_CASE1_MAIN_STAGE_SCHEDULED_OR_EXECUTING:
+      samples_stat = TEA_EARLY_FLUSH_CASE1_SCHEDULED_OR_EXECUTING_TO_SCHEDULE_SAMPLES;
+      total_stat   = TEA_EARLY_FLUSH_CASE1_SCHEDULED_OR_EXECUTING_TO_SCHEDULE_TOTAL;
+      avg_stat     = TEA_EARLY_FLUSH_CASE1_SCHEDULED_OR_EXECUTING_TO_SCHEDULE_AVG;
+      break;
+    case TEA_CASE1_MAIN_STAGE_DONE_OR_LATER:
+      samples_stat = TEA_EARLY_FLUSH_CASE1_DONE_OR_LATER_TO_SCHEDULE_SAMPLES;
+      total_stat   = TEA_EARLY_FLUSH_CASE1_DONE_OR_LATER_TO_SCHEDULE_TOTAL;
+      avg_stat     = TEA_EARLY_FLUSH_CASE1_DONE_OR_LATER_TO_SCHEDULE_AVG;
+      break;
+    case TEA_CASE1_MAIN_STAGE_UNKNOWN:
+    default:
+      break;
+  }
+
+  tea_record_cycle_delta_stat(proc_id, detect_cycle, schedule_cycle,
+                              samples_stat, total_stat, avg_stat);
+}
+
 static inline void tea_record_h2p_time_to_exec(uns proc_id,
                                                Tea_H2P_Chain* c,
                                                Op* tea_h2p) {
@@ -675,6 +783,37 @@ static inline void tea_mark_early_flush_detection(Op* main_h2p,
     main_h2p->tea_early_flush_detected = TRUE;
     main_h2p->tea_h2p_exec_cycle = tea_exec_cycle;
     main_h2p->tea_early_flush_delta_recorded = FALSE;
+  }
+}
+
+static inline void tea_record_main_h2p_fetch_to_exec(Op* op) {
+  if (!TEA_ENABLE || !op || op->thread_id == 1)
+    return;
+
+  if (!op->off_path && op->oracle_info.hbt_pred_is_hard) {
+    tea_record_cycle_delta_stat(op->proc_id, op->fetch_cycle, op->exec_cycle,
+                                TEA_MAIN_H2P_FETCH_TO_EXEC_SAMPLES,
+                                TEA_MAIN_H2P_FETCH_TO_EXEC_TOTAL,
+                                TEA_MAIN_H2P_FETCH_TO_EXEC_AVG);
+
+    if (op->oracle_info.mispred || op->oracle_info.misfetch) {
+      tea_record_cycle_delta_stat(op->proc_id, op->fetch_cycle, op->exec_cycle,
+                                  TEA_MAIN_H2P_MISPRED_FETCH_TO_EXEC_SAMPLES,
+                                  TEA_MAIN_H2P_MISPRED_FETCH_TO_EXEC_TOTAL,
+                                  TEA_MAIN_H2P_MISPRED_FETCH_TO_EXEC_AVG);
+    }
+  }
+
+  if (op->tea_case1_detect_cycle != MAX_CTR) {
+    tea_record_cycle_delta_stat(op->proc_id, op->fetch_cycle, op->exec_cycle,
+                                TEA_EARLY_FLUSH_CASE1_MAIN_FETCH_TO_EXEC_SAMPLES,
+                                TEA_EARLY_FLUSH_CASE1_MAIN_FETCH_TO_EXEC_TOTAL,
+                                TEA_EARLY_FLUSH_CASE1_MAIN_FETCH_TO_EXEC_AVG);
+    tea_record_cycle_delta_stat(op->proc_id, op->tea_case1_detect_cycle,
+                                op->exec_cycle,
+                                TEA_EARLY_FLUSH_CASE1_DETECT_TO_MAIN_EXEC_SAMPLES,
+                                TEA_EARLY_FLUSH_CASE1_DETECT_TO_MAIN_EXEC_TOTAL,
+                                TEA_EARLY_FLUSH_CASE1_DETECT_TO_MAIN_EXEC_AVG);
   }
 }
 
@@ -770,13 +909,17 @@ static inline void exec_stage_bp_resolve(Op* op) {
         } else {
           /* Case 1: No SRT checkpoint yet — record pending flush so recovery
            * fires when main H2P reaches rename and the checkpoint is created. */
+          Tea_Case1_Main_Stage main_stage_at_detect =
+            tea_classify_case1_main_stage(main_h2p);
           Flag pending_recorded =
             tea_record_pending_case1_flush(op->proc_id, main_h2p,
-                                           op->exec_cycle);
+                                           op->exec_cycle,
+                                           main_stage_at_detect);
           if (pending_recorded) {
             tea_mark_early_flush_detection(main_h2p, op->exec_cycle);
             main_h2p->tea_case1_detect_cycle = op->exec_cycle;
             STAT_EVENT(op->proc_id, TEA_EARLY_FLUSHES);
+            tea_record_case1_main_stage(op->proc_id, main_stage_at_detect);
             tea_record_early_flush_time_to_detect(
               op->proc_id, c, op,
               TEA_EARLY_FLUSH_TRIGGER_TO_DETECT_SAMPLES,
@@ -827,6 +970,7 @@ static inline void exec_stage_bp_resolve(Op* op) {
   }
 
   /* Main thread branch resolution */
+  tea_record_main_h2p_fetch_to_exec(op);
   tea_record_main_h2p_exec_delta_if_needed(op);
 
   if (!BP_UPDATE_AT_RETIRE) {
@@ -912,6 +1056,8 @@ void exec_stage_tea_pending_flush_at_rename(uns proc_id, Op* op) {
                        cycle_count - pf->detect_cycle);
         INC_STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_TO_SCHEDULE_AVG,
                        cycle_count - pf->detect_cycle);
+        tea_record_case1_stage_to_schedule(proc_id, pf->main_stage_at_detect,
+                                           pf->detect_cycle, cycle_count);
       }
       if (h2p->oracle_info.recovery_sch) {
         h2p->tea_case1_pending_recovery = TRUE;

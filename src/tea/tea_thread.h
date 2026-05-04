@@ -49,12 +49,23 @@ typedef enum Tea_State_enum {
  * SRT checkpoint exists, we cannot call bp_sched_recovery immediately.  Instead
  * we record the intent here and trigger recovery the moment the main H2P reaches
  * rename and its SRT checkpoint is created. */
+typedef enum Tea_Case1_Main_Stage_enum {
+  TEA_CASE1_MAIN_STAGE_UNKNOWN,
+  TEA_CASE1_MAIN_STAGE_PRE_DECODE,
+  TEA_CASE1_MAIN_STAGE_DECODED_PRE_RENAME,
+  TEA_CASE1_MAIN_STAGE_IN_RENAME,
+  TEA_CASE1_MAIN_STAGE_IN_NODE_OR_RS,
+  TEA_CASE1_MAIN_STAGE_SCHEDULED_OR_EXECUTING,
+  TEA_CASE1_MAIN_STAGE_DONE_OR_LATER,
+} Tea_Case1_Main_Stage;
+
 typedef struct Tea_Pending_Case1_Flush_struct {
   Flag    valid;
   Op*     main_h2p_op;
   Counter main_h2p_unique_num;  /* validity stamp — matches main_h2p_op->unique_num */
   Counter main_h2p_op_num;      /* for selective clear on recovery flush */
   Counter detect_cycle;         /* TEA H2P exec cycle that created this pending flush */
+  Tea_Case1_Main_Stage main_stage_at_detect;
 } Tea_Pending_Case1_Flush;
 
 /**************************************************************************************/
@@ -162,7 +173,8 @@ void tea_op_completed(uns proc_id, Op* op);
 
 /* Case 1 pending early flush management */
 Flag tea_record_pending_case1_flush(uns proc_id, Op* main_h2p,
-                                    Counter detect_cycle);
+                                    Counter detect_cycle,
+                                    Tea_Case1_Main_Stage main_stage_at_detect);
 void tea_clear_pending_case1_flushes(uns proc_id);
 void tea_selective_clear_pending_case1_flushes(uns proc_id, Counter recovery_op_num);
 
