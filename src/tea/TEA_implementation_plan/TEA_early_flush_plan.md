@@ -1,21 +1,73 @@
-# TEA Early Flush 향후 구현 계획
+# TEA Early Flush 구현 및 개선 계획
 
-**최종 갱신**: 2026-03-09
+**최종 갱신**: 2026-05-04
 **관련 상태 문서**: `TEA_early_flush_status.md`
-**현재 상태**: 단일 H2P 기준으로 완전 구현 ✅
+**현재 상태**: multi-H2P 기준 구현 완료, Case 1 recovery penalty 개선 예정
 
 ---
 
 ## 1. 개요
 
-현재 Early Flush 로직은 단일 H2P만 지원한다. 다음 작업들이 향후 필요하다:
+현재 Early Flush 로직은 `h2p_chain_id` 기반 multi-H2P chain 모델로 동작한다. TEA H2P branch가 execute되면 chain slot을 찾고, 저장된 Main H2P pointer를 `op_pool_valid + saved_unique_num`으로 검증한 뒤 Case 1/2를 처리한다.
+
+현재 동작 요약:
+
+- Case 2: SRT checkpoint가 이미 있으면 TEA detect 시점에 Main H2P 기준 recovery를 schedule한다.
+- Case 1: SRT checkpoint가 없으면 pending flush를 기록하고, Main H2P가 rename에서 checkpoint를 생성한 직후 recovery를 schedule한다.
+- Main recovery 시 `recover_tea_on_flush(proc_id, recovery_op_num)`가 recovery point 이상 chain을 selective하게 종료한다.
+- Too-late, detect-to-schedule, detect-to-recovery, Main H2P fetch-to-exec stat이 구현되어 있다.
+
+다음 작업은 이미 구현된 Case 1 path의 recovery penalty를 Scarab early recovery parameter에 맞추는 것이다.
+
+| ID | 작업 | 현재 상태 | 우선순위 |
+|----|------|-----------|----------|
+| **EF-1** | `recover_tea_on_flush()` selective cleanup | 구현됨 | 완료 |
+| **EF-2** | 다중 H2P Early Flush 처리 | 구현됨 | 완료 |
+| **EF-3** | Case 1 pending flush at rename | 구현됨 | 완료 |
+| **EF-4** | `unique_num` 기반 Op* 유효성 검증 | 구현됨 | 완료 |
+| **EF-5** | Case 1 recovery penalty를 `EXTRA_EARLY_RECOVERY_CYCLES`로 변경 | 미구현 | 높음 |
+
+### 1.1 EF-5: Case 1 recovery penalty 조정
+
+**문제**:
+
+`PARAMS.golden_cove`는 branch recovery penalty를 다음처럼 구분한다.
+
+```
+--extra_late_recovery_cycles   15
+--extra_early_recovery_cycles   5
+```
+
+현재 `exec_stage_tea_pending_flush_at_rename()`은 Case 1 pending flush가 실제 recovery를 schedule할 때 `bp_sched_recovery(..., EXTRA_LATE_RECOVERY_CYCLES)`를 전달한다. 그러나 Case 1은 TEA가 이미 H2P misprediction을 detect한 상태에서 Main H2P가 SRT checkpoint를 만들자마자 recovery를 거는 path다. 따라서 late recovery penalty 15 cycles보다 early recovery penalty 5 cycles를 적용하는 것이 의도에 맞다.
+
+**수정 계획**:
+
+- 파일: `src/exec_stage.c`
+- 함수: `exec_stage_tea_pending_flush_at_rename()`
+- 변경: Case 1 pending recovery schedule call의 마지막 인자를 `EXTRA_LATE_RECOVERY_CYCLES`에서 `EXTRA_EARLY_RECOVERY_CYCLES`로 변경
+- Case 2 path는 별도 실험 전까지 현재 정책을 유지한다.
+
+**검증 기준**:
+
+- `TEA_EARLY_FLUSH_CASE1_TO_RECOVERY_*` 평균 감소
+- Case 1 recovery count 유지
+- periodic IPC 변화
+- `TEA_EARLY_FLUSH_CASE1_TO_SCHEDULE_*`는 schedule 시점 자체의 delay이므로 penalty 변경 후에도 직접 변하지 않는 것이 정상
+
+---
+
+> **Historical implementation record**
+>
+> 아래 EF-1~EF-4 상세 pseudocode는 multi-H2P 구현 전 계획 기록이다. 현재 코드 상태는 위 요약과 `TEA_early_flush_status.md`를 우선한다.
+
+현재 Early Flush 로직의 과거 단일-H2P 제약을 해소하기 위해 다음 작업들이 계획되었고, 현재는 구현 완료 상태다:
 
 | ID | 작업 | 관련 작업 | 우선순위 |
 |----|------|----------|---------|
-| **EF-1** | `recover_tea_on_flush()` 시그니처 변경 | H2P 큐 (작업 H) | 높음 |
-| **EF-2** | 다중 H2P Early Flush 처리 | 작업 F | 높음 |
-| **EF-3** | SRT Checkpoint 다중화 | 작업 F | 높음 |
-| **EF-4** | `unique_num` 기반 Op* 유효성 검증 | 작업 H | 낮음 |
+| **EF-1** | `recover_tea_on_flush()` 시그니처 변경 | H2P 큐 (작업 H) | 완료 |
+| **EF-2** | 다중 H2P Early Flush 처리 | 작업 F | 완료 |
+| **EF-3** | Case 1 pending flush | 작업 F | 완료 |
+| **EF-4** | `unique_num` 기반 Op* 유효성 검증 | 작업 H | 완료 |
 
 ---
 

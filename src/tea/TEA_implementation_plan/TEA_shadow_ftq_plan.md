@@ -1,9 +1,47 @@
-# Shadow FTQ: 다중 H2P Fetch 구현 계획 (방안 A)
+# Shadow FTQ / TEA Fetch 구현 계획
 
-> **전제**: 방안 A (Dependency Chain Cache 직접 조회)를 유지하며 다중 H2P를 지원한다.
-> Shadow FTQ는 구현하지 않으며, 각 H2P chain을 `get_dependency_chain()`으로 개별 조회한다.
+**최종 갱신**: 2026-05-04
+**관련 상태 문서**: `../TEA_implementation_status/TEA_shadow_ftq_status.md`
+
+> **현재 상태**: 논문의 Shadow FTQ FIFO와 BP fetch-address stream stitching은 구현하지 않았다. 현재 코드는 HBT가 H2P로 판정한 branch PC로 Dependency Chain Cache를 직접 조회하고, 해당 chain을 TEA fetch stage가 sequential하게 fetch한다.
 >
-> 이 문서는 `TEA_implementation_plan.md` Section 8의 fetch stage 관련 부분을 구체화한다.
+> 이 문서는 현재 DCC 직접 조회 모델과 향후 Shadow FTQ/Hybrid Chain 후보 작업을 구분해서 기록한다.
+
+---
+
+## 0. 현재 코드 기준 요약
+
+| 항목 | 현재 상태 |
+|------|-----------|
+| Shadow FTQ FIFO | 미구현 |
+| BP fetch address stream 기반 stitch | 미구현 |
+| Dependency Chain Cache 직접 조회 | 구현됨 |
+| DCC size | 1024 direct-mapped entry |
+| Block Cache OR 누적 | 구현됨, 현재 fetch path에는 직접 미사용 |
+| snapshot 내 모든 H2P backward walk | 구현됨 |
+| multi-H2P sequential fetch | 구현됨 |
+| `TEA_FETCH_WIDTH` | 구현됨 |
+
+현재 TEA fetch path:
+
+```
+trigger_tea_thread()
+  -> setup_fetch_for_chain()
+  -> get_dependency_chain(proc_id, target_h2p_pc)
+  -> DCC entry chain[] sequential fetch
+```
+
+현재 남은 frontend 관련 분석:
+
+- `TEA_TRIGGER_SKIP_NO_CHAIN`이 큰 benchmark에서 DCC coverage 부족 여부 확인.
+- `TEA_TRIGGER_SKIP_FULL`이 frontend slot 병목인지 backend lifecycle 병목인지 분리.
+- Block Cache OR 누적을 실제 TEA fetch source로 사용할 Hybrid Chain 작업의 필요성 판단.
+
+---
+
+> **Historical implementation record**
+>
+> 아래 섹션의 C-like pseudocode는 multi-H2P fetch 구현 전 설계 기록이다. 현재 코드 상태는 위 요약과 `TEA_shadow_ftq_status.md`를 우선한다.
 
 ---
 

@@ -1,14 +1,36 @@
 # TEA Hybrid Chain 구현 계획: Dependency Chain Cache + Block Cache OR 누적
 
-**최종 갱신**: 2026-03-21
+**최종 갱신**: 2026-05-04
 **관련 문서**:
 - [`TEA_implementation_plan.md`](../TEA_implementation_plan.md) — 마스터 문서 §6 (작업 C)
 - [`TEA_shadow_ftq_status.md`](../TEA_implementation_status/TEA_shadow_ftq_status.md) — 현재 fetch 방식
-- [`TEA_multi_h2p_plan.md`](TEA_multi_h2p_plan.md) — 다중 H2P 계획 (dependency_chain_cache 변경 불필요 → 수정 필요)
+- [`TEA_multi_h2p_plan.md`](TEA_multi_h2p_plan.md) — 현재 multi-H2P chain slot 모델
 
 ---
 
-## 1. 문제점: 현재 Dependency Chain Cache의 단일 경로 덮어쓰기
+## 0. 현재 코드 기준 요약
+
+Hybrid Chain은 아직 구현하지 않았다. 현재 코드는 다음 구조다.
+
+| 항목 | 현재 상태 |
+|------|-----------|
+| Dependency Chain Cache 직접 조회 | 구현됨 |
+| snapshot 내 모든 H2P chain 생성 | 구현됨 |
+| Block Cache OR mask 누적 | 구현됨 |
+| Block Cache를 TEA fetch source로 사용 | 미구현 |
+| dep cache chain을 Block Cache에서 재구축 | 미구현 |
+
+현재 `add_dependency_chain()`은 snapshot 안의 모든 H2P에 대해 DCC entry를 만들고, Block Cache에는 모든 H2P walk 결과의 union mask를 OR 누적한다. 하지만 TEA fetch는 여전히 `get_dependency_chain(proc_id, h2p_pc)`로 DCC entry의 materialized `chain[]`을 직접 사용한다.
+
+따라서 Hybrid Chain은 당장 필수 수정 항목이 아니라, 다음 상황에서 재검토할 frontend coverage 개선 후보로 둔다.
+
+- `TEA_TRIGGER_SKIP_NO_CHAIN`이 early flush benefit을 크게 제한할 때
+- 동일 H2P PC의 path diversity 때문에 DCC overwrite/materialized chain coverage가 부족할 때
+- `DCC_BLOCK_MASK_OR_UPDATES`는 높지만 TEA fetch chain hit/quality가 낮을 때
+
+---
+
+## 1. 문제점: 현재 Dependency Chain Cache materialized chain 한계
 
 ### 1.1 현재 동작
 

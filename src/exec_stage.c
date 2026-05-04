@@ -1045,7 +1045,7 @@ void exec_stage_tea_pending_flush_at_rename(uns proc_id, Op* op) {
        * The earliest recovery can fire is now — using a past cycle would set
        * recovery_cycle in the past and distort latency statistics. */
       bp_sched_recovery(bp_recovery_info, h2p, cycle_count,
-                        FALSE, FALSE, EXTRA_LATE_RECOVERY_CYCLES);
+                        FALSE, FALSE, EXTRA_EARLY_RECOVERY_CYCLES);
       if (h2p->oracle_info.recovery_sch)
         h2p->recovery_scheduled = TRUE;
       h2p->oracle_info.recover_at_exec = FALSE;

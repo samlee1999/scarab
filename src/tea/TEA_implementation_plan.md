@@ -2,14 +2,14 @@
 
 **논문**: Timely, Efficient, and Accurate Branch Precomputation (MICRO 2024, UT Austin)
 **논문 원본**: `/home/lee/scarab/docs/TEA_info/TEA_paper_origin.pdf`
-**최종 갱신**: 2026-04-27
+**최종 갱신**: 2026-05-04
 **베이스라인 코드**: `/home/lee/scarab/src/`
 
 ---
 
 ## 1. 현재 구현 아키텍처
 
-Scarab TEA 구현은 논문의 "branch prediction override"가 아니라 "early misprediction recovery" 모델을 따른다. Main thread가 HBT에서 H2P branch를 감지하면 TEA thread가 이미 구축된 dependency chain을 별도 frontend에서 fetch/rename하고, shared backend에서 H2P branch를 먼저 execute하여 Main H2P의 recovery를 앞당긴다.
+TEA 논문과 Scarab 구현 모두 "early misprediction flush" 모델을 따른다. Branch predictor를 override하는 것이 아니라, TEA thread가 H2P branch를 Main thread보다 먼저 execute하여 기존 Scarab flush 메커니즘을 더 일찍 trigger하는 방식으로 misprediction penalty를 줄인다. "Branch prediction override"는 이전 연구들이 사용하는 방식으로, TEA 논문은 이를 명시적으로 사용하지 않는다. Main thread가 HBT에서 H2P branch를 감지하면 TEA thread가 이미 구축된 dependency chain을 별도 frontend에서 fetch/rename하고, shared backend에서 H2P branch를 먼저 execute하여 Main H2P의 recovery를 앞당긴다.
 
 ```
 Main retire
@@ -25,7 +25,7 @@ Main fetch / BP
   -> per-chain terminate or Main recovery scheduling
 ```
 
-현재 코드는 Work F 1차 구현 이후 상태다. 단일 H2P active gate는 제거되었고, 최대 4개 chain slot을 갖는 multi-H2P 구조가 들어가 있다. 다만 아직 최신 시뮬레이션 결과로 안정성/성능 검증을 끝낸 상태는 아니다.
+현재 코드는 Work F multi-H2P가 기본 TEA 실행 모델인 상태다. 단일 H2P active gate는 제거되었고, compile-time storage capacity `MAX_TEA_CHAINS=16` 안에서 runtime parameter `TEA_MAX_CHAINS`만큼의 chain slot을 사용할 수 있다. 최근 작업으로 per-chain Shadow RAT/PREG pool, selective flush, stale dependency cleanup, Case 1 timing stat까지 반영되어 있다.
 
 ---
 
@@ -34,14 +34,16 @@ Main fetch / BP
 | 영역 | 현재 상태 | 핵심 위치 |
 |------|-----------|-----------|
 | HBT / TEA trigger | 구현됨 | `bp/hbt.c`, `bp/bp.c`, `tea/tea_thread.c` |
-| BW Walk / Dep Chain Cache | 구현됨 | `tea/dependency_chain_cache.c`, `tea/fill_buffer.c` |
+| BW Walk / Dep Chain Cache | 구현됨, snapshot 내 모든 H2P 처리 | `tea/dependency_chain_cache.c`, `tea/fill_buffer.c` |
 | TEA Fetch | 구현됨, multi-H2P sequential fetch | `tea/tea_fetch_stage.c` |
-| TEA Rename / Shadow RAT | 구현됨, 모든 chain이 공유 | `tea/tea_rename.c` |
+| TEA Rename / Shadow RAT | 구현됨, per-chain snapshot | `tea/tea_rename.c` |
+| TEA PREG pool | 구현됨, `TEA_PREG_RESERVATION / TEA_MAX_CHAINS` per-chain sub-pool | `tea/tea_rename.c` |
 | Direct RS dispatch | 구현됨 | `node_stage.c`, `node_issue_queue.cc` |
+| TEA op retire/free | 구현됨, 추가 최적화 예정 | `node_stage.c` |
 | TEA Store Buffer | 구현됨, `h2p_chain_id` 태깅 | `tea/tea_store_buffer.c` |
-| Early Flush Case 1/2 | 구현됨, per-chain 처리 | `exec_stage.c`, `cmp_model.c` |
-| Work F multi-H2P | 1차 구현됨, 디버깅/검증 필요 | `tea_thread.c`, `tea_fetch_stage.c`, `node_stage.c` |
-| Hybrid Chain / periodic reset | 아직 미구현 | `TEA_hybrid_chain_plan.md` |
+| Early Flush Case 1/2 | 구현됨, Case 1 pending flush 포함 | `exec_stage.c`, `cmp_model.c` |
+| Work F multi-H2P | 구현됨, 병목 분석 단계 | `tea_thread.c`, `tea_fetch_stage.c`, `node_stage.c` |
+| Hybrid Chain / Block Cache fetch | 아직 미구현 | `TEA_hybrid_chain_plan.md` |
 | Iterative Walk | 아직 미구현 | 향후 Work B |
 | Poison bit | 구현하지 않기로 결정 | oracle 기반 시뮬레이션 |
 
@@ -55,7 +57,7 @@ Work F 이전 문서에 있던 `TEA_TRIGGER_SKIP_ACTIVE` 중심 설명은 더 �
 
 - `Op.h2p_chain_id`: `0`은 main op, `1..MAX_TEA_CHAINS`는 TEA chain slot+1.
 - `Tea_H2P_Chain`: per-chain 상태, H2P PC/op_num, Main H2P 포인터, `saved_unique_num`, oracle/recovery info, `tea_op_count`, `tea_ops_fetched`.
-- `Tea_Thread.chains[MAX_TEA_CHAINS]`: 최대 4개 chain slot.
+- `Tea_Thread.chains[MAX_TEA_CHAINS]`: compile-time capacity 16. 실제 사용 slot 수는 `TEA_MAX_CHAINS`.
 - `Tea_Thread.num_active_chains`: active chain 수. `tea_is_active()`는 이 값으로 판단.
 - `Tea_Thread.current_fetch_chain`: 현재 fetch 중인 chain slot. Fetch는 sequential, backend execution은 overlap.
 
@@ -63,7 +65,7 @@ Work F 이전 문서에 있던 `TEA_TRIGGER_SKIP_ACTIVE` 중심 설명은 더 �
 
 1. `trigger_tea_thread()`가 빈 chain slot을 찾는다.
 2. dependency chain cache hit이면 chain slot을 `CHAIN_FETCHING`으로 채운다.
-3. 첫 active chain일 때만 Shadow RAT snapshot과 TEA op counter reset을 수행한다.
+3. Chain slot마다 trigger 시점의 Main RAT을 독립 Shadow RAT으로 snapshot한다.
 4. `update_tea_fetch_stage()`는 `current_fetch_chain`을 순차적으로 fetch하고, 완료된 chain을 `CHAIN_EXECUTING`으로 넘긴다.
 5. `tea_create_op_from_cache()`는 생성한 TEA op에 `h2p_chain_id`를 부여하고 per-chain `tea_op_count`를 증가시킨다.
 6. `exec_stage_bp_resolve()`는 TEA H2P op의 `h2p_chain_id`로 chain을 찾고 Case 1/2를 처리한다.
@@ -72,65 +74,103 @@ Work F 이전 문서에 있던 `TEA_TRIGGER_SKIP_ACTIVE` 중심 설명은 더 �
 
 ### 설계 결정
 
-- Shadow RAT은 모든 chain이 공유한다. 첫 active chain에서 snapshot하고 이후 chain들은 같은 Shadow RAT을 이어서 사용한다.
-- TEA preg pool도 공유한다. Per-chain preg 반환은 dangling mapping 위험 때문에 하지 않는다.
-- SRT checkpoint는 oldest active H2P 기준으로 하나만 유지한다. `map_rename.c`에는 checkpoint 중복 생성을 막는 guard가 있다.
+- Shadow RAT은 chain slot별로 독립 snapshot을 가진다. Cross-chain TEA-produced register dependency는 만들지 않는다.
+- TEA preg pool은 physical table 끝부분에서 `TEA_PREG_RESERVATION`개를 예약하고 `TEA_MAX_CHAINS`로 균등 분할한다.
+- Per-chain termination 시 해당 chain PREG pool을 reset하고, TEA op retire 시 previous mapping preg를 해당 chain pool로 반환한다.
+- SRT checkpoint는 기존 Scarab recovery machinery를 사용한다. Case 1은 checkpoint가 없을 때 pending flush로 기록했다가 Main H2P rename 직후 recovery를 schedule한다.
 - `tea_op_completed()`는 `OS_DONE`만 설정한다. `tea_op_count` 감소는 `node_retire_tea_ops()`가 op을 실제 free하기 직전에 수행한다.
-- `terminate_tea_thread()`는 전체 TEA 종료용으로 유지하고, 일반 per-chain 종료는 `terminate_tea_chain()`이 담당한다.
+- `terminate_tea_thread()`는 전체 TEA 종료용으로 유지하고, 일반 H2P 결과 처리는 `terminate_tea_chain_with_reason()`이 담당한다.
 
 ---
 
 ## 4. 현재 검증 기준
 
-최신 Work F 코드에 대한 시뮬레이션 결과는 아직 문서화되어 있지 않다. 아래 수치는 Work F 이전 단일 H2P baseline으로만 사용한다.
+현재 검증은 cumulative stat이 아니라 periodic stat을 기준으로 수행한다. TEA 구조의 효과는 benchmark 평균 IPC뿐 아니라, H2P가 얼마나 빨리 execute되었는지, Case 1 pending delay가 얼마나 큰지, backend shared resource pressure가 early flush benefit을 상쇄하는지까지 같이 봐야 한다.
 
-```
-2026-04-12, blender simpoint 25328, single-H2P baseline
+주요 지표:
 
-TEA_TRIGGER_ATTEMPTS      1,194,296
-TEA_TRIGGER_SKIP_ACTIVE   1,148,916   (96.2%)
-TEA_TRIGGERS                 45,379
-TEA_EARLY_FLUSHES               373
-TEA_H2P_CORRECT              36,839
-TEA_OPS_FETCHED           1,177,124
-TEA_OPS_DISPATCHED        1,177,124
-TEA_RENAME_STALL_DISPATCH     5,968
-IPC: TEA_OFF=2.273 -> TEA_ON=2.235 (-1.65%)
-```
+- Trigger coverage: `TEA_TRIGGER_ATTEMPTS`, `TEA_TRIGGERS`, `TEA_TRIGGER_SKIP_NO_CHAIN`, `TEA_TRIGGER_SKIP_FULL`
+- Chain pressure: `TEA_TRIGGER_ACTIVE_CHAINS_*`, `TEA_ACTIVE_CHAIN_SLOTS_TOTAL`, `TEA_CHAINS_CONCURRENT_MAX`
+- Chain lifetime: `TEA_CHAIN_LIFETIME_*`, `TEA_CHAIN_FETCH_WAIT_TOTAL`, `TEA_CHAIN_EXEC_WAIT_TOTAL`
+- Early flush timing: `TEA_H2P_TRIGGER_TO_EXEC_*`, `TEA_EARLY_FLUSH_*_TO_DETECT_*`, `TEA_H2P_EXEC_SAVED_CYCLES_AVG`
+- Case 1 delay: `TEA_EARLY_FLUSH_CASE1_TO_SCHEDULE_*`, `TEA_EARLY_FLUSH_CASE1_TO_RECOVERY_*`
+- Main H2P timing: `TEA_MAIN_H2P_FETCH_TO_EXEC_*`, `TEA_MAIN_H2P_MISPRED_FETCH_TO_EXEC_*`
+- Backend pressure: `TEA_OP_NODE_CYCLES_*`, `TEA_RENAME_STALL_PREG`, `TEA_RS_STALLS`, `TEA_READY_LIST_DONE_CLEARED`
 
-Work F 이후 새로 확인해야 할 지표:
-
-- `TEA_TRIGGER_SKIP_ACTIVE`는 legacy stat으로 남아 있지만 새 trigger path에서는 사실상 사용되지 않아야 한다.
-- `TEA_TRIGGER_SKIP_FULL`이 chain slot 부족을 나타내야 한다.
-- `TEA_TRIGGERS`, `TEA_EARLY_FLUSHES`, `TEA_CHAIN_TERMINATED`가 Work F 이전보다 증가하는지 확인한다.
-- `TEA_CHAINS_CONCURRENT_MAX`는 stat 정의가 있지만 현재 코드에는 high-watermark emission이 아직 완성되지 않았다.
-- `TEA_MAX_CHAINS` param은 정의되어 있지만 현재 loops는 compile-time `MAX_TEA_CHAINS`를 직접 사용한다.
+`TEA_TRIGGER_SKIP_ACTIVE`는 legacy single-H2P stat이다. 현재 multi-H2P trigger path에서는 증가하지 않는 것이 기대값이다.
 
 ---
 
-## 5. 디버깅 우선순위
+## 5. 다음 작업 계획
 
-현재 소스 기준으로 문서에 기록해 둘 우선 점검 항목은 다음이다.
+### 5.1 Case 1 recovery penalty 조정
 
-| 우선순위 | 항목 | 이유 |
-|----------|------|------|
-| P0 | `op_pool_setup_op()`에서 `h2p_chain_id` reset 여부 | TEA op이 main op으로 재사용될 때 stale chain id가 남을 수 있음 |
-| P0 | `flush_tea_ops_by_chain_id()`의 `thread_id == 1` guard | 현재 여러 필터가 `h2p_chain_id`만 보므로 stale id와 결합하면 main op 오염 가능 |
-| P1 | surviving TEA op의 flushed-main-producer dependency cleanup | `recover_tea_on_flush()`가 younger chain만 종료할 때 older surviving chain이 stale not-ready bit를 가질 수 있음 |
-| P1 | `TEA_CHAINS_CONCURRENT_MAX` instrumentation | Work F 효과 확인에 필요 |
-| P1 | `TEA_MAX_CHAINS` runtime param 반영 | 현재 compile-time `MAX_TEA_CHAINS=4`와 param 정의가 분리되어 있음 |
-| P2 | fetch/rename selective recovery의 stage-data compaction | `sd.op_count--`만으로 sparse buffer가 생기는지 시뮬레이션으로 확인 필요 |
+**목표**: Case 1 TEA early flush가 Main H2P rename 시점에 recovery를 schedule할 때 `EXTRA_LATE_RECOVERY_CYCLES=15`가 아니라 `EXTRA_EARLY_RECOVERY_CYCLES=5`를 적용한다.
 
-이 항목들은 소스 수정 전 시뮬레이션 결과와 ASSERT/통계 로그로 먼저 우선순위를 재확인한다.
+현재 `exec_stage_tea_pending_flush_at_rename()`은 `bp_sched_recovery(..., EXTRA_LATE_RECOVERY_CYCLES)`를 사용한다. Case 1은 TEA가 이미 misprediction을 detect했고 Main H2P가 checkpoint를 만드는 즉시 recovery를 걸 수 있는 early recovery 성격이므로, `PARAMS.golden_cove`의 `--extra_early_recovery_cycles 5`를 사용하도록 바꾼다.
+
+검증 기준:
+
+- `TEA_EARLY_FLUSH_CASE1_TO_RECOVERY_*`
+- periodic IPC
+- Case 1 recovery count와 too-late count
+
+### 5.2 ASSERT FAILED simpoint 원인 분석
+
+**대상 실험**: `/home/lee/simulations/tea_on_260503/tea_on_4c_pc48`
+
+실패 simpoint에서 TEA early flush 효과가 제대로 보이지 않는 이유를 찾는다. 단순 crash 원인만 보지 않고, 실패 직전의 chain state, pending Case 1, RS/Node counter, stale dependency, recovery ordering을 같이 본다.
+
+확인 파일:
+
+- `sim.log`
+- `bp.stat.0.out`, `core.stat.0.out`, `fetch.stat.0.out`, `inst.stat.0.out`
+- `tea.stat.0.out`
+- ASSERT 위치의 소스 코드와 periodic stat window
+
+### 5.3 `TEA_TRIGGER_SKIP_FULL` 병목 분석
+
+`TEA_TRIGGER_SKIP_FULL`은 다음 두 가능성을 분리해서 봐야 한다.
+
+1. 제한된 chain slot 때문에 생기는 정상 구조적 backpressure.
+2. Chain이 제때 retire/free되지 못하거나 pending/RS/PREG state가 오래 묶이는 구현 병목.
+
+분석 기준:
+
+- active/fetching/executing chain slot 분포
+- `TEA_CHAIN_TERM_*` reason
+- chain lifetime, fetch wait, exec wait
+- `TEA_OP_NODE_CYCLES_*`
+- `TEA_RENAME_STALL_PREG`, `TEA_RS_STALLS`
+- Case 1 pending delay와 too-late 비율
+
+### 5.4 TEA op 단위 retire/free 및 PREG 조기 회수 강화
+
+현재 TEA op 자체는 `node_retire_tea_ops()`에서 op 단위로 free되지만, chain context와 일부 자원 lifecycle은 chain 단위다. 다음 최적화는 완료된 TEA op이 backend shared structure에 머무는 시간을 더 줄이고, per-chain PREG가 조기에 재사용되도록 만드는 것이다.
+
+목표:
+
+- 완료된 TEA op이 Node/RS/ready-list에 남는 window 최소화.
+- previous mapping preg 반환 경로가 모든 retire/free path에서 정확히 한 번 수행되는지 재검증.
+- Chain 단위 reset에만 의존하지 않고 긴 chain에서도 PREG pressure가 줄어드는지 확인.
+- Main/TEA shared backend pressure가 IPC benefit을 상쇄하는지 완화.
+
+검증 기준:
+
+- `TEA_OPS_RETIRED`, `TEA_OPS_FLUSHED`
+- `TEA_OP_NODE_CYCLES_AVG`
+- `TEA_READY_LIST_DONE_CLEARED`, `TEA_RETIRE_READY_LIST_ESCAPE`
+- `TEA_RENAME_STALL_PREG`
+- `TEA_TRIGGER_SKIP_FULL`
 
 ---
 
-## 6. 향후 작업
+## 6. 이후 후보 작업
 
-1. Work F 1차 구현을 대상으로 짧은 simpoint에서 빌드/런타임 안정성을 확인한다.
-2. 통계에서 trigger skip 원인, concurrent chain 수, per-chain termination 수, early flush 증감, RS/preg/store-buffer stall을 본다.
-3. P0 디버깅 항목을 먼저 수정한 뒤 같은 simpoint로 회귀 비교한다.
-4. Work F 안정화 후 Hybrid Chain / periodic reset을 진행한다.
+1. Case 1 recovery penalty 조정 후 `/home/lee/simulations/tea_on_260503/tea_on_4c_pc48` 계열과 동일 config로 회귀 비교한다.
+2. ASSERT FAILED simpoint와 `TEA_TRIGGER_SKIP_FULL` 분석 결과에 따라 TEA op/PREG lifecycle 최적화 범위를 확정한다.
+3. Backend pressure가 핵심이면 TEA op retire/free 및 PREG reclaim을 먼저 진행한다.
+4. Frontend coverage가 핵심이면 Hybrid Chain / Block Cache 기반 fetch를 재검토한다.
 5. Hybrid Chain 이후 필요하면 Iterative Walk를 진행한다.
 
 ---
@@ -144,7 +184,7 @@ Work F 이후 새로 확인해야 할 지표:
 | Early Flush | `TEA_implementation_plan/TEA_early_flush_plan.md` | `TEA_implementation_status/TEA_early_flush_status.md` |
 | Register dependency / wakeup | `TEA_implementation_plan/TEA_reg_dependency_plan.md` | `TEA_implementation_status/TEA_reg_dependency_status.md` |
 | Shadow FTQ 대체 fetch 모델 | `TEA_implementation_plan/TEA_shadow_ftq_plan.md` | `TEA_implementation_status/TEA_shadow_ftq_status.md` |
-| Direct dispatch | `TEA_implementation_plan/TEA_dispatch_plan.md` | - |
-| Hybrid Chain / periodic reset | `TEA_implementation_plan/TEA_hybrid_chain_plan.md` | - |
+| Direct dispatch | `TEA_implementation_plan/TEA_dispatch_plan.md` | `TEA_implementation_status/TEA_op_manage_status.md` |
+| Hybrid Chain / Block Cache | `TEA_implementation_plan/TEA_hybrid_chain_plan.md` | `TEA_implementation_status/TEA_shadow_ftq_status.md` |
 
 문서를 수정할 때는 실제 코드 상태와 시뮬레이션 결과를 분리해서 기록한다. 구현된 구조, 검증된 결과, 의심 중인 버그를 같은 상태로 섞지 않는다.

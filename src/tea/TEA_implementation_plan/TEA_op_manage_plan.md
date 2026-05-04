@@ -1,11 +1,55 @@
-# TEA Op 관리: 다중 H2P 구현 계획
+# TEA Op 관리: 현재 구현 및 개선 계획
+
+**최종 갱신**: 2026-05-04
 
 > **설계 목표**: 논문 Section IV-G "TEA thread termination" — "On a miss, the remaining TEA thread
 > instructions continue to precompute directions for any remaining branches."
 > 즉, 하나의 H2P chain이 완료/실패하더라도 다른 active chain은 계속 실행해야 한다.
 > 이를 위해 TEA Op에 chain 소속 정보를 부여하고, per-chain 선택적 정리를 구현한다.
 
-**선행 조건**: `TEA_op_manage_status.md`의 현재 구현이 모두 정상 동작하는 상태에서 진행.
+**현재 상태**: multi-H2P TEA op tagging, direct RS dispatch, per-chain selective flush, op-level retire/free는 구현되어 있다. 이 문서는 현재 구현 요약과 다음 개선 계획을 함께 기록한다.
+
+---
+
+## 0. 현재 코드 기준 요약
+
+| 항목 | 현재 상태 |
+|------|-----------|
+| `thread_id == 1` TEA op 식별 | 구현됨 |
+| `h2p_chain_id` tagging | 구현됨 |
+| op pool TEA field reset | 구현됨 |
+| Direct RS dispatch / retry | 구현됨 |
+| full TEA flush | 구현됨 |
+| per-chain selective flush | 구현됨 |
+| ready-list `OS_DONE` RS counter fix | 구현됨 |
+| `node_retire_tea_ops()` op-level free | 구현됨 |
+| TEA previous mapping PREG retire 반환 | 구현됨 |
+| chain context lifecycle | 아직 chain 단위 유지 |
+
+### 0.1 다음 개선 계획: op-level reclaim 강화
+
+현재 TEA op 자체는 `node_retire_tea_ops()`에서 op 단위로 free된다. 다만 chain slot, pending Case 1 entry, fetch/rename state, per-chain PREG pool reset은 chain lifecycle과 묶여 있다. 다음 작업은 완료된 TEA op이 backend shared structure에 머무는 시간을 더 줄이고, 긴 chain에서 PREG가 조기에 재사용되는지 확인하는 것이다.
+
+구현 전 점검:
+
+- `node_retire_tea_ops()`가 TEA op을 정확히 한 번 free하는지 확인.
+- ready-list/RS counter 보정이 `OS_SCHEDULED`, `OS_MISS`, TEA `OS_DONE` 모두에서 중복/누락 없이 동작하는지 확인.
+- `tea_preg_pool_return_prev()`가 retire/free path에서 정확히 한 번 호출되는지 확인.
+- Flush path에서 free되는 op은 chain reset과 중복 PREG 반환이 발생하지 않도록 구분한다.
+
+검증 stat:
+
+- `TEA_OPS_RETIRED`, `TEA_OPS_FLUSHED`
+- `TEA_OP_NODE_CYCLES_*`
+- `TEA_READY_LIST_DONE_CLEARED`, `TEA_RETIRE_READY_LIST_ESCAPE`
+- `TEA_RENAME_STALL_PREG`
+- `TEA_TRIGGER_SKIP_FULL`
+
+---
+
+> **Historical implementation record**
+>
+> 아래 섹션 1 이후의 상세 구현 계획은 multi-H2P 구현 전 작성된 기록이다. 현재 동작 판단은 위 요약과 `TEA_op_manage_status.md`를 우선한다.
 
 ---
 
@@ -418,27 +462,37 @@ void update_tea_thread(uns proc_id) {
 
 ## 5. Per-Chain Preg 관리 전략
 
-### 5.1 결론: Per-chain preg 반환은 **구현하지 않음**
+### 5.1 현재 결론: Per-chain PREG pool은 구현됨
 
-### 5.2 이유
+현재 코드는 전체 TEA thread가 하나의 preg pool을 공유하는 모델이 아니다. `init_tea_preg_pools()`가 `TEA_PREG_RESERVATION`을 runtime `TEA_MAX_CHAINS`로 균등 분할하여 chain slot별 sub-pool을 만든다.
+
+```
+per_chain_pregs = TEA_PREG_RESERVATION / TEA_MAX_CHAINS
+```
+
+TEA op retire 시에는 `tea_preg_pool_return_prev()`가 previous mapping preg를 해당 chain pool로 반환하고, chain 종료 시에는 `reset_tea_preg_pool(proc_id, chain_slot)`으로 해당 chain pool을 reset한다.
+
+### 5.2 과거 공유-pool 설계가 폐기된 이유
 
 논문 IV-E: "Freeing Physical Registers — The TEA thread only maintains a speculative RAT.
 Its instructions free up backend resources as soon as possible to avoid the in-order retirement
 bottleneck."
 
-그러나 per-chain preg 반환은 아래 이유로 안전하지 않다:
+초기 계획에서는 모든 chain이 하나의 Shadow RAT/PREG pool을 공유한다고 가정했기 때문에 per-chain preg 반환이 안전하지 않다고 판단했다. 그 공유-pool 모델의 문제는 다음과 같았다:
 
 1. TEA preg pool은 전체 TEA 스레드가 **공유**하는 자원
 2. Chain A가 R5에 preg #200을 할당 → Shadow RAT에 R5→#200 매핑 생성
 3. Chain A 종료 시 preg #200을 반환하면, Chain B가 R5를 읽을 때 **dangling 매핑** 참조
 4. Shadow RAT의 일관성을 보장하려면 모든 chain 종료 시 일괄 `reset_tea_preg_pool()` 호출이 안전
 
+현재 구현은 per-chain Shadow RAT snapshot으로 이 문제를 피한다. Chain A의 TEA-produced mapping은 Chain B의 Shadow RAT에 들어가지 않으므로, Chain A pool reset이 Chain B의 source mapping을 깨지 않는다.
+
 ### 5.3 Preg Pool 고갈 대응
 
-- preg pool이 고갈되면 `tea_preg_pool_available()` (`tea_rename.c:367`)이 FALSE 반환
-- 새 chain의 fetch/rename이 stall됨
+- chain sub-pool이 고갈되면 `tea_preg_pool_available()`이 FALSE 반환
+- 해당 chain의 rename이 stall됨
 - `TEA_PREGS_ALLOCATED` / `TEA_RENAME_STALL_PREG` stat으로 모니터링
-- 극단적 경우: 가장 오래된(또는 가장 적게 진행된) chain을 강제 terminate하여 preg 해제
+- 다음 개선 작업은 op retire/free 시 previous mapping preg 반환이 충분히 빠르게 작동하는지 확인하고, 필요하면 완료 op reclaim을 더 앞당기는 것이다.
 
 ---
 

@@ -1,6 +1,31 @@
 # TEA Register Dependency 구현
 
-> **상태**: ✅ 단일 H2P 구현 완료 | 🔧 §4 다중 H2P는 Work F에서 구현
+**최종 갱신**: 2026-05-04
+
+> **현재 상태**: multi-H2P 기준 구현 완료. 현재 코드는 per-chain Shadow RAT snapshot, Main producer pointer/unique tracking, intra-chain TEA producer tracking, stale dependency cleanup을 포함한다.
+
+---
+
+## 0. 현재 코드 기준 요약
+
+| 항목 | 현재 상태 |
+|------|-----------|
+| Main producer dependency tracking | 구현됨 |
+| TEA producer dependency tracking | 구현됨, 같은 chain 내부 |
+| per-chain Shadow RAT | 구현됨 |
+| cross-chain TEA dependency | 의도적으로 없음 |
+| per-chain PREG sub-pool | 구현됨 |
+| previous mapping PREG retire 반환 | 구현됨 |
+| Main recovery 후 stale producer cleanup | 구현됨 |
+| Poison bit | 구현하지 않음 |
+
+현재 dependency 모델은 correctness와 selective cleanup 안전성을 우선한다. Chain slot별 Shadow RAT을 사용하므로 Chain A의 TEA-produced mapping이 Chain B의 source dependency가 되지 않는다.
+
+---
+
+> **Historical implementation record**
+>
+> 아래 섹션은 단일 H2P dependency tracking을 구현하던 시점의 계획과 Work F 전환 계획을 보관한 것이다. 현재 상태 확인은 위 요약과 `TEA_reg_dependency_status.md`를 우선한다.
 
 ---
 
@@ -47,7 +72,7 @@
 
 ---
 
-## 4. 다중 H2P — Dependency 관리 (Work F)
+## 4. 다중 H2P — Dependency 관리 (Work F, 구현 완료)
 
 다중 H2P에서는 chain별 선택적 flush와 TEA 생존이 가능해지므로, 단일 H2P에서
 발생하지 않던 두 가지 not-rdy bit stall 문제가 생긴다.

@@ -1,6 +1,8 @@
 # TEA 독립 Dispatch 구현 — 완료
 
-> **상태**: ✅ 구현 완료 (`e0d65de` 기준)
+**최종 갱신**: 2026-05-04
+
+> **상태**: 구현 완료. TEA ops는 Main `next_op_into_rs` path와 분리되어 direct RS dispatch/retry path를 사용한다.
 
 ---
 
@@ -36,6 +38,14 @@ TEA ops를 `node_issue_queue_dispatch()` 순회에서 완전히 분리하여 독
 
 ---
 
-## 4. 미구현 항목 (Work F)
+## 4. 현재 남은 확인 항목
 
-`flush_tea_ops_by_chain_id()` step 3 RS 카운터 동기화 — 동일한 OS_SCHEDULED/OS_MISS 처리 패턴을 chain 선택적 flush 함수에도 적용 필요. `TEA_multi_h2p_plan.md` §6.1에 포함됨.
+Work F selective flush는 구현되었고, ready list에 남은 TEA `OS_SCHEDULED`/`OS_MISS`/`OS_DONE` op의 RS counter 보정도 full flush와 per-chain flush 양쪽에 반영되어 있다.
+
+향후 확인할 항목은 구현 누락이 아니라 성능 병목이다.
+
+| 항목 | 확인 stat |
+|------|-----------|
+| TEA RS partition pressure | `TEA_RS_STALLS`, RS occupancy 관련 stat |
+| 완료 TEA op이 Node/RS에 오래 남는지 | `TEA_OP_NODE_CYCLES_*`, `TEA_RETIRE_READY_LIST_ESCAPE` |
+| Main dispatch와 TEA retry의 간섭 | periodic IPC, `TEA_OPS_DISPATCHED`, `TEA_OPS_RETIRED` |

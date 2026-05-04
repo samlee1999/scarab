@@ -1,6 +1,6 @@
 # TEA 다중 H2P+DC 동시 처리 구현 계획
 
-**최종 갱신**: 2026-03-11
+**최종 갱신**: 2026-05-04
 **현재 상태**: [`TEA_multi_h2p_status.md`](../TEA_implementation_status/TEA_multi_h2p_status.md)
 **마스터 문서**: [`TEA_implementation_plan.md`](../TEA_implementation_plan.md) Section 3.4, 8
 **관련 문서**:
@@ -12,6 +12,17 @@
 ---
 
 ## 1. 개요
+
+> **2026-05-04 현재 코드 기준**
+>
+> Work F multi-H2P는 구현 완료 상태이며 현재 TEA의 기본 실행 모델이다. 아래 Phase F.1~F.6의 상세 pseudocode는 구현 전 설계 기록으로 유지하지만, 현재 상태 판단은 이 섹션과 `TEA_multi_h2p_status.md`를 우선한다.
+>
+> 주요 차이:
+> - `MAX_TEA_CHAINS`는 compile-time capacity 16이고, 실험별 사용량은 runtime `TEA_MAX_CHAINS`로 제한한다.
+> - Shadow RAT과 TEA PREG pool은 전체 chain 공유가 아니라 per-chain snapshot/sub-pool 모델이다.
+> - Trigger는 빈 slot 기반이며 full이면 replacement 없이 `TEA_TRIGGER_SKIP_FULL`을 기록한다.
+> - TEA fetch stream은 하나지만, fetch 완료 chain들은 shared backend에서 overlap 실행된다.
+> - Per-chain termination, selective flush, stale dependency cleanup, Case 1 pending flush가 구현되어 있다.
 
 ### 1.1 목표
 
@@ -25,30 +36,45 @@ H2P #1 trigger → fetch chain #1 → rename → [backend 실행 중...]
 H2P #2 trigger → fetch chain #2 → rename → [backend 실행 중...]
 ```
 
-- 최대 `MAX_TEA_CHAINS`(기본값 4)개의 H2P+DC가 동시 활성
+- 최대 runtime `TEA_MAX_CHAINS`개의 H2P+DC가 동시 활성. 현재 compile-time capacity는 `MAX_TEA_CHAINS=16`
 - 각 chain은 독립적인 상태(FETCHING/EXECUTING/DONE)를 가짐
 - 모든 chain의 ops가 동일한 OoO backend(RS, FU, Node Table)에서 동시 실행
 - 각 chain의 H2P branch 실행 완료 시 **개별적으로** Early Flush 또는 완료 처리
-- Shadow RAT와 TEA preg pool은 모든 chain이 **공유** (논문과 동일)
+- Shadow RAT와 TEA preg pool은 현재 코드에서 **per-chain**으로 관리
 
 ### 1.2 전제조건
 
 | 작업 | 상태 | 의존 이유 |
 |------|------|----------|
-| 작업 A (BW Walk Trigger) | ❌ | Dep Chain Cache가 비어야 chain 자체가 존재하지 않음 |
-| 작업 G (TEA 의존성 Wakeup) | ❌ | 타이밍이 무의미한 상태에서 다중 chain의 상호작용 검증 불가 |
-| 단일 H2P 검증 (TEA_TRIGGERS > 0) | ❌ | 기본 동작이 올바른지 먼저 확인 |
+| 작업 A (BW Walk Trigger) | 구현됨 | Dep Chain Cache 생성 경로 |
+| 작업 G (TEA 의존성 Wakeup) | 구현됨 | Main/TEA producer dependency tracking |
+| Work F multi-H2P | 구현됨 | 현재 디버깅/병목 분석 대상 |
 
 ### 1.3 작업 분해
 
 | Phase | 내용 | 의존 |
 |-------|------|------|
-| F.1 | 데이터 구조 변경 (`op.h`, `tea_thread.h`) | — |
-| F.2 | trigger/terminate per-chain 로직 (`tea_thread.c`) | F.1 |
-| F.3 | fetch stage chain 전환 (`tea_fetch_stage.c`) | F.1, F.2 |
-| F.4 | exec_stage 다중 매칭 (`exec_stage.c`) | F.1 |
-| F.5 | selective flush + store buffer (`node_stage.c`, `tea_store_buffer.c`) | F.1 |
-| F.6 | `recover_tea_on_flush()` 시그니처 변경 (`cmp_model.c`) | F.1, F.4, F.5 |
+| F.1 | 데이터 구조 변경 (`op.h`, `tea_thread.h`) | 완료 |
+| F.2 | trigger/terminate per-chain 로직 (`tea_thread.c`) | 완료 |
+| F.3 | fetch stage chain 전환 (`tea_fetch_stage.c`) | 완료 |
+| F.4 | exec_stage 다중 매칭 (`exec_stage.c`) | 완료 |
+| F.5 | selective flush + store buffer (`node_stage.c`, `tea_store_buffer.c`) | 완료 |
+| F.6 | `recover_tea_on_flush()` selective cleanup (`cmp_model.c`) | 완료 |
+
+### 1.4 현재 남은 multi-H2P 분석 계획
+
+| 항목 | 목적 | 관련 stat |
+|------|------|-----------|
+| `TEA_TRIGGER_SKIP_FULL` 병목 분석 | slot 한계인지, chain lifecycle leak/pressure인지 분리 | `TEA_TRIGGER_SKIP_FULL`, `TEA_ACTIVE_CHAIN_SLOTS_TOTAL`, `TEA_CHAIN_LIFETIME_*` |
+| ASSERT FAILED simpoint 분석 | recovery/selective cleanup ordering 문제 확인 | `sim.log`, `tea.stat.0.out`, ASSERT 위치 |
+| op-level reclaim 강화 | shared backend pressure 완화 | `TEA_OP_NODE_CYCLES_*`, `TEA_OPS_RETIRED`, `TEA_RENAME_STALL_PREG` |
+| Case 1 recovery penalty 조정 | pending flush의 recovery cycle penalty 축소 | `TEA_EARLY_FLUSH_CASE1_TO_RECOVERY_*` |
+
+---
+
+> **Historical implementation record**
+>
+> 아래 섹션 2 이후의 C-like pseudocode는 multi-H2P 구현 전 설계 기록이다. 현재 소스에는 일부 이름과 정책이 다르게 반영되어 있으므로, 실제 동작 확인에는 `TEA_multi_h2p_status.md`와 소스 코드를 우선한다.
 
 ---
 
@@ -970,17 +996,30 @@ cd ~/scarab-infra
 단, older/younger 비교 시 TEA op_num이 아닌 `target_h2p_op_num`(Main 네임스페이스) 사용.
 (상세: `TEA_early_flush_plan.md` Section 3.6)
 
-### 12.3 Shadow RAT 순차 갱신
+### 12.3 Shadow RAT — ⚠️ 이 섹션은 구 shared 모델 기록 (현재 구현과 다름)
 
-Chain A rename 후 Chain B rename 시 Shadow RAT에는 Chain A의 변경이 반영된 상태.
+> **현재 구현**: per-chain 독립 Shadow RAT snapshot (`chain_srats[MAX_TEA_CHAINS]`).
+> Chain A의 rename 결과는 Chain B의 Shadow RAT에 반영되지 않는다.
+> 현재 상태는 `TEA_reg_dependency_status.md`를 우선한다.
+
+아래는 초기 설계에서 shared Shadow RAT을 사용하던 시점의 설명이다.
+
+~~Chain A rename 후 Chain B rename 시 Shadow RAT에는 Chain A의 변경이 반영된 상태.
 이것이 논문의 의도된 동작. Chain B가 Chain A와 동일한 arch reg을 사용하면
-Chain A가 할당한 TEA preg을 src로 읽게 됨.
+Chain A가 할당한 TEA preg을 src로 읽게 됨.~~
 
-### 12.4 preg pool 공유
+### 12.4 preg pool — ⚠️ 이 섹션은 구 shared 모델 기록 (현재 구현과 다름)
 
-모든 chain이 하나의 TEA preg pool을 공유. `TEA_PREG_RESERVATION=192`에서
+> **현재 구현**: per-chain sub-pool. `init_tea_preg_pools()`가 `TEA_PREG_RESERVATION`을
+> `TEA_MAX_CHAINS`로 균등 분할하여 chain slot별 독립 pool을 생성한다.
+> chain 종료 시 `reset_tea_preg_pool(proc_id, chain_slot)`으로 해당 chain pool만 reset.
+> 현재 상태는 `TEA_reg_dependency_status.md`를 우선한다.
+
+아래는 초기 설계에서 단일 공유 pool을 사용하던 시점의 설명이다.
+
+~~모든 chain이 하나의 TEA preg pool을 공유. `TEA_PREG_RESERVATION=192`에서
 4개 chain이 동시 활성이면 chain당 평균 48개 preg.
-chain 길이가 긴 경우 preg 부족 가능 — `tea_preg_pool_alloc()` 실패 시 chain 종료.
+chain 길이가 긴 경우 preg 부족 가능 — `tea_preg_pool_alloc()` 실패 시 chain 종료.~~
 
 ### 12.5 전체 Recovery 시 TEA 정리
 
