@@ -499,9 +499,21 @@ void cmp_recover() {
   ASSERT(bp_recovery_info->proc_id, bp_recovery_info->proc_id == g_bp_data->proc_id);
   ASSERT(bp_recovery_info->proc_id, bp_recovery_info->proc_id == map_data->proc_id);
 
+  Op* tea_early_recovery_op = NULL;
+  Flag tea_early_recovery = FALSE;
+  Flag tea_case1_recovery = FALSE;
+
   if (TEA_ENABLE && bp_recovery_info->recovery_op &&
-      bp_recovery_info->recovery_op->tea_case1_pending_recovery) {
-    Op* recovery_op = bp_recovery_info->recovery_op;
+      bp_recovery_info->recovery_op->op_pool_valid) {
+    tea_early_recovery_op = bp_recovery_info->recovery_op;
+    tea_early_recovery =
+      tea_early_recovery_op->tea_early_flush_detected ||
+      tea_early_recovery_op->tea_case1_pending_recovery;
+    tea_case1_recovery = tea_early_recovery_op->tea_case1_pending_recovery;
+  }
+
+  if (tea_case1_recovery) {
+    Op* recovery_op = tea_early_recovery_op;
     if (recovery_op->tea_case1_detect_cycle != MAX_CTR &&
         cycle_count >= recovery_op->tea_case1_detect_cycle) {
       STAT_EVENT(bp_recovery_info->proc_id,
@@ -553,6 +565,12 @@ void cmp_recover() {
   if (TEA_ENABLE) {
     recover_tea_on_flush(bp_recovery_info->proc_id,
                          bp_recovery_info->recovery_op_num);
+  }
+
+  if (tea_early_recovery && tea_early_recovery_op &&
+      tea_early_recovery_op->op_pool_valid) {
+    if (tea_early_recovery_op->recovery_scheduled)
+      tea_early_recovery_op->recovery_scheduled = FALSE;
   }
 
   log_recovery_end(node, cycle_count, bp_recovery_info);

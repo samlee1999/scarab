@@ -2,7 +2,7 @@
 
 **논문**: Timely, Efficient, and Accurate Branch Precomputation (MICRO 2024, UT Austin)
 **논문 원본**: `/home/lee/scarab/docs/TEA_info/TEA_paper_origin.pdf`
-**최종 갱신**: 2026-05-04
+**최종 갱신**: 2026-05-05
 **베이스라인 코드**: `/home/lee/scarab/src/`
 
 ---
@@ -103,30 +103,21 @@ Work F 이전 문서에 있던 `TEA_TRIGGER_SKIP_ACTIVE` 중심 설명은 더 �
 
 ## 5. 다음 작업 계획
 
-### 5.1 Case 1 recovery penalty 조정
+### 5.1 Case 1 recovery penalty 조정 (완료)
 
-**목표**: Case 1 TEA early flush가 Main H2P rename 시점에 recovery를 schedule할 때 `EXTRA_LATE_RECOVERY_CYCLES=15`가 아니라 `EXTRA_EARLY_RECOVERY_CYCLES=5`를 적용한다.
+**상태**: 완료.
 
-현재 `exec_stage_tea_pending_flush_at_rename()`은 `bp_sched_recovery(..., EXTRA_LATE_RECOVERY_CYCLES)`를 사용한다. Case 1은 TEA가 이미 misprediction을 detect했고 Main H2P가 checkpoint를 만드는 즉시 recovery를 걸 수 있는 early recovery 성격이므로, `PARAMS.golden_cove`의 `--extra_early_recovery_cycles 5`를 사용하도록 바꾼다.
+Case 1 TEA early flush가 Main H2P rename 시점에 recovery를 schedule할 때 `EXTRA_LATE_RECOVERY_CYCLES=15` 대신 `EXTRA_EARLY_RECOVERY_CYCLES=5`를 적용하도록 수정했다.
 
-검증 기준:
+이 변경은 Case 1이 TEA에 의해 이미 misprediction detect된 early recovery 상황이라는 점을 반영한다. 이후 실험에서는 periodic IPC와 완료 simpoint 기준으로 회귀 여부를 확인했다.
 
-- `TEA_EARLY_FLUSH_CASE1_TO_RECOVERY_*`
-- periodic IPC
-- Case 1 recovery count와 too-late count
+### 5.2 ASSERT FAILED simpoint 원인 분석 (완료)
 
-### 5.2 ASSERT FAILED simpoint 원인 분석
+**상태**: 완료.
 
-**대상 실험**: `/home/lee/simulations/tea_on_260503/tea_on_4c_pc48`
+Case 1 recovery penalty 조정 후 발생한 ASSERT는 Main H2P recovery flag/checkpoint lifetime 관리 문제로 정리되었고, recovery scheduling/cleanup 경로 수정으로 해결했다.
 
-실패 simpoint에서 TEA early flush 효과가 제대로 보이지 않는 이유를 찾는다. 단순 crash 원인만 보지 않고, 실패 직전의 chain state, pending Case 1, RS/Node counter, stale dependency, recovery ordering을 같이 본다.
-
-확인 파일:
-
-- `sim.log`
-- `bp.stat.0.out`, `core.stat.0.out`, `fetch.stat.0.out`, `inst.stat.0.out`
-- `tea.stat.0.out`
-- ASSERT 위치의 소스 코드와 periodic stat window
+기존 failing 11개 대상 simpoint가 모두 `Core 0 Finished`로 완료되었고, ASSERT/recovery 관련 실패 패턴은 발견되지 않았다. 원인 파악용 임시 `sim.log` debug 출력도 제거 완료했다.
 
 ### 5.3 `TEA_TRIGGER_SKIP_FULL` 병목 분석
 
@@ -167,11 +158,10 @@ Work F 이전 문서에 있던 `TEA_TRIGGER_SKIP_ACTIVE` 중심 설명은 더 �
 
 ## 6. 이후 후보 작업
 
-1. Case 1 recovery penalty 조정 후 `/home/lee/simulations/tea_on_260503/tea_on_4c_pc48` 계열과 동일 config로 회귀 비교한다.
-2. ASSERT FAILED simpoint와 `TEA_TRIGGER_SKIP_FULL` 분석 결과에 따라 TEA op/PREG lifecycle 최적화 범위를 확정한다.
-3. Backend pressure가 핵심이면 TEA op retire/free 및 PREG reclaim을 먼저 진행한다.
-4. Frontend coverage가 핵심이면 Hybrid Chain / Block Cache 기반 fetch를 재검토한다.
-5. Hybrid Chain 이후 필요하면 Iterative Walk를 진행한다.
+1. `TEA_TRIGGER_SKIP_FULL` 분석 결과에 따라 TEA op/PREG lifecycle 최적화 범위를 확정한다.
+2. Backend pressure가 핵심이면 TEA op retire/free 및 PREG reclaim을 먼저 진행한다.
+3. Frontend coverage가 핵심이면 Hybrid Chain / Block Cache 기반 fetch를 재검토한다.
+4. Hybrid Chain 이후 필요하면 Iterative Walk를 진행한다.
 
 ---
 

@@ -1048,6 +1048,11 @@ void exec_stage_tea_pending_flush_at_rename(uns proc_id, Op* op) {
                         FALSE, FALSE, EXTRA_EARLY_RECOVERY_CYCLES);
       if (h2p->oracle_info.recovery_sch)
         h2p->recovery_scheduled = TRUE;
+      /* Pin the main H2P until cmp_recover() consumes this scheduled recovery.
+       * Case 1 can execute/retire before the early recovery fires; without this
+       * pin, TAGE RetireCheckpoint() can delete the checkpoint that the scheduled
+       * recovery later restores.  cmp_recover() explicitly clears the flag after
+       * recovery, including cases where recover_node_stage() cannot see h2p. */
       h2p->oracle_info.recover_at_exec = FALSE;
       if (h2p->oracle_info.recovery_sch &&
           pf->detect_cycle != MAX_CTR && cycle_count >= pf->detect_cycle) {

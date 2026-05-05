@@ -272,11 +272,9 @@ void Decoupled_FE::update() {
   uint64_t bytes_this_cycle = 0;
   uint64_t cfs_taken_this_cycle = 0;
   static int fwd_progress = 0;
-  static const char* last_break_reason = "none";
   fwd_progress++;
   if (fwd_progress >= 100000) {
     std::cout << "No forward progress for 1000000 cycles" << std::endl;
-    std::cout << "[DBG] Last break reason: " << last_break_reason << " (fwd_progress=" << fwd_progress << ")" << std::endl;
     ASSERT(0, 0);
   }
   if (off_path)
@@ -296,7 +294,6 @@ void Decoupled_FE::update() {
 
     if (ftq_num_fts() == ftq_ft_num) {
       DEBUG(proc_id, "Break due to full FTQ\n");
-      last_break_reason = "FTQ full";
       if (off_path)
         STAT_EVENT(proc_id, FTQ_BREAK_FULL_FT_OFFPATH);
       else
@@ -305,7 +302,6 @@ void Decoupled_FE::update() {
     }
     if (cfs_taken_this_cycle == FE_FTQ_TAKEN_CFS_PER_CYCLE) {
       DEBUG(proc_id, "Break due to max cfs taken per cycle\n");
-      last_break_reason = "max CFs taken";
       if (off_path)
         STAT_EVENT(proc_id, FTQ_BREAK_MAX_CFS_TAKEN_OFFPATH);
       else
@@ -315,7 +311,6 @@ void Decoupled_FE::update() {
     // use `>=` because inst size does not necessarily align with FE_FTQ_BYTES_PER_CYCLE
     if (bytes_this_cycle >= FE_FTQ_BYTES_PER_CYCLE) {
       DEBUG(proc_id, "Break due to max bytes per cycle\n");
-      last_break_reason = "max bytes";
       if (off_path)
         STAT_EVENT(proc_id, FTQ_BREAK_MAX_BYTES_OFFPATH);
       else
@@ -324,7 +319,6 @@ void Decoupled_FE::update() {
     }
     if (BP_MECH != MTAGE_BP && !bp_is_predictable(g_bp_data, proc_id)) {
       DEBUG(proc_id, "Break due to limited branch predictor\n");
-      last_break_reason = "bp_not_predictable";
       if (off_path)
         STAT_EVENT(proc_id, FTQ_BREAK_PRED_BR_OFFPATH);
       else
@@ -333,7 +327,6 @@ void Decoupled_FE::update() {
     }
     if (stalled) {
       DEBUG(proc_id, "Break due to wait for fetch barrier resolved\n");
-      last_break_reason = "fetch barrier stalled";
       if (off_path)
         STAT_EVENT(proc_id, FTQ_BREAK_BAR_FETCH_OFFPATH);
       else
@@ -342,7 +335,6 @@ void Decoupled_FE::update() {
     }
     if (!frontend_can_fetch_op(proc_id)) {
       std::cout << "Warning could not fetch inst from frontend" << std::endl;
-      last_break_reason = "frontend_can_fetch_op false";
       break;
     }
 
