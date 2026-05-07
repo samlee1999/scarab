@@ -273,3 +273,16 @@ DEF_STAT(DCC_SNAPSHOT_H2P_BRANCHES_4_PLUS, COUNT, NO_RATIO)
 DEF_STAT(DCC_CHAINS_INSERTED, COUNT, NO_RATIO)
 DEF_STAT(DCC_CHAIN_OVERWRITE_SAME_PC, COUNT, NO_RATIO)
 DEF_STAT(DCC_BLOCK_MASK_OR_UPDATES, COUNT, NO_RATIO)
+
+/* [EXPERIMENT: TEA_PERFECT_LOAD] TEA load instrumentation stats */
+DEF_STAT(TEA_CHAIN_LOAD_OPS_TOTAL, COUNT, NO_RATIO)  /* load ops in triggered dep chains */
+DEF_STAT(TEA_LOADS_FETCHED,        COUNT, NO_RATIO)  /* load ops created by TEA fetch stage */
+DEF_STAT(TEA_LOADS_EXECUTED,       COUNT, NO_RATIO)  /* TEA loads processed by dcache stage */
+DEF_STAT(TEA_LOADS_STORE_FORWARD,  COUNT, NO_RATIO)  /* TEA loads satisfied by TEA store buffer */
+DEF_STAT(TEA_LOADS_DCACHE_HIT,     COUNT, NO_RATIO)  /* TEA loads hitting real L1 (non-forwarded) */
+DEF_STAT(TEA_LOADS_DCACHE_MISS,    COUNT, NO_RATIO)  /* TEA loads missing L1 (full memory latency) */
+DEF_STAT(TEA_LOADS_STORE_SCAN_FWD, COUNT, NO_RATIO)  /* TEA loads forwarded by main store-buffer scan after L1 miss */
+DEF_STAT(TEA_LOADS_BYPASSED,       COUNT, NO_RATIO)  /* TEA loads bypassed by TEA_PERFECT_LOAD */
+DEF_STAT(TEA_LOAD_LATENCY_SAMPLES, COUNT, NO_RATIO)  /* samples for average latency */
+DEF_STAT(TEA_LOAD_LATENCY_TOTAL,   COUNT, NO_RATIO)  /* sum of per-load latency (cycles) */
+DEF_STAT(TEA_LOAD_LATENCY_AVG,     RATIO, TEA_LOAD_LATENCY_SAMPLES)

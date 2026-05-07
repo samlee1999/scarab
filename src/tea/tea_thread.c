@@ -303,6 +303,13 @@ void trigger_tea_thread(uns proc_id, Addr h2p_pc, Counter h2p_op_num, Op* h2p_op
   }
   record_chain_length_bucket(proc_id, chain->chain_length);
 
+  /* [EXPERIMENT: TEA_PERFECT_LOAD] Count load ops in triggered dependency chain */
+  for (uns ci = 0; ci < chain->chain_length; ci++) {
+    if (chain->chain[ci].table_info &&
+        chain->chain[ci].table_info->mem_type == MEM_LD)
+      STAT_EVENT(proc_id, TEA_CHAIN_LOAD_OPS_TOTAL);
+  }
+
   /* Fill chain slot */
   Tea_H2P_Chain* c = &tea->chains[slot];
   c->state = CHAIN_FETCHING;

@@ -297,6 +297,9 @@ Op* tea_create_op_from_cache(uns proc_id, Op* cached_op, Flag is_h2p_branch) {
   c->tea_op_count++;
   c->tea_ops_fetched++;
   STAT_EVENT(proc_id, TEA_OPS_FETCHED);
+  /* [EXPERIMENT: TEA_PERFECT_LOAD] Count fetched TEA load ops */
+  if (cached_op->table_info && cached_op->table_info->mem_type == MEM_LD)
+    STAT_EVENT(proc_id, TEA_LOADS_FETCHED);
 
   return tea_op;
 }

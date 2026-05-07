@@ -37,7 +37,7 @@
 
 ### Branch Predictor
 --extra_late_recovery_cycles         15                   # Number of cycles before the fetching of the first instructions after late recovery.
---extra_early_recovery_cycles         5                   # Number of cycles before the fetching of the first instructions after early recovery.
+--extra_early_recovery_cycles        5                   # Number of cycles before the fetching of the first instructions after early recovery.
 --cfs_per_cycle                 6                         # Number of branches that can be predicted in a single cycle
 --bp_update_at_retire           0                         # Update the BP at retire. If false, update at the end of exec.
 --update_bp_off_path            1                         # Allow off path ops to update branch predictor state (e.g., ops when they complete exec stage).
