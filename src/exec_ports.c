@@ -198,6 +198,7 @@ void init_exec_ports_fu_list(uns proc_id, Func_Unit* fu) {
 
 void init_exec_ports_rs_list(uns proc_id, Reservation_Station* rs, Func_Unit* local_fus) {
   uns32 i;
+  uns32 tea_per_rs;
   uns64 next;
   const char* base_name = "RS";
   ASSERT(proc_id, strlen(base_name) + 5 < EXEC_PORTS_MAX_NAME_LEN);
@@ -228,22 +229,18 @@ void init_exec_ports_rs_list(uns proc_id, Reservation_Station* rs, Func_Unit* lo
     rs[i].size = next;
 
     /* TEA RS partitioning: allocate proportional to each RS's share of total.
-     * This ensures sum(tea_limits) ≈ TEA_RS_RESERVATION and
-     * sum(main_limits) ≈ total_rs_size - TEA_RS_RESERVATION,
-     * matching the paper's intended Main/TEA split (160/192 out of 352 total). */
+     * Main keeps the same partition limit even when TEA is disabled, so a
+     * TEA-off run does not get to use the enlarged TEA-reserved RS capacity. */
     rs[i].main_op_count = 0;
     rs[i].tea_op_count = 0;
-    if (TEA_ENABLE && rs[i].size > 0 && total_rs_size > 0) {
-      uns32 tea_per_rs =
-          (uns32)((uint64_t)TEA_RS_RESERVATION * rs[i].size / total_rs_size);
+    tea_per_rs = 0;
+    if (rs[i].size > 0 && total_rs_size > 0) {
+      tea_per_rs = (uns32)((uint64_t)TEA_RS_RESERVATION * rs[i].size / total_rs_size);
       if (tea_per_rs > rs[i].size)
         tea_per_rs = rs[i].size;
-      rs[i].tea_rs_limit = tea_per_rs;
-      rs[i].main_rs_limit = rs[i].size - tea_per_rs;
-    } else {
-      rs[i].tea_rs_limit = 0;
-      rs[i].main_rs_limit = rs[i].size;
     }
+    rs[i].tea_rs_limit = TEA_ENABLE ? tea_per_rs : 0;
+    rs[i].main_rs_limit = rs[i].size - tea_per_rs;
   }
   ASSERTM(proc_id, tmp == FALSE, "Found more RS_SIZES than expected\n");
   free(rs_sizes_copy);
