@@ -32,6 +32,7 @@
 
 #include "globals/global_types.h"
 #include "op.h"
+#include "dependency_chain_cache.h"
 
 /**************************************************************************************/
 /* TEA Thread State (top-level) */
@@ -88,6 +89,21 @@ typedef enum Tea_Chain_Termination_Reason_enum {
   TEA_CHAIN_TERM_REASON_FULL_THREAD,
 } Tea_Chain_Termination_Reason;
 
+typedef enum Tea_Load_Result_enum {
+  TEA_LOAD_RESULT_STORE_FORWARD,
+  TEA_LOAD_RESULT_BYPASS,
+  TEA_LOAD_RESULT_DCACHE_HIT,
+  TEA_LOAD_RESULT_DCACHE_MISS,
+  TEA_LOAD_RESULT_STORE_SCAN_FWD,
+} Tea_Load_Result;
+
+typedef struct Tea_Chain_Load_Identity_struct {
+  Flag    valid;
+  Addr    pc;
+  Addr    line_addr;
+  Counter h2p_op_delta;
+} Tea_Chain_Load_Identity;
+
 typedef struct Tea_H2P_Chain_struct {
   Tea_Chain_State state;
 
@@ -104,6 +120,26 @@ typedef struct Tea_H2P_Chain_struct {
   Counter tea_ops_fetched;        /* Total ops fetched from dep chain */
   Counter trigger_cycle;          /* Cycle this chain slot became active */
   Counter fetch_done_cycle;       /* Cycle dependency-chain fetch completed */
+  Counter dcc_insert_cycle;       /* Cycle when the replayed DCC entry was created */
+  Counter dcc_insert_h2p_op_num;  /* Main H2P op_num in the saved DCC entry */
+  uns     triggered_chain_load_ops;
+  uns     load_identity_count;
+  Tea_Chain_Load_Identity load_identities[MAX_CHAIN_LENGTH];
+
+  /* Per-chain TEA load summary */
+  Counter tea_load_exec_count;
+  Counter tea_load_dcache_hit_count;
+  Counter tea_load_dcache_miss_count;
+  Counter tea_load_store_forward_count;
+  Counter tea_load_bypass_count;
+  Counter tea_load_store_scan_fwd_count;
+  Counter tea_load_miss_latency_total;
+  Counter tea_load_miss_max_latency;
+  Counter first_load_miss_access_cycle;
+  Counter last_load_miss_access_cycle;
+  Counter last_load_miss_done_cycle;
+  Counter h2p_exec_cycle;
+  Flag    h2p_resolved;
 } Tea_H2P_Chain;
 
 /**************************************************************************************/
@@ -170,6 +206,13 @@ void update_tea_thread(uns proc_id);
 
 /* Op management */
 void tea_op_completed(uns proc_id, Op* op);
+void tea_record_load_issue_order(Op* op);
+void tea_record_load_cache_access_order(Op* op, Addr line_addr);
+void tea_record_load_cache_hit_warm_source(Op* op, Addr line_addr);
+void tea_chain_note_load_result(uns proc_id, Op* op,
+                                Tea_Load_Result result,
+                                Counter latency);
+void tea_record_h2p_load_miss_impact(uns proc_id, Op* tea_h2p);
 
 /* Case 1 pending early flush management */
 Flag tea_record_pending_case1_flush(uns proc_id, Op* main_h2p,

@@ -270,6 +270,9 @@ void update_dcache_stage(Stage_Data* src_sd) {
           STAT_EVENT(op->proc_id, TEA_LOAD_LATENCY_SAMPLES);
           INC_STAT_EVENT(op->proc_id, TEA_LOAD_LATENCY_TOTAL, DCACHE_CYCLES);
           INC_STAT_EVENT(op->proc_id, TEA_LOAD_LATENCY_AVG,   DCACHE_CYCLES);
+          tea_chain_note_load_result(op->proc_id, op,
+                                     TEA_LOAD_RESULT_STORE_FORWARD,
+                                     DCACHE_CYCLES);
         } else {
           /* [EXPERIMENT: TEA_PERFECT_LOAD] original: goto tea_load_dcache_access; */
           if (TEA_PERFECT_LOAD) {
@@ -285,6 +288,9 @@ void update_dcache_stage(Stage_Data* src_sd) {
             STAT_EVENT(op->proc_id, TEA_LOAD_LATENCY_SAMPLES);
             INC_STAT_EVENT(op->proc_id, TEA_LOAD_LATENCY_TOTAL, latency);
             INC_STAT_EVENT(op->proc_id, TEA_LOAD_LATENCY_AVG,   latency);
+            tea_chain_note_load_result(op->proc_id, op,
+                                       TEA_LOAD_RESULT_BYPASS,
+                                       latency);
             /* falls through to tea_op_completed + stage removal below */
           } else {
             goto tea_load_dcache_access;
@@ -323,6 +329,7 @@ tea_load_dcache_access:
     /* now access the dcache with it */
     Addr line_addr;
     Dcache_Data* line = (Dcache_Data*)cache_access(&dc->dcache, op->oracle_info.va, &line_addr, TRUE);
+    tea_record_load_cache_access_order(op, line_addr);
     op->dcache_cycle = cycle_count;
     dc->idle_cycle = MAX2(dc->idle_cycle, cycle_count + DCACHE_CYCLES);
 
@@ -360,6 +367,10 @@ tea_load_dcache_access:
           STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_SAMPLES);
           INC_STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_TOTAL, _lat);
           INC_STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_AVG,   _lat);
+          tea_record_load_cache_hit_warm_source(op, line_addr);
+          tea_chain_note_load_result(dc->proc_id, op,
+                                     TEA_LOAD_RESULT_DCACHE_HIT,
+                                     _lat);
         }
         tea_op_completed(dc->proc_id, op);
       }
@@ -378,6 +389,10 @@ tea_load_dcache_access:
           STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_SAMPLES);
           INC_STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_TOTAL, _lat);
           INC_STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_AVG,   _lat);
+          tea_record_load_cache_hit_warm_source(op, line_addr);
+          tea_chain_note_load_result(dc->proc_id, op,
+                                     TEA_LOAD_RESULT_DCACHE_HIT,
+                                     _lat);
         }
         tea_op_completed(dc->proc_id, op);
       }
@@ -711,6 +726,9 @@ static inline void dcache_cacheline_miss(Op* op, Addr line_addr) {
           STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_SAMPLES);
           INC_STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_TOTAL, _lat);
           INC_STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_AVG,   _lat);
+          tea_chain_note_load_result(dc->proc_id, op,
+                                     TEA_LOAD_RESULT_STORE_SCAN_FWD,
+                                     _lat);
           tea_op_completed(dc->proc_id, op);
         }
         break;
@@ -968,6 +986,9 @@ static inline void dcache_fill_process_cacheline(Mem_Req* req, Dcache_Data* data
         STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_SAMPLES);
         INC_STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_TOTAL, _lat);
         INC_STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_AVG,   _lat);
+        tea_chain_note_load_result(dc->proc_id, op,
+                                   TEA_LOAD_RESULT_DCACHE_MISS,
+                                   _lat);
       }
       tea_op_completed(dc->proc_id, op);
     }

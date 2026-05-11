@@ -184,6 +184,8 @@ static void commit_dependency_chain_entry(uns proc_id, Op* ordered_ops,
     dep_entry->is_valid = TRUE;
     dep_entry->h2p_branch_pc = trigger_op->inst_info->addr;
     dep_entry->h2p_branch_op_num = trigger_op->op_num;
+    dep_entry->h2p_branch_unique_num = trigger_op->unique_num;
+    dep_entry->insert_cycle = cycle_count;
     dep_entry->chain_length = 0;
     for (int i = first_dep_op_idx; i <= trigger_op_idx; ++i) {
         if (is_data_dependent[i]) {
@@ -235,7 +237,11 @@ static void commit_block_cache_masks(uns proc_id, Op* ordered_ops,
                 
                 block_entry->is_valid = TRUE;
                 block_entry->h2p_branch_pc = real_block_start_pc;
-                if (old_mask == 0) block_entry->h2p_branch_op_num = ordered_ops[current_block_start_idx].op_num;
+                if (old_mask == 0) {
+                    block_entry->h2p_branch_op_num = ordered_ops[current_block_start_idx].op_num;
+                    block_entry->h2p_branch_unique_num = ordered_ops[current_block_start_idx].unique_num;
+                    block_entry->insert_cycle = cycle_count;
+                }
 
                 uint64_t merged_mask = old_mask | new_mask;
                 if (merged_mask != old_mask)

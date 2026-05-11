@@ -32,6 +32,8 @@ typedef struct Dependency_Chain_Cache_Entry_struct {
   Flag          is_valid;
   Addr          h2p_branch_pc;
   Counter       h2p_branch_op_num;
+  Counter       h2p_branch_unique_num;
+  Counter       insert_cycle;
   uns           chain_length;
   Op            chain[MAX_CHAIN_LENGTH];
   uint64_t     dependency_mask;     // 기본 블록 내 의존성 비트마스크

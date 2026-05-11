@@ -281,6 +281,7 @@ void update_exec_stage(Stage_Data* src_sd) {
 
     /* if we get to here, then it means the op is going into the functional unit. */
     op->sched_cycle = cycle_count;
+    tea_record_load_issue_order(op);
     DEBUG(exec->proc_id, "op_num:%s fu_num:%d sched_cycle:%s off_path:%d\n", unsstr64(op->op_num), op->fu_num,
           unsstr64(op->sched_cycle), op->off_path);
 
@@ -613,19 +614,27 @@ static inline void tea_record_h2p_main_exec_delta(uns proc_id,
   STAT_EVENT(proc_id, TEA_H2P_MAIN_EXEC_DELTA_SAMPLES);
 
   if (tea_exec_cycle < main_exec_cycle) {
+    Counter delta = main_exec_cycle - tea_exec_cycle;
     STAT_EVENT(proc_id, TEA_H2P_EXEC_BEFORE_MAIN);
-    INC_STAT_EVENT(proc_id, TEA_H2P_EXEC_SAVED_CYCLES_TOTAL,
-                   main_exec_cycle - tea_exec_cycle);
-    INC_STAT_EVENT(proc_id, TEA_H2P_EXEC_SAVED_CYCLES_AVG,
-                   main_exec_cycle - tea_exec_cycle);
+    INC_STAT_EVENT(proc_id, TEA_H2P_EXEC_SAVED_CYCLES_TOTAL, delta);
+    INC_STAT_EVENT(proc_id, TEA_H2P_EXEC_SAVED_CYCLES_AVG, delta);
+    if      (delta < 10)  STAT_EVENT(proc_id, TEA_H2P_EXEC_SAVED_CYCLES_1_9);
+    else if (delta < 50)  STAT_EVENT(proc_id, TEA_H2P_EXEC_SAVED_CYCLES_10_49);
+    else if (delta < 100) STAT_EVENT(proc_id, TEA_H2P_EXEC_SAVED_CYCLES_50_99);
+    else if (delta < 500) STAT_EVENT(proc_id, TEA_H2P_EXEC_SAVED_CYCLES_100_499);
+    else                  STAT_EVENT(proc_id, TEA_H2P_EXEC_SAVED_CYCLES_500_PLUS);
   } else if (tea_exec_cycle == main_exec_cycle) {
     STAT_EVENT(proc_id, TEA_H2P_EXEC_SAME_AS_MAIN);
   } else {
+    Counter delta = tea_exec_cycle - main_exec_cycle;
     STAT_EVENT(proc_id, TEA_H2P_EXEC_AFTER_MAIN);
-    INC_STAT_EVENT(proc_id, TEA_H2P_EXEC_LATE_CYCLES_TOTAL,
-                   tea_exec_cycle - main_exec_cycle);
-    INC_STAT_EVENT(proc_id, TEA_H2P_EXEC_LATE_CYCLES_AVG,
-                   tea_exec_cycle - main_exec_cycle);
+    INC_STAT_EVENT(proc_id, TEA_H2P_EXEC_LATE_CYCLES_TOTAL, delta);
+    INC_STAT_EVENT(proc_id, TEA_H2P_EXEC_LATE_CYCLES_AVG, delta);
+    if      (delta < 10)  STAT_EVENT(proc_id, TEA_H2P_EXEC_LATE_CYCLES_1_9);
+    else if (delta < 50)  STAT_EVENT(proc_id, TEA_H2P_EXEC_LATE_CYCLES_10_49);
+    else if (delta < 100) STAT_EVENT(proc_id, TEA_H2P_EXEC_LATE_CYCLES_50_99);
+    else if (delta < 500) STAT_EVENT(proc_id, TEA_H2P_EXEC_LATE_CYCLES_100_499);
+    else                  STAT_EVENT(proc_id, TEA_H2P_EXEC_LATE_CYCLES_500_PLUS);
   }
 }
 
@@ -853,6 +862,7 @@ static inline void exec_stage_bp_resolve(Op* op) {
       return;
 
     tea_record_h2p_time_to_exec(op->proc_id, c, op);
+    tea_record_h2p_load_miss_impact(op->proc_id, op);
 
     if (op->oracle_info.mispred || op->oracle_info.misfetch) {
       DEBUG(op->proc_id, "TEA early flush: chain=%d H2P mispred op_num:%s\n",
