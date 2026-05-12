@@ -96,7 +96,8 @@ static inline void tea_record_cycle_delta_stat(uns proc_id,
                                                Stat_Enum avg_stat);
 static inline Tea_Case1_Main_Stage tea_classify_case1_main_stage(Op* main_h2p);
 static inline void tea_record_case1_main_stage(uns proc_id,
-                                               Tea_Case1_Main_Stage stage);
+                                               Tea_Case1_Main_Stage stage,
+                                               Op* main_h2p);
 static inline void tea_record_case1_stage_to_schedule(uns proc_id,
                                                       Tea_Case1_Main_Stage stage,
                                                       Counter detect_cycle,
@@ -676,12 +677,20 @@ static inline Tea_Case1_Main_Stage tea_classify_case1_main_stage(Op* main_h2p) {
 }
 
 static inline void tea_record_case1_main_stage(uns proc_id,
-                                               Tea_Case1_Main_Stage stage) {
+                                               Tea_Case1_Main_Stage stage,
+                                               Op* main_h2p) {
   STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_SAMPLES);
 
   switch (stage) {
     case TEA_CASE1_MAIN_STAGE_PRE_DECODE:
       STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_PRE_DECODE);
+      if (main_h2p && main_h2p->fetch_cycle == 0) {
+        STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_PRE_DECODE_FTQ);
+        STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_PRE_DECODE_FTQ_PCT);
+      } else {
+        STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_PRE_DECODE_FETCHED);
+        STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_PRE_DECODE_FETCHED_PCT);
+      }
       break;
     case TEA_CASE1_MAIN_STAGE_DECODED_PRE_RENAME:
       STAT_EVENT(proc_id, TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_DECODED_PRE_RENAME);
@@ -921,6 +930,8 @@ static inline void exec_stage_bp_resolve(Op* op) {
            * fires when main H2P reaches rename and the checkpoint is created. */
           Tea_Case1_Main_Stage main_stage_at_detect =
             tea_classify_case1_main_stage(main_h2p);
+          tea_record_case1_main_stage(op->proc_id, main_stage_at_detect,
+                                      main_h2p);
           Flag pending_recorded =
             tea_record_pending_case1_flush(op->proc_id, main_h2p,
                                            op->exec_cycle,
@@ -929,7 +940,6 @@ static inline void exec_stage_bp_resolve(Op* op) {
             tea_mark_early_flush_detection(main_h2p, op->exec_cycle);
             main_h2p->tea_case1_detect_cycle = op->exec_cycle;
             STAT_EVENT(op->proc_id, TEA_EARLY_FLUSHES);
-            tea_record_case1_main_stage(op->proc_id, main_stage_at_detect);
             tea_record_early_flush_time_to_detect(
               op->proc_id, c, op,
               TEA_EARLY_FLUSH_TRIGGER_TO_DETECT_SAMPLES,

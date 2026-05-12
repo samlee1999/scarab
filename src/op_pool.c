@@ -238,6 +238,7 @@ void op_pool_setup_op(uns proc_id, Op* op) {
   op->replay_count = 0;
   op->dont_cause_replays = FALSE;
   op->exec_count = 0;
+  op->fetch_cycle = 0;
   op->in_rdy_list = FALSE;
   op->in_node_list = FALSE;
   op->precommitted = FALSE;
