@@ -106,6 +106,7 @@ typedef struct Uop_Cache_Stage_Cpp_struct {
   Uop_Cache_Data accumulating_line;
   FT_Info accumulating_ft;
   Counter accumulating_op_num;
+  Counter skip_accum_until_op_num;  /* set on recovery; ops with op_num <= this are skipped */
 
   /*
    * the lookup buffer stores the uop cache lines of an FT to be consumed by the icache stage.
@@ -174,16 +175,21 @@ void init_uop_cache_stage(uns8 proc_id, const char* name) {
   uc->sd.op_count = 0;
   uc->sd.ops = (Op**)calloc(UOPC_ISSUE_WIDTH, sizeof(Op*));
 
+  per_core_uc_stage[proc_id].skip_accum_until_op_num = 0;
+
   // The cache library computes the number of entries from cache_size_bytes/cache_line_size_bytes
   per_core_uc_stage[proc_id].uop_cache =
       new Uop_Cache(UOP_CACHE_LINES, UOP_CACHE_ASSOC, UOP_CACHE_LINE_SIZE, (Repl_Policy)UOP_CACHE_REPL);
 }
 
-void recover_uop_cache(void) {
+void recover_uop_cache(Counter recovery_op_num) {
   if (!UOP_CACHE_ENABLE) {
     return;
   }
   Uop_Cache_Stage_Cpp* uc_cpp = &per_core_uc_stage[uc->proc_id];
+
+  /* Always record recovery boundary so accumulation update skips pre-recovery surviving ops. */
+  uc_cpp->skip_accum_until_op_num = recovery_op_num;
 
   // no accumulation on-going
   if (uc_cpp->accumulation_buffer.size() == 0 && uc_cpp->accumulating_line.n_uops == 0) {
@@ -191,26 +197,8 @@ void recover_uop_cache(void) {
     return;
   }
 
-  if (uc_cpp->accumulating_op_num >= bp_recovery_info->recovery_op_num) {
-    uop_cache_accumulation_buffer_clear();
-    return;
-  }
-
-  /*
-   * Ops may be decoded out of order:
-   *    an older op may be stalled in decode, and a younger op is speculatively fetched from the uop cache.
-   * As a result, ops preceding the recovering op may not have called accumulate_op yet.
-   * Thus, The recovery should not affect the current FT accumulation.
-   */
-
-  if (bp_recovery_info->recovery_op->ft_info.static_info == uc_cpp->accumulating_ft.static_info) {
-    /*
-     * A FT currently accumulating is caught up in a recovery
-     * This is likely a corner case where the FT is already in the uop cache due to a short reuse distance.
-     */
-    ASSERT(uc->proc_id,
-           uop_cache_lookup_line(uc_cpp->accumulating_ft.static_info.start, uc_cpp->accumulating_ft, FALSE) != NULL);
-  }
+  /* Clear: partial FTQ flush may preserve surviving ops whose FT metadata is stale. */
+  uop_cache_accumulation_buffer_clear();
 }
 
 /**************************************************************************************/
@@ -481,6 +469,10 @@ void uop_cache_accumulation_buffer_update(Op* op) {
   auto& buffer = uc_cpp->accumulation_buffer;
   auto& line = uc_cpp->accumulating_line;
   auto& ft = uc_cpp->accumulating_ft;
+
+  /* Skip ops preserved before the recovery boundary — FT metadata may be stale or incomplete. */
+  if (op->op_num <= uc_cpp->skip_accum_until_op_num)
+    return;
 
   bool is_line_start = (buffer.size() == 0 && line.n_uops == 0);
   bool is_ft_start = (op->bom && op->inst_info->addr == op->ft_info.static_info.start);

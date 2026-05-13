@@ -52,7 +52,7 @@ extern Uop_Cache_Stage* uc;
 void set_uop_cache_stage(Uop_Cache_Stage* new_uc);
 void init_uop_cache_stage(uns8 proc_id, const char* name);
 void alloc_mem_uop_cache(uns num_cores);
-void recover_uop_cache(void);
+void recover_uop_cache(Counter recovery_op_num);
 
 Flag uop_cache_lookup_ft_and_fill_lookup_buffer(FT_Info ft_info, Flag offpath);
 Uop_Cache_Data uop_cache_consume_uops_from_lookup_buffer(uns requested);

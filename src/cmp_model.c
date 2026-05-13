@@ -550,7 +550,7 @@ void cmp_recover() {
   recover_decoupled_fe();
   recover_fdip();
   recover_icache_stage();
-  recover_uop_cache();
+  recover_uop_cache(bp_recovery_info->recovery_op_num);
   recover_decode_stage();
   recover_uop_queue_stage();
   recover_idq_stage();

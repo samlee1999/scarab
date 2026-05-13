@@ -1390,9 +1390,18 @@ void log_stats_mshr_hit(Addr line_addr) {
       STAT_EVENT(ic->proc_id, ICACHE_MISS_NOT_PREFETCHED_ONPATH + icache_off_path());
   } else {
     if (FDIP_ENABLE && !FDIP_UTILITY_HASH_ENABLE && !FDIP_BLOOM_FILTER && !FDIP_UC_SIZE && !EIP_ENABLE &&
-        !FDIP_PERFECT_PREFETCH && (mem_req_is_type(req, MRT_FDIPPRFON) || mem_req_is_type(req, MRT_FDIPPRFOFF)))
+        !FDIP_PERFECT_PREFETCH && (mem_req_is_type(req, MRT_FDIPPRFON) || mem_req_is_type(req, MRT_FDIPPRFOFF))) {
+      /* Case 1 early recovery updates last_recover_cycle before in-flight FDIP prefetches fill,
+       * causing get_miss_reason() to return IMISS_NOT_PREFETCHED while req IS the FDIP prefetch.
+       * Trust the MSHR req type as ground truth. */
+      /* fdip_pref_off_path: 0=on-path, 1=off-path, 2=both-path (treated as off-path,
+       * consistent with surrounding stat logic using if(req->fdip_pref_off_path)) */
+      if (imiss_reason != IMISS_MSHR_HIT_PREFETCHED_OFFPATH && imiss_reason != IMISS_MSHR_HIT_PREFETCHED_ONPATH)
+        imiss_reason = req->fdip_pref_off_path ? IMISS_MSHR_HIT_PREFETCHED_OFFPATH
+                                               : IMISS_MSHR_HIT_PREFETCHED_ONPATH;
       ASSERT(ic->proc_id,
              imiss_reason == IMISS_MSHR_HIT_PREFETCHED_OFFPATH || imiss_reason == IMISS_MSHR_HIT_PREFETCHED_ONPATH);
+    }
     if (imiss_reason == IMISS_MSHR_HIT_PREFETCHED_ONPATH)
       STAT_EVENT(ic->proc_id, ICACHE_MISS_MSHR_HIT_PREFETCHED_ONPATH);
     else
