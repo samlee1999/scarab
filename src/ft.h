@@ -47,6 +47,8 @@ Op* ft_fetch_op(FT* ft);
 bool ft_is_consumed(FT* ft);
 void ft_set_consumed(FT* ft);
 FT_Info ft_get_ft_info(FT* ft);
+void ft_mark_redirect_to_icache(FT* ft);
+Flag ft_check_and_clear_redirect_to_icache(FT* ft);
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -69,12 +71,17 @@ class FT {
   void set_ft_started_by(FT_Started_By ft_started_by);
   void add_op(Op* op, FT_Ended_By ft_ended_by);
   void free_ops_and_clear();
+  void free_ops_after_opnum(Counter recovery_op_num);
+  bool contains_op_num(Counter target_op_num) const;
+  Counter next_unfetched_op_num_or(Counter fallback) const;
   bool can_fetch_op();
   Op* fetch_op();
   void set_per_op_ft_info();
   FT_Info get_ft_info();
   bool is_consumed();
   void set_consumed();
+  void mark_redirect_to_icache();
+  bool check_and_clear_redirect_to_icache();
   std::vector<Op*>& get_ops();
 
  private:
@@ -83,6 +90,10 @@ class FT {
   FT_Info ft_info;
   std::vector<Op*> ops;
   bool consumed;
+  /* Set by recover_icache_stage() when uc->current_ft is partially consumed and preserved.
+   * Causes ft_arbitration() to skip the uop-cache lookup and force icache path, avoiding
+   * a lookup-buffer/op_pos mismatch after a partial recovery. */
+  bool redirect_to_icache;
 
   friend class Decoupled_FE;
 };

@@ -101,6 +101,9 @@ void update_decoupled_fe();
 // Icache/Core API
 void recover_decoupled_fe();
 bool decoupled_fe_is_off_path();
+/* Partial recovery helpers for icache_stage */
+Flag decoupled_fe_ftq_contains_ft(FT* ft);
+Counter decoupled_fe_next_unfetched_op_num_or(Counter fallback);
 void decoupled_fe_retire(Op* op, int proc_id, uns64 inst_uid);
 
 FT* decoupled_fe_get_ft(uint64_t ft_pos);

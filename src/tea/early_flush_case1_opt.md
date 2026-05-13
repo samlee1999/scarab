@@ -4,9 +4,9 @@
 
 Case 1은 TEA thread가 H2P misprediction을 먼저 발견했지만, Main H2P가 아직 rename을 지나지 않아 SRT checkpoint가 없는 경우다.
 
-현재 구현은 이 경우 `tea_record_pending_case1_flush()`로 pending entry를 남기고, Main H2P가 rename에 도달해 `reg_file_snapshot_srt()`가 생성될 때까지 recovery를 지연한다. 이 구조에서는 TEA가 매우 빨리 H2P를 resolve해도 Main H2P가 rename에 도달하기 전까지 frontend/backend flush가 시작되지 않는다.
+기존 구현은 이 경우 `tea_record_pending_case1_flush()`로 pending entry를 남기고, Main H2P가 rename에 도달해 `reg_file_snapshot_srt()`가 생성될 때까지 recovery를 지연했다. 이 구조에서는 TEA가 매우 빨리 H2P를 resolve해도 Main H2P가 rename에 도달하기 전까지 frontend/backend flush가 시작되지 않았다.
 
-목표는 Case 1에서도 TEA detection cycle에 즉시 `bp_sched_recovery()`를 호출하고, processor frontend가 recovery op보다 오래된 instruction은 보존하고 younger wrong-path instruction만 flush하도록 만드는 것이다.
+현재 목표와 구현은 Case 1에서도 TEA detection cycle에 즉시 `bp_sched_recovery()`를 호출하고, processor frontend가 recovery op보다 오래된 instruction은 보존하고 younger wrong-path instruction만 flush하도록 만드는 것이다. Pending-at-rename 구조는 legacy/dormant path로 남아 있지만, Option A 정상 경로에서는 pending table을 채우지 않는다.
 
 ## 최신 실험 근거
 
@@ -129,7 +129,7 @@ cmp_recover()
 - `recovery_op_num`보다 오래된 op를 보존하는 것은 "그 op를 다시 fetch하라"는 뜻이 아니다. 이미 FTQ, current FT, icache output buffer에 있다면 그대로 흘려보내고, 새 fetch는 true NPC부터 시작한다.
 - `dfe_op_count = recovery_op_num + 1`은 recovery 이후 새로 생성되는 op 번호의 시작점이다. preserved FTQ 안에 아직 demand fetch되지 않은 op가 있다면, `icache_stage.c`의 `op_count[]`까지 무조건 `recovery_op_num + 1`로 점프시키면 안 된다.
 - `current_ft_to_push`는 FTQ에 commit되지 않은 transient FT다. Main H2P가 PRE_DECODE 서브케이스라면 아직 FTQ가 아니라 `current_ft_to_push` 안에 있을 수 있다 (`decoupled_frontend.cc:433`에서 op 추가 후 `ft_ended_by != FT_NOT_ENDED`일 때만 FTQ에 push됨 — line 436). 이 상태에서 무조건 `free_ops_and_clear()`를 호출하면 Main H2P Op*가 해제되어 pipeline이 해당 dynamic instance를 잃는다. `Decoupled_FE::recover()` 에서는 partial flush 전에 `current_ft_to_push.ops`를 순회해 `op_num <= recovery_op_num`인 op가 하나라도 있으면 trim 후 FTQ에 force-materialize하고, 없으면 기존대로 free 후 `FT_STARTED_BY_RECOVERY`로 새로 시작한다 (Step 4 상세 참조).
-- `ic->current_ft`와 `uc->current_ft`는 FTQ 안에 남은 FT를 가리키고 있을 수 있다. 해당 FT가 preserved prefix에 남아 있으면 유지하고, erased suffix에 속하면 NULL 처리한다.
+- `ic->current_ft`와 `uc->current_ft`는 FTQ 안에 남은 FT를 가리키고 있을 수 있다. 해당 FT 객체가 preserved prefix에 남아 있으면 FTQ entry 자체는 보존해야 하지만, recovery 시점의 stage current pointer는 RESTEER를 위해 NULL 처리할 수 있다. 단, 이미 일부 fetch된 preserved FT를 다시 선택할 때 uop-cache lookup을 FT start 기준으로 재시도하면 안 되므로, fetch 가능한 preserved current FT에는 `redirect_to_icache` 플래그를 남겨 다음 arbitration에서 icache path로 강제해야 한다.
 - FTQ prefix가 남은 상태에서 recovery-start FT를 append하면 기존 FT 연속성 assert가 깨질 수 있다. `FT_STARTED_BY_RECOVERY`로 시작하는 FT는 이전 FT의 fall-through/predicted NPC와 연속일 필요가 없다.
 - FDIP iterator를 0으로 reset하면 correctness는 대체로 유지되지만, preserved FT를 다시 스캔하면서 FDIP traffic/stat을 왜곡한다. Option A의 목표에는 reset보다 clamp가 더 적합하다.
 
@@ -141,20 +141,23 @@ fetch_cycle 기반 deferred path는 사용하지 않는다. 모든 Case 1에서 
 
 | 파일 | 수정 이유 |
 |---|---|
-| `src/exec_stage.c` | Case 1 pending path 대신 즉시 `bp_sched_recovery()` 호출 |
+| `src/exec_stage.c` | Case 1 pending path 대신 즉시 `bp_sched_recovery()` 호출, dynamic TEA recovery penalty 적용 |
 | `src/cmp_model.c` | Case 1 recovery가 실제로 consume된 뒤 Main H2P의 중복 main-exec recovery 방지 |
 | `src/decoupled_frontend.cc` | `Decoupled_FE::recover()`를 full FTQ flush에서 partial FTQ flush로 변경, FDIP iterator clamp, recovery-start FT append assert 처리 |
 | `src/decoupled_frontend.h` | icache가 preserved FTQ state를 질의할 수 있는 C API 추가 |
-| `src/ft.h` | FT partial trim helper 선언 |
-| `src/ft.cc` | FT 안에서 `recovery_op_num` 이후 op만 free하고 FT metadata를 갱신하는 helper 구현 |
-| `src/icache_stage.c` | icache output buffer partial flush, `op_count[]`, `current_ft` 보존/무효화 처리 |
+| `src/ft.h` | FT partial trim helper와 `redirect_to_icache` C API 선언 |
+| `src/ft.cc` | FT 안에서 `recovery_op_num` 이후 op만 free하고 FT metadata를 갱신하는 helper, `redirect_to_icache` 구현 |
+| `src/icache_stage.c` | icache output buffer partial flush, `op_count[]`, `current_ft` redirect/consumed 처리 |
+| `src/core.param.def` | TEA Case 1 pre-decode 및 Case 2 recovery penalty parameter 추가 |
+| `src/PARAMS.golden_cove` | TEA recovery penalty 기본값 설정 |
+| `src/tea/tea_thread.h` | pending-at-rename 구조를 legacy/dormant path로 설명하도록 주석 정리 |
 | `src/tea/tea.stat.def` | immediate Case 1 recovery 및 FTQ immediate case 검증용 stat 추가 |
 
-검토 결과 `src/map_rename.c`, `src/idq_stage.cc`, `src/map_stage.c`, `src/uop_queue_stage.cc`, `src/uop_cache.cc`, `src/prefetcher/fdip.cc`는 1차 구현에서 직접 수정하지 않는 방향이 맞다. 다만 이 파일들의 기존 invariant를 깨지 않는지 validation 대상에 포함한다.
+검토 결과 `src/map_rename.c`는 checkpoint 없는 Case 1 recovery에서 SRT rollback ASSERT를 피하기 위한 guard만 필요하고, `src/idq_stage.cc`, `src/map_stage.c`, `src/uop_queue_stage.cc`, `src/uop_cache.cc`, `src/prefetcher/fdip.cc`는 직접 수정하지 않는 방향이 맞다. 다만 이 파일들의 기존 invariant를 깨지 않는지 validation 대상에 포함한다.
 
 ## Step 1. `src/exec_stage.c`: Case 1 즉시 schedule
 
-현재 Case 1 branch는 `tea_record_pending_case1_flush()`를 호출한다. 이를 즉시 schedule로 바꾼다.
+Case 1 branch는 더 이상 `tea_record_pending_case1_flush()`를 호출하지 않고 TEA detect cycle에 즉시 schedule한다. Recovery penalty는 Case 1 stage에 따라 동적으로 선택한다.
 
 핵심 로직:
 
@@ -164,8 +167,13 @@ Tea_Case1_Main_Stage main_stage_at_detect =
 
 tea_record_case1_main_stage(op->proc_id, main_stage_at_detect, main_h2p);
 
+const uns case1_recovery_penalty =
+  (main_stage_at_detect == TEA_CASE1_MAIN_STAGE_PRE_DECODE) ?
+    TEA_CASE1_PRE_DECODE_RECOVERY_CYCLES :
+    EXTRA_EARLY_RECOVERY_CYCLES;
+
 bp_sched_recovery(bp_recovery_info, main_h2p, op->exec_cycle,
-                  FALSE, FALSE, EXTRA_LATE_RECOVERY_CYCLES);
+                  FALSE, FALSE, case1_recovery_penalty);
 
 if (main_h2p->oracle_info.recovery_sch) {
   main_h2p->recovery_scheduled = TRUE;
@@ -183,7 +191,9 @@ if (main_h2p->oracle_info.recovery_sch) {
 - `main_h2p->oracle_info.recover_at_exec`는 여기서 지우지 않는다.
 - recovery가 rename 이후에 fire될 수 있으므로, 그 경우 SRT snapshot이 생성될 기회를 남겨야 한다.
 - recovery가 실제로 fire된 뒤에는 `src/cmp_model.c`에서 `recover_at_exec`를 지워 중복 main-exec recovery를 막는다.
-- 기존 `exec_stage_tea_pending_flush_at_rename()`와 pending table은 fallback code로 남긴다. Option A가 정상 동작하면 `TEA_EARLY_FLUSH_CASE1_PENDING_TRIGGERED`는 거의 0이 되어야 한다.
+- Case 1 PRE_DECODE는 `TEA_CASE1_PRE_DECODE_RECOVERY_CYCLES`, 그 외 Case 1은 `EXTRA_EARLY_RECOVERY_CYCLES`를 `bp_sched_recovery()`의 penalty 인자로 사용한다. 이 값은 기존 `EXTRA_*_RECOVERY_CYCLES`와 동일하게 base latency 1에 더해지는 extra penalty다.
+- Case 2는 `TEA_CASE2_RECOVERY_CYCLES`를 사용한다. 현재 `PARAMS.golden_cove` 기본값은 Case 1 PRE_DECODE 2, Case 2 10이다.
+- 기존 `exec_stage_tea_pending_flush_at_rename()`와 pending table은 legacy/dormant code로 남긴다. Option A가 정상 동작하면 `TEA_EARLY_FLUSH_CASE1_PENDING_TRIGGERED`는 0이어야 한다.
 
 **제거해야 할 코드 (현재 `exec_stage.c:928–966` Case 1 else branch)**:
 
@@ -194,16 +204,16 @@ if (main_h2p->oracle_info.recovery_sch) {
 
 Case 2(`exec_stage.c:900–927`)와 달리 `terminate_tea_chain_with_reason()`을 호출하지 않는다 — **이것은 안전하다**. Case 2도 이미 `terminate_tea_chain_with_reason()`을 호출하지 않으며, chain cleanup은 `cmp_recover()` → `recover_tea_on_flush()`가 next cycle에 담당한다. 기존 `TEA_EARLY_FLUSH_CASE1_NO_CHKPT`/`TEA_EARLY_FLUSH_CASE1_DECODE` stat event는 유지한다.
 
-**DECODED_PRE_RENAME/Map-entry 경계의 SRT snapshot 생성 (유효함)**: Main H2P가 `DECODED_PRE_RENAME` 서브케이스 (`map_cycle == MAX_CTR`)일 때, TEA의 `update_exec_stage()`에서 Case 1 즉시 schedule이 먼저 발생한 뒤, 같은 cycle의 `update_map_stage()`가 Main H2P를 rename 처리하면서 `map_rename.c:964-971`의 `reg_file_snapshot_srt()`를 호출한다. `exec_stage_tea_pending_flush_at_rename()` 안의 `!recovery_sch` guard가 이중 recovery를 막는다. 이 snapshot은 Main H2P의 rename 직후 RAT 상태를 저장하며, 다음 cycle의 `cmp_recover()` → `reg_file_recover()`가 이를 사용해 Main H2P의 register 할당은 보존하고 younger wrong-path rename만 rollback한다 — partial flush에 정확히 필요한 동작이다. correctness 문제 없음.
+**DECODED_PRE_RENAME/Map-entry 경계의 SRT snapshot 생성 (유효함)**: Main H2P가 `DECODED_PRE_RENAME` 서브케이스 (`map_cycle == MAX_CTR`)일 때, TEA의 `update_exec_stage()`에서 Case 1 즉시 schedule이 먼저 발생한 뒤, 같은 cycle의 `update_map_stage()`가 Main H2P를 rename 처리하면서 `map_rename.c:964-971`의 `reg_file_snapshot_srt()`를 호출한다. 현재 Option A에서는 pending table이 비어 있으므로 `exec_stage_tea_pending_flush_at_rename()`은 no-op이고, legacy entry가 있더라도 `!recovery_sch` guard가 이중 recovery를 막는다. 이 snapshot은 Main H2P의 rename 직후 RAT 상태를 저장하며, 다음 cycle의 `cmp_recover()` → `reg_file_recover()`가 이를 사용해 Main H2P의 register 할당은 보존하고 younger wrong-path rename만 rollback한다 — partial flush에 정확히 필요한 동작이다. correctness 문제 없음.
 
 **`IN_RENAME` 서브케이스 (`map_cycle != MAX_CTR`)에서는 이 현상이 발생하지 않는다**: `map_cycle`은 `map_stage.c:264`의 `map_stage_fetch_op()`에서 설정되며, `update_exec_stage()`는 `update_map_stage()`보다 먼저 실행된다. 따라서 exec_stage가 `map_cycle != MAX_CTR`인 op를 보는 시점에 그 `map_cycle`은 반드시 이전 cycle에 설정된 값이다. 해당 op의 rename과 `map_rename.c:964` 호출은 이미 이전 cycle에 완료되었으므로, 현재 cycle의 `update_map_stage()`는 dispatch만 시도하며 SRT snapshot이 새로 생성되지 않는다.
 
 **`recover_at_exec`를 지우지 않으면 생기는 main exec 재트리거 문제 및 필수 추가 수정**:
 
-`exec_stage.c:1004`의 normal branch resolution 경로:
+수정 전 `exec_stage.c`의 normal branch resolution 경로:
 
 ```c
-if(op->oracle_info.recover_at_exec) {   // recovery_sch 체크 없음!
+if(op->oracle_info.recover_at_exec) {   // recovery_sch 체크 없음
     bp_sched_recovery(bp_recovery_info, op, op->exec_cycle, ...);
 ```
 
@@ -211,7 +221,7 @@ if(op->oracle_info.recover_at_exec) {   // recovery_sch 체크 없음!
 
 **같은 cycle race**: `cmp_recover()`는 recovery schedule 다음 cycle에 실행된다. Case 1 sub-case `IN_NODE_OR_RS`/`SCHEDULED_OR_EXECUTING`에서 TEA H2P와 Main H2P가 같은 cycle에 exec stage를 통과하면, 같은 `update_exec_stage()` 호출 내에서 TEA H2P 처리(→ `recovery_sch = TRUE`) 후 Main H2P 처리(→ ASSERT)가 발생한다. cmp_recover()는 그 다음 cycle에 실행되므로 이 race를 막을 수 없다.
 
-**필수 수정 (`exec_stage.c:1004`)**: TEA early flush guard(line 898)와 동일하게 `recovery_sch` 체크를 추가한다:
+**반영된 수정**: TEA early flush guard와 동일하게 `recovery_sch` 체크를 추가한다:
 
 ```c
 // 기존:
@@ -258,7 +268,6 @@ FTQ partial flush는 FT 단위 erase만으로 충분하지 않다. Recovery op�
 
 ```cpp
 bool contains_op_num(Counter op_num) const;
-bool has_unfetched_op_after(Counter op_num) const;
 Counter next_unfetched_op_num_or(Counter fallback) const;
 void free_ops_after_opnum(Counter recovery_op_num);
 ```
@@ -340,7 +349,7 @@ full flush처럼 모든 iterator를 0으로 되돌리면 FDIP가 이미 처리�
 
 ## Step 6. `src/decoupled_frontend.h`: icache용 query API
 
-`src/icache_stage.c`는 C 파일이므로 DFE 내부 `std::deque<FT>`를 직접 볼 수 없다. Partial recovery에서는 `ic->current_ft`와 `uc->current_ft`를 무조건 NULL로 만들면 안 되므로, DFE 상태를 질의하는 C API가 필요하다.
+`src/icache_stage.c`는 C 파일이므로 DFE 내부 `std::deque<FT>`를 직접 볼 수 없다. Partial recovery에서는 `ic->current_ft`와 `uc->current_ft`를 NULL 처리하기 전에 해당 FT가 preserved FTQ 안에 남아 있는지 확인해야 하므로, DFE 상태를 질의하는 C API가 필요하다.
 
 필요 API 예시:
 
@@ -362,7 +371,7 @@ Counter decoupled_fe_next_unfetched_op_num_or(Counter fallback);
 2. `FLUSH_OP(op) == FALSE`인 op은 보존하고 stage data를 compact한다.
 3. `cur_data->op_count`는 보존한 op 수로 재계산한다.
 4. `op_count[proc_id]`는 DFE helper가 알려주는 다음 unfetched preserved op num으로 설정한다. 그런 op가 없으면 `recovery_op_num + 1`로 설정한다.
-5. `ic->current_ft`와 `uc->current_ft`는 DFE FTQ에 아직 존재하는 preserved FT이면 유지한다. erased suffix에 속하면 NULL 처리한다.
+5. `ic->current_ft`와 `uc->current_ft`는 DFE FTQ에 아직 존재하는 preserved FT인지 검사한다. preserved FT이면 FTQ entry는 유지하되 current pointer는 RESTEER를 위해 NULL 처리한다. 이때 아직 fetch 가능한 FT라면 `redirect_to_icache` 플래그를 설정하고, 이미 소진된 FT라면 `ft_set_consumed()`로 consumed 처리한다. erased suffix에 속하면 단순 NULL 처리한다.
 6. `uop_cache_clear_lookup_buffer()`는 유지한다. Recovery 이후 lookup buffer는 이전 FTQ state와 맞지 않을 수 있다.
 
 기존 코드의 다음 처리는 partial recovery에서는 위험하다.
@@ -373,7 +382,7 @@ uc->current_ft = NULL;
 ic->current_ft = NULL;
 ```
 
-Main H2P가 FTQ 또는 current FT 안에 아직 있으면, 위 코드는 stat/debug 카운터(`op_count`)를 잘못된 값으로 설정하고, `current_ft` 포인터를 무효화해 preserved FT를 orphan으로 만든다.
+Main H2P가 FTQ 또는 current FT 안에 아직 있으면, 위 코드는 stat/debug 카운터(`op_count`)를 잘못된 값으로 설정하고, `current_ft` 포인터를 무효화해 preserved FT와 stage cursor 사이의 관계를 잃게 만든다.
 
 **`op_count[proc_id]` 역할 명확화**:
 
@@ -381,13 +390,15 @@ Main H2P가 FTQ 또는 current FT 안에 아직 있으면, 위 코드는 stat/de
 
 Full recovery에서 `op_count = recovery_op_num + 1`로 리셋하는 이유는 FTQ가 비워지므로 다음 fetch가 `recovery_op_num + 1` op_num부터 시작하기 때문이다. Partial recovery에서는 FTQ에 preserved ops가 남아 있으므로, `op_count`를 `recovery_op_num + 1`로 설정하면 preserved ops와 debug counter가 어긋난다. DFE helper `decoupled_fe_next_unfetched_op_num_or(recovery_op_num + 1)`로 실제 preserved FTQ의 다음 unfetched op_num을 얻어 설정한다.
 
-**`ic->current_ft`와 FTQ 멤버십**:
+**`ic->current_ft`/`uc->current_ft`와 FTQ 멤버십**:
 
-`ic->current_ft`가 non-null인 동안 해당 FT는 FTQ deque에 여전히 존재한다. Icache는 FT를 다 소비한 후 `ft_set_consumed()` + `ic->current_ft = NULL`을 호출하고, FTQ popping은 다음 `Decoupled_FE::update()` cycle에서 일어난다. 따라서 `decoupled_fe_ftq_contains_ft(ic->current_ft)`는 partial recovery 시점에서 정확히 동작한다 — 이 FT가 preserved prefix에 속하면 TRUE를 반환하고, icache는 기존 포인터를 그대로 유지하여 계속 fetch할 수 있다.
+`ic->current_ft` 또는 `uc->current_ft`가 non-null인 동안 해당 FT는 FTQ deque에 여전히 존재한다. Icache/uop-cache path는 FT를 다 소비한 후 `ft_set_consumed()` + `current_ft = NULL`을 호출하고, FTQ popping은 다음 `Decoupled_FE::update()` cycle에서 일어난다. 따라서 `decoupled_fe_ftq_contains_ft(current_ft)`는 partial recovery 시점에서 정확히 동작한다.
+
+Recovery에서는 current pointer를 계속 들고 있기보다 NULL 처리해 RESTEER가 FTQ에서 preserved FT를 다시 arbitration하도록 만드는 편이 안전하다. 단, preserved FT가 이미 일부 fetch된 상태(`op_pos > 0`)라면, 다시 선택된 FT에 대해 uop-cache lookup을 수행하면 lookup buffer는 FT start 기준이고 `fill_icache_stage_data()`는 현재 `op_pos` 기준으로 serve하여 mismatch가 발생할 수 있다. 이를 막기 위해 fetch 가능한 preserved `uc->current_ft`와 `ic->current_ft` 모두에 `ft_mark_redirect_to_icache()`를 호출하고, `ft_arbitration()`은 이 플래그를 감지하면 해당 FT의 uop-cache lookup을 skip해 icache path로 강제한다. 이미 fetch 가능한 op가 없는 preserved FT는 `ft_set_consumed()`로 표시해 다음 arbitration에서 skip되게 한다.
 
 ## Step 8. 기존 stage들의 상태
 
-아래 stage들은 이미 `FLUSH_OP` 기준 partial flush 구조를 갖고 있으므로 1차 구현에서 직접 수정하지 않는다.
+아래 stage들은 이미 `FLUSH_OP` 기준 partial flush 구조를 갖고 있으므로 Case 1 immediate path를 위해 직접 수정하지 않는다.
 
 | 파일 | 현재 상태 |
 |---|---|
@@ -396,7 +407,7 @@ Full recovery에서 `op_count = recovery_op_num + 1`로 리셋하는 이유는 F
 | `src/idq_stage.cc` | queue와 output sd에서 `FLUSH_OP`만 free, `next_op_num`은 `recovery_op_num`보다 클 때만 clamp |
 | `src/map_stage.c` | `FLUSH_OP`만 free, `map_stage_next_op_num`은 `recovery_op_num`보다 클 때만 clamp |
 | `src/uop_cache.cc` | accumulation buffer가 recovery point 이후일 때만 clear |
-| `src/map_rename.c` | checkpoint 없음 case를 이미 skip하고, rename hook은 fallback으로 유지 가능 |
+| `src/map_rename.c` | realistic/late-allocation recover 모두 checkpoint 없음 case를 skip하고, rename hook은 legacy/dormant path로 유지 |
 
 다만 validation에서 `next_op_num` 또는 `map_stage_next_op_num` assertion이 발생하면, preserved frontend prefix와 stage counter 사이에 아직 맞지 않는 경계가 있다는 뜻이므로 이 두 파일을 2차 수정 대상으로 본다.
 
@@ -412,11 +423,11 @@ DEF_STAT(TEA_EARLY_FLUSH_CASE1_IMMEDIATE_FETCHED, COUNT, NO_RATIO)
 
 기존 stage classification stat과 함께 확인한다.
 
-- `TEA_EARLY_FLUSH_CASE1_PENDING_TRIGGERED`: 거의 0이어야 함
+- `TEA_EARLY_FLUSH_CASE1_PENDING_TRIGGERED`: Option A 정상 경로에서는 0이어야 함
 - `TEA_EARLY_FLUSH_CASE1_IMMEDIATE`: Case 1 count와 거의 같아야 함
 - `TEA_EARLY_FLUSH_CASE1_IMMEDIATE_FTQ`: 기존 `TEA_EARLY_FLUSH_CASE1_MAIN_STAGE_PRE_DECODE_FTQ`와 대응
-- `TEA_EARLY_FLUSH_CASE1_TO_SCHEDULE_AVG`: pending rename 대기가 사라져 0에 가까워져야 함
-- `TEA_EARLY_FLUSH_CASE1_TO_RECOVERY_AVG`: schedule latency 중심으로 크게 감소해야 함
+- `TEA_EARLY_FLUSH_CASE1_TO_SCHEDULE_*`: legacy pending path에서만 샘플링되므로 Option A 정상 경로에서는 샘플이 없어야 함
+- `TEA_EARLY_FLUSH_CASE1_TO_RECOVERY_AVG`: dynamic recovery penalty(`TEA_CASE1_PRE_DECODE_RECOVERY_CYCLES` 또는 `EXTRA_EARLY_RECOVERY_CYCLES`)와 일치해야 함
 
 FDIP 영향은 기존 memory/fetch stat으로 같이 본다.
 
@@ -436,13 +447,38 @@ FDIP 영향은 기존 memory/fetch stat으로 같이 본다.
 | 논문 §IV-F 요구사항 | Scarab 구현 대응 | 이 계획의 처리 |
 |---|---|---|
 | 각 pipeline stage마다 timestamp comparator로 flush 여부 결정 | `FLUSH_OP(op)` = `op->op_num > recovery_op_num` — 이미 decode/uop_queue/idq/map stage에서 사용 중 | Step 8에서 확인: 기존 stage들은 이미 `FLUSH_OP` 기반 partial flush 구조를 갖고 있음 |
-| Fetch Queue(FTQ) partial flush | 현재는 full flush (`Decoupled_FE::recover()`) | Step 3+4: `free_ops_after_opnum()` + partial FTQ sweep으로 대체 |
-| Partial flush 시 main RAT recovery 불필요 | `reg_renaming_scheme_realistic_recover()`가 `!reg_file_checkpoint_is_valid()`이면 early return | 기존 구현이 이미 처리함. 추가 수정 불필요 |
+| Fetch Queue(FTQ) partial flush | 기존은 full flush였지만 현재 `Decoupled_FE::recover()`가 prefix 보존/suffix flush 수행 | Step 3+4: `free_ops_after_opnum()` + partial FTQ sweep으로 대체 |
+| Partial flush 시 main RAT recovery 불필요 | realistic/late-allocation recover가 `!reg_file_checkpoint_is_valid()`이면 early return | checkpoint 없는 Case 1에서 SRT rollback ASSERT 없이 skip |
 | Shadow RAT는 checkpoint로 fix | 논문과 Scarab 구현이 다름 — 아래 설명 참조 | chain termination(`recover_tea_rename_stage_by_chain()`)으로 per-chain shadow RAT invalidate |
+| Early flush penalty는 full branch recovery보다 작음 | Case 1 PRE_DECODE/Case 2에 TEA 전용 param 적용, 나머지 Case 1은 `EXTRA_EARLY_RECOVERY_CYCLES` 사용 | 논문 의도와 맞게 late recovery penalty보다 작은 latency class로 모델링 |
 
 **논문과 Scarab 구현의 차이점 (중요)**: 논문(§IV-F)은 TEA thread가 main thread보다 멀리 앞서가면 shadow RAT를 checkpoint해뒀다가 recovery 시 복원한다고 설명한다. Scarab의 SRT checkpoint(`reg_file_snapshot_srt()`, `map_rename.c:532`)는 main RAT(Speculative Register Table)를 저장하며, TEA Shadow RAT와는 별개다. TEA Shadow RAT는 chain termination 시 `tea_thread.c:1090`의 `recover_tea_rename_stage_by_chain()`으로 정리되고, `tea_thread.c:1131` 주석("Shadow RAT was already invalidated by recover_tea_rename_stage_by_chain")이 이를 확인한다. 즉, Scarab에서 Shadow RAT "fix"는 논문처럼 checkpoint rollback이 아니라 chain terminate 시 per-chain invalidation으로 구현된다. 이 차이는 기존 Scarab 설계이며, Case 1 early flush 계획은 이 구조를 그대로 따른다.
 
 **Partial FTQ flush가 "full misprediction penalty 절약"을 달성하는 이유**: 논문은 "FTQ가 partial flush되면 full penalty가 절약된다"고 말한다. Full FTQ flush를 하면 Main H2P보다 오래된 correct-path FT들도 버려지고, recovery address(Main H2P true NPC)부터 다시 fetch해도 Main H2P 자신은 그 NPC 이전에 위치하므로 건너뛰게 된다. Partial flush는 Main H2P를 포함한 prefix를 보존해, Main H2P의 동일 dynamic instance가 pipeline에서 계속 진행된다 — 이때 misprediction은 이미 감지되어 backend flush가 진행 중이므로, frontend는 correct-path로 즉시 이어갈 수 있다. 이것이 "full misprediction penalty 절약"의 실체다.
+
+## 빌드 후 추가 코드 리뷰 반영 완료
+
+Case 1 early flush 1차 구현 후 시뮬레이션 전 코드 리뷰에서 확인한 사항은 다음처럼 반영되었다.
+
+### 1. `ic->current_ft`에도 `redirect_to_icache` 적용
+
+`recover_icache_stage()`는 preserved `uc->current_ft`와 `ic->current_ft`를 대칭적으로 처리한다. DFE FTQ에 남아 있고 아직 fetch 가능한 FT이면 `ft_mark_redirect_to_icache()`를 설정한 뒤 current pointer를 NULL 처리한다. 이미 fetch 가능한 op가 없으면 `ft_set_consumed()`를 호출해 다음 arbitration에서 skip되게 한다.
+
+이 플래그는 RESTEER 후 `ft_arbitration()`에서 감지되며, uop-cache lookup을 FT start 기준으로 다시 시도하지 않고 icache path로 강제한다. 따라서 recovery 직전 일부 serve된 FT의 `op_pos`와 uop-cache lookup buffer가 어긋나는 문제를 피한다.
+
+### 2. Dynamic TEA recovery penalty 적용
+
+Case 1 immediate recovery는 더 이상 `EXTRA_LATE_RECOVERY_CYCLES`를 사용하지 않는다.
+
+- Case 1 PRE_DECODE: `TEA_CASE1_PRE_DECODE_RECOVERY_CYCLES`
+- Case 1 그 외 stage: `EXTRA_EARLY_RECOVERY_CYCLES`
+- Case 2: `TEA_CASE2_RECOVERY_CYCLES`
+
+`TEA_CASE1_PRE_DECODE_RECOVERY_CYCLES`와 `TEA_CASE2_RECOVERY_CYCLES`는 `core.param.def`에 param으로 추가되었고, `PARAMS.golden_cove` 기본값은 각각 2와 10이다. 이 값들은 기존 `EXTRA_*_RECOVERY_CYCLES`와 동일하게 `bp_sched_recovery()`의 extra penalty 인자이며, 실제 recovery cycle은 `detect_cycle + 1 + penalty`다.
+
+### 3. Pending Case 1 주석 정리
+
+`tea_thread.h`의 Case 1 pending 설명은 최신 Option A 설계에 맞게 정리했다. 현재 primary path는 TEA detect cycle에 Main H2P로 즉시 `bp_sched_recovery()`를 호출한다. Pending table과 `exec_stage_tea_pending_flush_at_rename()`은 legacy/dormant rename-time scheduling infrastructure로 남아 있으며, 정상적인 Option A 실행에서는 pending table이 populate되지 않는다.
 
 ## 최종 correctness checklist
 
@@ -450,14 +486,16 @@ FDIP 영향은 기존 memory/fetch stat으로 같이 본다.
 - Main H2P가 icache output buffer에 있을 때 `recover_icache_stage()`가 assert하지 않고 해당 op를 보존한다.
 - Recovery 이후 DFE는 Main H2P true NPC에서 새 op를 생성하고, 새 op_num은 `recovery_op_num + 1`부터 시작한다.
 - `op_count[]`는 preserved FTQ의 다음 unfetched op_num으로 보정되어 debug/stat이 일관된다 (fetch 순서 자체는 FT::op_pos가 제어).
+- Preserved `uc->current_ft`와 `ic->current_ft`가 partially consumed 상태이면 `redirect_to_icache`를 통해 recovery 직후 uop-cache lookup을 skip한다.
 - FDIP iterator는 erased suffix를 가리키지 않는다.
 - Case 1 recovery가 consume된 뒤 Main H2P가 main exec에서 다시 `bp_sched_recovery()`를 호출하지 않는다.
-- 기존 pending rename hook은 fallback으로 남지만, Option A 정상 경로에서는 pending table이 채워지지 않는다.
+- Case 1/Case 2 recovery penalty는 late recovery penalty가 아니라 TEA early flush 전용 정책을 따른다.
+- 기존 pending rename hook은 legacy/dormant path로 남지만, Option A 정상 경로에서는 pending table이 채워지지 않는다.
 
 ## 검증 절차
 
 1. `tea_baseline` 단일 config로 먼저 smoke run
 2. assert 없이 완료되는지 확인
-3. `TEA_EARLY_FLUSH_CASE1_IMMEDIATE`, `TEA_EARLY_FLUSH_CASE1_PENDING_TRIGGERED`, `TEA_EARLY_FLUSH_CASE1_TO_RECOVERY_AVG` 확인
+3. `TEA_EARLY_FLUSH_CASE1_IMMEDIATE`, `TEA_EARLY_FLUSH_CASE1_PENDING_TRIGGERED`, `TEA_EARLY_FLUSH_CASE1_TO_SCHEDULE_SAMPLES`, `TEA_EARLY_FLUSH_CASE1_TO_RECOVERY_AVG` 확인
 4. FDIP 관련 `ICACHE_*_FDIP*`, `FDIP_AVG_FTQ_OCCUPANCY*`가 비정상적으로 폭증하지 않는지 확인
 5. 이후 `tea_baseline`, `tea_perfect_load_5cycle`, `tea_perfect_load_1cycle` 세 config를 모두 돌려 Case 1 증가분이 실제 IPC 개선으로 이어지는지 비교

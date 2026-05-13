@@ -44,12 +44,12 @@ typedef enum Tea_State_enum {
 } Tea_State;
 
 /**************************************************************************************/
-/* Case 1 Pending Early Flush */
+/* Case 1 Main Stage and Legacy Pending Early Flush */
 
-/* When TEA detects a mispredicted H2P branch (Case 1) before the main thread's
- * SRT checkpoint exists, we cannot call bp_sched_recovery immediately.  Instead
- * we record the intent here and trigger recovery the moment the main H2P reaches
- * rename and its SRT checkpoint is created. */
+/* Current Case 1 handling schedules recovery immediately from exec_stage when TEA
+ * detects the H2P misprediction before the main thread's SRT checkpoint exists.
+ * The pending table below is retained only as legacy rename-time scheduling
+ * infrastructure; the normal Option A path does not populate it. */
 typedef enum Tea_Case1_Main_Stage_enum {
   TEA_CASE1_MAIN_STAGE_UNKNOWN,
   TEA_CASE1_MAIN_STAGE_PRE_DECODE,
@@ -161,7 +161,7 @@ typedef struct Tea_Thread_struct {
   Counter tea_op_counter;         /* Global TEA op_num counter (starts at 0x8000...0) */
   Counter tea_start_cycle;
 
-  /* Case 1 pending early flushes (max one per chain slot) */
+  /* Legacy Case 1 pending early flushes (max one per chain slot) */
   Tea_Pending_Case1_Flush pending_case1_flushes[MAX_TEA_CHAINS];
 
   /* Statistics */
@@ -214,7 +214,7 @@ void tea_chain_note_load_result(uns proc_id, Op* op,
                                 Counter latency);
 void tea_record_h2p_load_miss_impact(uns proc_id, Op* tea_h2p);
 
-/* Case 1 pending early flush management */
+/* Legacy Case 1 pending early flush management */
 Flag tea_record_pending_case1_flush(uns proc_id, Op* main_h2p,
                                     Counter detect_cycle,
                                     Tea_Case1_Main_Stage main_stage_at_detect);

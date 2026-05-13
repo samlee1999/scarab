@@ -34,6 +34,8 @@ class Decoupled_FE {
   Op* ftq_iter_get_next(decoupled_fe_iter* iter, bool* end_of_ft);
   uint64_t ftq_num_ops();
   uint64_t ftq_num_fts() { return ftq.size(); }
+  bool ftq_contains_ft(FT* ft);
+  Counter ftq_next_unfetched_op_num_or(Counter fallback);
   void stall(Op* op);
   void retire(Op* op, int op_proc_id, uns64 inst_uid);
   void set_ftq_num(uint64_t set_ftq_ft_num) { ftq_ft_num = set_ftq_ft_num; }
@@ -101,6 +103,31 @@ void reset_decoupled_fe() {
 
 void recover_decoupled_fe() {
   dfe->recover();
+}
+
+bool Decoupled_FE::ftq_contains_ft(FT* ft) {
+  if (!ft) return false;
+  for (auto& entry : ftq) {
+    if (&entry == ft) return true;
+  }
+  return false;
+}
+
+Counter Decoupled_FE::ftq_next_unfetched_op_num_or(Counter fallback) {
+  for (auto& ft : ftq) {
+    Counter op_num = ft.next_unfetched_op_num_or(MAX_CTR);
+    if (op_num != MAX_CTR)
+      return op_num;
+  }
+  return fallback;
+}
+
+Flag decoupled_fe_ftq_contains_ft(FT* ft) {
+  return dfe->ftq_contains_ft(ft) ? TRUE : FALSE;
+}
+
+Counter decoupled_fe_next_unfetched_op_num_or(Counter fallback) {
+  return dfe->ftq_next_unfetched_op_num_or(fallback);
 }
 
 void debug_decoupled_fe() {
@@ -220,22 +247,75 @@ void Decoupled_FE::recover() {
   cur_op = nullptr;
   recovery_addr = bp_recovery_info->recovery_fetch_addr;
 
-  for (auto it = ftq.begin(); it != ftq.end(); it++) {
-    it->free_ops_and_clear();
-  }
-  ftq.clear();
+  Counter recovery_op_num = bp_recovery_info->recovery_op_num;
 
-  current_ft_to_push.free_ops_and_clear();
+  /* --- current_ft_to_push: trim or discard --- */
+  bool current_ft_has_preserved = false;
+  for (auto* op : current_ft_to_push.ops) {
+    if (op->op_num <= recovery_op_num) {
+      current_ft_has_preserved = true;
+      break;
+    }
+  }
+  if (current_ft_has_preserved) {
+    /* Trim wrong-path suffix, set synthetic ended_by, force-materialize to FTQ */
+    current_ft_to_push.free_ops_after_opnum(recovery_op_num);
+    if (!current_ft_to_push.ops.empty()) {
+      current_ft_to_push.ft_info.dynamic_info.ended_by = FT_ICACHE_LINE_BOUNDARY;
+      Op* last_op = current_ft_to_push.ops.back();
+      current_ft_to_push.ft_info.static_info.length =
+        last_op->inst_info->addr + last_op->inst_info->trace_info.inst_size -
+        current_ft_to_push.ft_info.static_info.start;
+      current_ft_to_push.ft_info.static_info.n_uops = current_ft_to_push.ops.size();
+      current_ft_to_push.set_per_op_ft_info();
+      ftq.emplace_back(current_ft_to_push);
+    }
+  } else {
+    current_ft_to_push.free_ops_and_clear();
+  }
+  current_ft_to_push = FT(proc_id);
   current_ft_to_push.set_ft_started_by(FT_STARTED_BY_RECOVERY);
 
-  dfe_op_count = bp_recovery_info->recovery_op_num + 1;
-  DEBUG(proc_id, "Recovery signalled fetch_addr0x:%llx\n", bp_recovery_info->recovery_fetch_addr);
+  /* --- Partial FTQ flush: erase wrong-path suffix, trim FT containing recovery point --- */
+  for (int i = (int)ftq.size() - 1; i >= 0; i--) {
+    FT& ft = ftq[i];
+    if (ft.ops.empty()) continue;
+    if (ft.ops.front()->op_num > recovery_op_num) {
+      ft.free_ops_and_clear();
+    } else {
+      ft.free_ops_after_opnum(recovery_op_num);
+      break;
+    }
+  }
+  while (!ftq.empty() && ftq.back().ops.empty()) {
+    ftq.pop_back();
+  }
 
-  for (auto it = ftq_iterators.begin(); it != ftq_iterators.end(); it++) {
-    // When the FTQ flushes, reset all iterators
-    it->ft_pos = 0;
-    it->op_pos = 0;
-    it->flattened_op_pos = 0;
+  dfe_op_count = recovery_op_num + 1;
+
+  DEBUG(proc_id, "Partial recovery fetch_addr0x:%llx preserved_fts:%zu\n",
+        bp_recovery_info->recovery_fetch_addr, ftq.size());
+
+  /* --- Clamp FDIP iterators to FTQ end if they point into the erased suffix --- */
+  uint64_t preserved_ops = 0;
+  for (const auto& ft : ftq)
+    preserved_ops += ft.ops.size();
+
+  for (auto& it : ftq_iterators) {
+    if (ftq.empty()) {
+      it.ft_pos = 0;
+      it.op_pos = 0;
+      it.flattened_op_pos = 0;
+    } else {
+      bool needs_clamp = (it.ft_pos >= ftq.size());
+      if (!needs_clamp && it.ft_pos < ftq.size())
+        needs_clamp = (it.op_pos >= ftq[it.ft_pos].ops.size());
+      if (needs_clamp) {
+        it.ft_pos = ftq.size();
+        it.op_pos = 0;
+        it.flattened_op_pos = preserved_ops;
+      }
+    }
   }
 
   auto op = bp_recovery_info->recovery_op;
@@ -438,8 +518,9 @@ void Decoupled_FE::update() {
                           current_ft_to_push.ops.size());
       ASSERT(proc_id, current_ft_to_push.ops.front()->bom && current_ft_to_push.ops.back()->eom);
       current_ft_to_push.set_per_op_ft_info();
-      if (!ftq.empty()) {
-        // sanity check of consecutivity
+      if (!ftq.empty() &&
+          current_ft_to_push.ft_info.dynamic_info.started_by != FT_STARTED_BY_RECOVERY) {
+        // sanity check of consecutivity (skip for first FT after recovery)
         Op* last_op = ftq.back().ops.back();
         if (ftq.back().ft_info.dynamic_info.ended_by == FT_TAKEN_BRANCH) {
           ASSERT(proc_id, last_op->oracle_info.pred_npc == current_ft_to_push.ft_info.static_info.start);

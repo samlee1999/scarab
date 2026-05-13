@@ -219,15 +219,29 @@ void recover_icache_stage() {
   ASSERT(ic->proc_id, ic->proc_id == bp_recovery_info->proc_id);
   DEBUG(ic->proc_id, "Icache stage recovery signaled.  recovery_fetch_addr: 0x%s\n",
         hexstr64s(bp_recovery_info->recovery_fetch_addr));
+  /* Partial flush: preserve ops with op_num <= recovery_op_num */
+  uns preserved = 0;
   for (ii = 0; ii < cur_data->max_op_count; ii++) {
     if (cur_data->ops[ii]) {
-      ASSERT(ic->proc_id, FLUSH_OP(cur_data->ops[ii]));
-      ASSERT(ic->proc_id, cur_data->ops[ii]->off_path);
-      free_op(cur_data->ops[ii]);
-      cur_data->ops[ii] = NULL;
+      if (FLUSH_OP(cur_data->ops[ii])) {
+        free_op(cur_data->ops[ii]);
+        cur_data->ops[ii] = NULL;
+      } else {
+        preserved++;
+      }
     }
   }
-  cur_data->op_count = 0;
+  /* Compact preserved ops to the front of the buffer */
+  uns write_pos = 0;
+  for (ii = 0; ii < cur_data->max_op_count; ii++) {
+    if (cur_data->ops[ii]) {
+      cur_data->ops[write_pos] = cur_data->ops[ii];
+      if (write_pos != ii)
+        cur_data->ops[ii] = NULL;
+      write_pos++;
+    }
+  }
+  cur_data->op_count = preserved;
 
   ic->back_on_path = !bp_recovery_info->recovery_force_offpath;
 
@@ -238,14 +252,40 @@ void recover_icache_stage() {
   } else {
     ic->icache_stage_resteer_signaled = TRUE;
   }
-  op_count[ic->proc_id] = bp_recovery_info->recovery_op_num + 1;
+  /* Use first unfetched op in preserved FTQ for the debug counter, or recovery_op_num+1 */
+  op_count[ic->proc_id] =
+    decoupled_fe_next_unfetched_op_num_or(bp_recovery_info->recovery_op_num + 1);
 
   uop_cache_clear_lookup_buffer();
 
   if (UOP_CACHE_ENABLE) {
-    uc->current_ft = NULL;
+    if (uc->current_ft) {
+      if (decoupled_fe_ftq_contains_ft(uc->current_ft)) {
+        if (ft_can_fetch_op(uc->current_ft)) {
+          /* Partially consumed preserved FT: lookup buffer was cleared, so uop-cache
+           * cannot resume mid-FT.  Flag it so ft_arbitration() forces the icache path,
+           * which serves correctly from the current op_pos. */
+          ft_mark_redirect_to_icache(uc->current_ft);
+        } else {
+          ft_set_consumed(uc->current_ft);
+        }
+      }
+      uc->current_ft = NULL;
+    }
   }
-  ic->current_ft = NULL;
+  if (ic->current_ft) {
+    if (decoupled_fe_ftq_contains_ft(ic->current_ft)) {
+      if (ft_can_fetch_op(ic->current_ft)) {
+        /* Partially consumed preserved FT served via icache: lookup buffer was cleared,
+         * so a uop-cache re-lookup would fill from position 0, mismatching op_pos.
+         * Mark redirect so ft_arbitration() forces the icache path on the next pick. */
+        ft_mark_redirect_to_icache(ic->current_ft);
+      } else {
+        ft_set_consumed(ic->current_ft);
+      }
+    }
+    ic->current_ft = NULL;
+  }
 }
 
 /**************************************************************************************/
@@ -428,7 +468,12 @@ FT_Arbitration_Result ft_arbitration() {
     ASSERT_PROC_ID_IN_ADDR(ic->proc_id, ic->fetch_addr);
 
     // look up uop cache
-    Flag ft_in_uop_cache = uop_cache_lookup_ft_and_fill_lookup_buffer(ft_info, ic->off_path);
+    // Skip uop-cache if FT was flagged for icache redirect after a partial recovery:
+    // lookup buffer was cleared mid-FT, so re-reading from FT start would mismatch op_pos.
+    Flag force_icache = UOP_CACHE_ENABLE && ft_check_and_clear_redirect_to_icache(ft);
+    Flag ft_in_uop_cache = force_icache
+                               ? FALSE
+                               : uop_cache_lookup_ft_and_fill_lookup_buffer(ft_info, ic->off_path);
 
     // look up icache if uop miss (inlcuding when uop cache disabled) or if requested
     if (!ft_in_uop_cache || ALWAYS_LOOKUP_ICACHE) {

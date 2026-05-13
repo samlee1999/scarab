@@ -899,7 +899,7 @@ static inline void exec_stage_bp_resolve(Op* op) {
         if (reg_file_checkpoint_is_valid()) {
           /* Case 2: SRT checkpoint present → schedule recovery at Main H2P */
           bp_sched_recovery(bp_recovery_info, main_h2p, op->exec_cycle,
-                            FALSE, FALSE, EXTRA_LATE_RECOVERY_CYCLES);
+                            FALSE, FALSE, TEA_CASE2_RECOVERY_CYCLES);
           if (main_h2p->oracle_info.recovery_sch) {
             main_h2p->recovery_scheduled = TRUE;
             tea_mark_early_flush_detection(main_h2p, op->exec_cycle);
@@ -926,20 +926,31 @@ static inline void exec_stage_bp_resolve(Op* op) {
           /* cmp_recover() → recover_tea_on_flush(proc_id, recovery_op_num)
            * will terminate chains with target_h2p_op_num >= recovery_op_num. */
         } else {
-          /* Case 1: No SRT checkpoint yet — record pending flush so recovery
-           * fires when main H2P reaches rename and the checkpoint is created. */
+          /* Case 1: No SRT checkpoint yet — schedule recovery immediately.
+           * Partial FTQ flush preserves Main H2P and correct-path prefix. */
           Tea_Case1_Main_Stage main_stage_at_detect =
             tea_classify_case1_main_stage(main_h2p);
           tea_record_case1_main_stage(op->proc_id, main_stage_at_detect,
                                       main_h2p);
-          Flag pending_recorded =
-            tea_record_pending_case1_flush(op->proc_id, main_h2p,
-                                           op->exec_cycle,
-                                           main_stage_at_detect);
-          if (pending_recorded) {
-            tea_mark_early_flush_detection(main_h2p, op->exec_cycle);
+          const uns case1_recovery_penalty =
+            (main_stage_at_detect == TEA_CASE1_MAIN_STAGE_PRE_DECODE) ?
+              TEA_CASE1_PRE_DECODE_RECOVERY_CYCLES :
+              EXTRA_EARLY_RECOVERY_CYCLES;
+          bp_sched_recovery(bp_recovery_info, main_h2p, op->exec_cycle,
+                            FALSE, FALSE, case1_recovery_penalty);
+          if (main_h2p->oracle_info.recovery_sch) {
+            main_h2p->recovery_scheduled = TRUE;
+            main_h2p->tea_case1_pending_recovery = TRUE;
             main_h2p->tea_case1_detect_cycle = op->exec_cycle;
+            tea_mark_early_flush_detection(main_h2p, op->exec_cycle);
             STAT_EVENT(op->proc_id, TEA_EARLY_FLUSHES);
+            STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_IMMEDIATE);
+            if (main_stage_at_detect == TEA_CASE1_MAIN_STAGE_PRE_DECODE) {
+              if (main_h2p->fetch_cycle == 0)
+                STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_IMMEDIATE_FTQ);
+              else
+                STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_IMMEDIATE_FETCHED);
+            }
             tea_record_early_flush_time_to_detect(
               op->proc_id, c, op,
               TEA_EARLY_FLUSH_TRIGGER_TO_DETECT_SAMPLES,
@@ -961,8 +972,9 @@ static inline void exec_stage_bp_resolve(Op* op) {
             STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_NO_CHKPT);
           else
             STAT_EVENT(op->proc_id, TEA_EARLY_FLUSH_CASE1_DECODE);
-          terminate_tea_chain_with_reason(op->proc_id, chain_slot,
-                                          TEA_CHAIN_TERM_REASON_EARLY_FLUSH_CASE1);
+          /* Do NOT call terminate_tea_chain_with_reason() — chain cleanup is
+           * handled by cmp_recover() → recover_tea_on_flush() next cycle,
+           * same as Case 2. */
         }
       } else {
         if (!main_h2p->tea_early_flush_detected) {
@@ -1001,7 +1013,7 @@ static inline void exec_stage_bp_resolve(Op* op) {
     bp_resolve_op(g_bp_data, op);
   }
 
-  if(op->oracle_info.recover_at_exec) { //(op->oracle_info.mispred || op->oracle_info.misfetch)
+  if(op->oracle_info.recover_at_exec && !op->oracle_info.recovery_sch) { //(op->oracle_info.mispred || op->oracle_info.misfetch)
     bp_sched_recovery(bp_recovery_info, op, op->exec_cycle, FALSE, FALSE, EXTRA_LATE_RECOVERY_CYCLES);
     log_misprediction_detection_at_exec(op, node, cycle_count, bp_recovery_info); // 추가
     if (!op->off_path)
@@ -1027,6 +1039,13 @@ static inline void exec_stage_bp_resolve(Op* op) {
 
 /**************************************************************************************/
 /* exec_stage_tea_pending_flush_at_rename
+ * Dormant legacy path from the older Case 1 design.  The current Option A
+ * implementation calls bp_sched_recovery() immediately from exec_stage_bp_resolve();
+ * no active caller populates pending_case1_flushes[], so normal execution should
+ * never trigger this path.  It remains only to document the old rename-time
+ * scheduling mechanism and to keep the pending table code buildable while the
+ * immediate Case 1 path is validated.
+ *
  * Called ONLY from inside the `!reg_file_checkpoint_is_valid()` branch of the rename
  * stage, immediately after reg_file_snapshot_srt().  This guarantees the SRT checkpoint
  * was just created by 'op' — i.e., the checkpoint belongs to 'op'.

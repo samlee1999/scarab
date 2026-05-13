@@ -1171,6 +1171,12 @@ void reg_renaming_scheme_late_allocation_recover(Op *op) {
   if (op->oracle_info.recover_at_decode)
     return;
 
+  /* TEA Case 1: No SRT checkpoint means recovery_op has not yet passed rename.
+   * In-order rename guarantees no ops after it have been renamed either,
+   * so there are no off-path pregs to free and no SRT rollback needed. */
+  if (!reg_file_checkpoint_is_valid())
+    return;
+
   // rollback to the status that does not contain any off_path entries
   reg_file_rollback_srt();
 

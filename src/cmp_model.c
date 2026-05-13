@@ -571,6 +571,8 @@ void cmp_recover() {
       tea_early_recovery_op->op_pool_valid) {
     if (tea_early_recovery_op->recovery_scheduled)
       tea_early_recovery_op->recovery_scheduled = FALSE;
+    if (tea_case1_recovery)
+      tea_early_recovery_op->oracle_info.recover_at_exec = FALSE;
   }
 
   log_recovery_end(node, cycle_count, bp_recovery_info);

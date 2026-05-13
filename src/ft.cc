@@ -38,7 +38,7 @@
 #define DEBUG(proc_id, args...) _DEBUG(proc_id, DEBUG_DECOUPLED_FE, ##args)
 
 /* FT member functions */
-FT::FT(uns _proc_id) : proc_id(_proc_id), consumed(false) {
+FT::FT(uns _proc_id) : proc_id(_proc_id), consumed(false), redirect_to_icache(false) {
   free_ops_and_clear();
 }
 
@@ -56,6 +56,52 @@ void FT::free_ops_and_clear() {
   ft_info.dynamic_info.started_by = FT_NOT_STARTED;
   ft_info.dynamic_info.ended_by = FT_NOT_ENDED;
   ft_info.dynamic_info.first_op_off_path = FALSE;
+  redirect_to_icache = false;
+}
+
+void FT::free_ops_after_opnum(Counter recovery_op_num) {
+  /* Find the first op index with op_num > recovery_op_num */
+  size_t first_wrong = ops.size();
+  for (size_t i = 0; i < ops.size(); i++) {
+    if (ops[i]->op_num > recovery_op_num) {
+      first_wrong = i;
+      break;
+    }
+  }
+
+  /* Free unfetched wrong-path ops (already-fetched ones are freed by recover_icache_stage) */
+  size_t free_start = ((size_t)op_pos > first_wrong) ? (size_t)op_pos : first_wrong;
+  for (size_t i = free_start; i < ops.size(); i++) {
+    free_op(ops[i]);
+  }
+
+  ops.resize(first_wrong);
+  if ((size_t)op_pos > ops.size())
+    op_pos = ops.size();
+
+  ft_info.static_info.n_uops = (int)ops.size();
+  if (!ops.empty() && ft_info.dynamic_info.ended_by != FT_NOT_ENDED) {
+    Op* last = ops.back();
+    ft_info.static_info.length =
+      last->inst_info->addr + last->inst_info->trace_info.inst_size -
+      ft_info.static_info.start;
+  }
+  /* Propagate updated ft_info (trimmed length/n_uops) to remaining ops */
+  set_per_op_ft_info();
+}
+
+bool FT::contains_op_num(Counter target_op_num) const {
+  for (const auto* op : ops) {
+    if (op->op_num == target_op_num)
+      return true;
+  }
+  return false;
+}
+
+Counter FT::next_unfetched_op_num_or(Counter fallback) const {
+  if (op_pos < ops.size())
+    return ops[op_pos]->op_num;
+  return fallback;
 }
 
 bool FT::can_fetch_op() {
@@ -148,6 +194,16 @@ std::vector<Op*>& FT::get_ops() {
   return ops;
 }
 
+void FT::mark_redirect_to_icache() {
+  redirect_to_icache = true;
+}
+
+bool FT::check_and_clear_redirect_to_icache() {
+  bool v = redirect_to_icache;
+  redirect_to_icache = false;
+  return v;
+}
+
 /* FT wrappers */
 bool ft_can_fetch_op(FT* ft) {
   return ft->can_fetch_op();
@@ -167,4 +223,12 @@ void ft_set_consumed(FT* ft) {
 
 FT_Info ft_get_ft_info(FT* ft) {
   return ft->get_ft_info();
+}
+
+void ft_mark_redirect_to_icache(FT* ft) {
+  ft->mark_redirect_to_icache();
+}
+
+Flag ft_check_and_clear_redirect_to_icache(FT* ft) {
+  return ft->check_and_clear_redirect_to_icache() ? TRUE : FALSE;
 }

@@ -190,6 +190,8 @@ DEF_PARAM(icache_latency, ICACHE_LATENCY, uns, uns, 3, )
 DEF_PARAM(extra_redirect_cycles, EXTRA_REDIRECT_CYCLES, uns, uns, 0, )
 DEF_PARAM(extra_late_recovery_cycles, EXTRA_LATE_RECOVERY_CYCLES, uns, uns, 0, )
 DEF_PARAM(extra_early_recovery_cycles, EXTRA_EARLY_RECOVERY_CYCLES, uns, uns, 0, )
+DEF_PARAM(tea_case1_pre_decode_recovery_cycles, TEA_CASE1_PRE_DECODE_RECOVERY_CYCLES, uns, uns, 0, )
+DEF_PARAM(tea_case2_recovery_cycles, TEA_CASE2_RECOVERY_CYCLES, uns, uns, 0, )
 DEF_PARAM(extra_callsys_cycles, EXTRA_CALLSYS_CYCLES, uns, uns, 20,
           const) /* const */
 DEF_PARAM(die_on_callsys, DIE_ON_CALLSYS, Flag, Flag, FALSE, )
