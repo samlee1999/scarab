@@ -246,7 +246,10 @@ void decode_stage_process_op(Op* op) {
     // If the CF was unconditional and direct and taken and there was a BTB miss
     // we can schedule a redirect. If the branch was not taken we are on the on-path.
     // If the branch is condidtional or indirect, we will schedule recovery at exec
-    if (op->oracle_info.recover_at_decode) {
+    /* TEA early flush may already have scheduled recovery for this op while
+     * preserving it through the partial front-end flush.  In that case the
+     * scheduled recovery owns the redirect; decode must not schedule it again. */
+    if (op->oracle_info.recover_at_decode && !op->oracle_info.recovery_sch) {
       bp_sched_recovery(bp_recovery_info, op, cycle_count,
                         /*late_bp_recovery=*/FALSE, /*force_offpath=*/FALSE, EXTRA_EARLY_RECOVERY_CYCLES);
       log_misprediction_detection_at_decode(op, node, cycle_count, bp_recovery_info);

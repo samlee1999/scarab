@@ -569,10 +569,12 @@ void cmp_recover() {
 
   if (tea_early_recovery && tea_early_recovery_op &&
       tea_early_recovery_op->op_pool_valid) {
-    if (tea_early_recovery_op->recovery_scheduled)
-      tea_early_recovery_op->recovery_scheduled = FALSE;
-    if (tea_case1_recovery)
-      tea_early_recovery_op->oracle_info.recover_at_exec = FALSE;
+    tea_early_recovery_op->recovery_scheduled = FALSE;
+    /* Clear decode/exec recovery triggers so the preserved main H2P op does not
+     * re-schedule a recovery when it later passes through decode or exec stage.
+     * Both Case 1 and Case 2 partial flushes keep main H2P alive in the pipeline. */
+    tea_early_recovery_op->oracle_info.recover_at_decode = FALSE;
+    tea_early_recovery_op->oracle_info.recover_at_exec   = FALSE;
   }
 
   log_recovery_end(node, cycle_count, bp_recovery_info);
