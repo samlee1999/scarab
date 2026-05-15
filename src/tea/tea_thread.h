@@ -145,7 +145,7 @@ typedef struct Tea_H2P_Chain_struct {
 /**************************************************************************************/
 /* TEA Thread Structure */
 
-#define MAX_TEA_CHAINS 16  /* Compile-time capacity; runtime limit = TEA_MAX_CHAINS */
+#define MAX_TEA_CHAINS 32  /* Compile-time capacity; runtime limit = TEA_MAX_CHAINS */
 #define TEA_OP_NUM_BASE 0x8000000000000000ULL
 
 typedef struct Tea_Thread_struct {

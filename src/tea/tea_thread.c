@@ -185,7 +185,9 @@ static void record_chain_depth_bucket(uns proc_id, uns active, Flag trigger_buck
     else if (active == 4) STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_4);
     else if (active <= 8) STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_5_8);
     else if (active <= 12) STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_9_12);
-    else                  STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_13_16);
+    else if (active <= 16) STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_13_16);
+    else if (active <= 24) STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_17_24);
+    else                   STAT_EVENT(proc_id, TEA_TRIGGER_ACTIVE_CHAINS_25_32);
   } else {
     if      (active == 1) STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_1);
     else if (active == 2) STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_2);
@@ -193,8 +195,20 @@ static void record_chain_depth_bucket(uns proc_id, uns active, Flag trigger_buck
     else if (active == 4) STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_4);
     else if (active <= 8) STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_5_8);
     else if (active <= 12) STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_9_12);
-    else                  STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_13_16);
+    else if (active <= 16) STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_13_16);
+    else if (active <= 24) STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_17_24);
+    else                   STAT_EVENT(proc_id, TEA_ACTIVE_CHAINS_25_32);
   }
+}
+
+static Flag tea_h2p_oracle_mispred(Op* h2p_op) {
+  return h2p_op->oracle_info.mispred || h2p_op->oracle_info.misfetch;
+}
+
+static void record_trigger_oracle_split(uns proc_id, Flag oracle_mispred,
+                                        Stat_Enum mispred_stat,
+                                        Stat_Enum correct_stat) {
+  STAT_EVENT(proc_id, oracle_mispred ? mispred_stat : correct_stat);
 }
 
 static void update_max_active_chains(uns proc_id, Tea_Thread* tea, uns active) {
@@ -940,7 +954,11 @@ void trigger_tea_thread(uns proc_id, Addr h2p_pc, Counter h2p_op_num, Op* h2p_op
   ASSERT(proc_id, h2p_op);
 
   Tea_Thread* tea = tea_threads[proc_id];
+  Flag oracle_mispred = tea_h2p_oracle_mispred(h2p_op);
   STAT_EVENT(proc_id, TEA_TRIGGER_ATTEMPTS);
+  record_trigger_oracle_split(proc_id, oracle_mispred,
+                              TEA_TRIGGER_ORACLE_MISPRED,
+                              TEA_TRIGGER_ORACLE_CORRECT);
   record_trigger_main_stage(proc_id, h2p_op);
 
   /* Find an empty chain slot */
@@ -955,6 +973,9 @@ void trigger_tea_thread(uns proc_id, Addr h2p_pc, Counter h2p_op_num, Op* h2p_op
   }
   if (slot < 0) {
     STAT_EVENT(proc_id, TEA_TRIGGER_SKIP_FULL);
+    record_trigger_oracle_split(proc_id, oracle_mispred,
+                                TEA_TRIGGER_SKIP_FULL_ORACLE_MISPRED,
+                                TEA_TRIGGER_SKIP_FULL_ORACLE_CORRECT);
     return;
   }
 
@@ -962,8 +983,14 @@ void trigger_tea_thread(uns proc_id, Addr h2p_pc, Counter h2p_op_num, Op* h2p_op
   Dependency_Chain_Cache_Entry* chain = get_dependency_chain(proc_id, h2p_pc);
   if (!chain || !chain->is_valid || chain->chain_length == 0) {
     STAT_EVENT(proc_id, TEA_TRIGGER_SKIP_NO_CHAIN);
+    record_trigger_oracle_split(proc_id, oracle_mispred,
+                                TEA_TRIGGER_SKIP_NO_CHAIN_ORACLE_MISPRED,
+                                TEA_TRIGGER_SKIP_NO_CHAIN_ORACLE_CORRECT);
     return;
   }
+  record_trigger_oracle_split(proc_id, oracle_mispred,
+                              TEA_TRIGGER_DCC_HIT_ORACLE_MISPRED,
+                              TEA_TRIGGER_DCC_HIT_ORACLE_CORRECT);
   record_chain_length_bucket(proc_id, chain->chain_length);
   record_dcc_trigger_entry_age(proc_id, chain, h2p_op);
 

@@ -486,6 +486,18 @@ void recover_tea_on_flush(uns proc_id, Counter recovery_op_num) {
     }
   }
 
+  /* Recovery invariant: no active TEA chain may still target an H2P that main
+   * recovery just flushed, and the active-chain count must match slot state. */
+  uns active_chains_after_recovery = 0;
+  for (int i = 0; i < max_chains; i++) {
+    Tea_H2P_Chain* c = &tea->chains[i];
+    if (c->state == CHAIN_INACTIVE) continue;
+
+    active_chains_after_recovery++;
+    ASSERT(proc_id, c->target_h2p_op_num < recovery_op_num);
+  }
+  ASSERT(proc_id, tea->num_active_chains == active_chains_after_recovery);
+
   tea_clear_stale_main_deps_after_recovery(proc_id, recovery_op_num);
 }
 
