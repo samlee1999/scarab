@@ -850,7 +850,7 @@ static inline void tea_record_main_h2p_exec_delta_if_needed(Op* op) {
 static inline void exec_stage_bp_resolve(Op* op) {
   /* TEA H2P branch: early misprediction detection and per-chain flush */
   if (TEA_ENABLE && op->thread_id == 1) {
-    STAT_EVENT(op->proc_id, TEA_OPS_EXECUTED);
+    STAT_EVENT(op->proc_id, TEA_CF_OPS_RESOLVED);
 
     if (!tea_is_active(op->proc_id))
       return;
