@@ -965,6 +965,11 @@ void trigger_tea_thread(uns proc_id, Addr h2p_pc, Counter h2p_op_num, Op* h2p_op
   int slot = -1;
   int max_chains = (int)tea_max_chains(proc_id);
   record_trigger_chain_pressure(proc_id, tea, max_chains);
+  /* Oracle upper-bound: correct main H2Ps should not consume TEA resources. */
+  if (TEA_TRIGGER_ORACLE_MISPRED_ONLY && !oracle_mispred) {
+    STAT_EVENT(proc_id, TEA_TRIGGER_SKIP_ORACLE_CORRECT);
+    return;
+  }
   for (int i = 0; i < max_chains; i++) {
     if (tea->chains[i].state == CHAIN_INACTIVE) {
       slot = i;

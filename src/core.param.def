@@ -385,6 +385,8 @@ DEF_PARAM(tea_preg_reservation, TEA_PREG_RESERVATION, uns, uns, 192, )
 DEF_PARAM(tea_store_buffer_size, TEA_STORE_BUFFER_SIZE, uns, uns, 64, )
 DEF_PARAM(tea_max_chains, TEA_MAX_CHAINS, uns, uns, 4, )
 DEF_PARAM(backward_walk_cycles, BACKWARD_WALK_CYCLES, uns, uns, 500, )
+/* [EXPERIMENT: TEA_TRIGGER_ORACLE_MISPRED_ONLY] Oracle upper-bound trigger filter */
+DEF_PARAM(tea_trigger_oracle_mispred_only, TEA_TRIGGER_ORACLE_MISPRED_ONLY, Flag, Flag, FALSE, )
 /* [EXPERIMENT: TEA_PERFECT_LOAD] Perfect-load sensitivity experiment parameters */
 DEF_PARAM(tea_perfect_load, TEA_PERFECT_LOAD, Flag, Flag, FALSE, )
 DEF_PARAM(tea_perfect_load_latency, TEA_PERFECT_LOAD_LATENCY, uns, uns, 0, )
