@@ -27,7 +27,6 @@
 --icache_size                   32768
 --icache_assoc                  8
 --icache_line_size              64
---icache_latency                4
 
 ### Uop Cache
 # inclusive w/ L1i
@@ -102,17 +101,15 @@
 
 # register renaming table
 --reg_renaming_scheme               1
-### Paper-style total PREG budget: Main + TEA = 400, with 192 reserved for TEA.
---reg_table_integer_physical_size   400
---reg_table_vector_physical_size    400
+--reg_table_integer_physical_size   280
+--reg_table_vector_physical_size    332
 
 ### TEA Thread
 ### Runtime active chain count. C arrays are compiled with a higher fixed capacity.
 ### tea_preg_reservation is split evenly across active chains in the current per-chain pool design.
 --tea_max_chains                4
 --tea_preg_reservation          192
---tea_rs_reservation            192
---fill_buffer_size              512
+--fill_buffer_size              1024
 
 ### Issue Stage
 
@@ -131,10 +128,10 @@
 # RS2 connected to port 2,3,9
 # RS3 connected to port 6,7 (port 4,9 removed, entries reduced to 19 from 38)
 # --rs_sizes                      97 70 19      # original (186 total)
-# --rs_sizes                      184 132 36    # 352 total
-### Paper-style total RS budget: Main + TEA = 352, with 192 reserved for TEA.
-### Proportional from original 97:70:19 -> 184:132:36.
---rs_sizes                      184 132 36
+# --rs_sizes                      184 132 36    # for TEA_Off (342 total)
+### RS total 544: original golden cove RS (352) + TEA reservation (192) added on top
+### proportional from original 97:70:19 → 285:204:55, main thread retains full 352 slots
+--rs_sizes                      285 204 55
 --rs_connections                b0100110011 b1000001100 b0011000000
 --fu_types                      b00100100111111100111001001111110010010011111110011100100111111 b10010000110111100011111001110111001000011011110001111100111011 b00000001000000001000000010000010000000100000000100000001000001 b00000001000000001000000010000010000000100000000100000001000001 b00000000110111100011011001110110000000011011110001101100111011 b01001000000000000111001001111110100100000000000011100100111111 b00000010000000010000000100000010000001000000001000000010000001 b00000010000000010000000100000010000001000000001000000010000001 b00000000000000000011001001110110000000000000000001100100111011 b00000001000000001000000010000010000000100000000100000001000001
 

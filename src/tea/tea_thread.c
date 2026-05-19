@@ -145,7 +145,8 @@ static int find_next_fetching_chain(uns proc_id) {
   Tea_Thread* tea = tea_threads[proc_id];
   int max_chains = (int)tea_max_chains(proc_id);
   int start = (tea->current_fetch_chain < 0) ? 0 : tea->current_fetch_chain;
-  for (int i = 0; i < max_chains; i++) {
+  int search_count = (tea->current_fetch_chain < 0) ? max_chains : max_chains - 1;
+  for (int i = 0; i < search_count; i++) {
     int idx = (start + 1 + i) % max_chains;
     if (tea->chains[idx].state == CHAIN_FETCHING)
       return idx;
