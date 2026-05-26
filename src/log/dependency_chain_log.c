@@ -3,9 +3,11 @@
 #include <string.h>
 #include "dependency_chain_log.h"
 #include "../globals/utils.h"
+#include "../globals/global_vars.h"
 #include "../table_info.h" 
 #include "../isa/isa.h" // NUM_REGS, Reg_Id 등을 위해 포함
 #include "debug/debug.param.h"
+#include "debug/debug_macros.h"
 #include "../debug/debug_print.h"
 
 extern char* OUTPUT_DIR;
@@ -63,11 +65,11 @@ static void close_dependency_chain_log(void) {
 }
 
 void init_dependency_chain_log(void) {
-    if (dependency_chain_log_file == NULL) {
+    if ((DEBUG_HBT || DEBUG_TEA) && dependency_chain_log_file == NULL) {
         dependency_chain_log_file = file_tag_fopen(OUTPUT_DIR, "dependency_chain", "w");
         if (dependency_chain_log_file) atexit(close_dependency_chain_log);
     }
-    if (block_cache_log_file == NULL) {
+    if ((DEBUG_HBT || DEBUG_TEA) && block_cache_log_file == NULL) {
         block_cache_log_file = file_tag_fopen(OUTPUT_DIR, "block_cache", "w");
         if (block_cache_log_file) atexit(close_dependency_chain_log);
     }
@@ -79,7 +81,7 @@ void finalize_dependency_chain_log(void) {
 
 void log_dependency_chain_entry(uns proc_id, Dependency_Chain_Cache_Entry* entry, Counter cycle_count) {
     if (!dependency_chain_log_file || !entry || !entry->is_valid||
-        !(cycle_count >= DEBUG_CYCLE_START && cycle_count <= DEBUG_CYCLE_STOP)) return;
+        !DEBUG_RANGE_COND(proc_id)) return;
 
     fprintf(dependency_chain_log_file, "--- [LOG] Dependency Chain for Core %u Cycle:%-4llu---\n", proc_id, cycle_count);
     fprintf(dependency_chain_log_file, "Index PC(H2P Branch PC): 0x%llx, OpNum: %llu, Chain Length: %u\n",
@@ -101,7 +103,7 @@ void log_dependency_chain_entry(uns proc_id, Dependency_Chain_Cache_Entry* entry
 
 void log_dependency_chain_block(uns proc_id, Dependency_Chain_Cache_Entry* entry, Counter cycle_count) {
     if (!block_cache_log_file || !entry || !entry->is_valid ||
-        !(cycle_count >= DEBUG_CYCLE_START && cycle_count <= DEBUG_CYCLE_STOP)) return;
+        !DEBUG_RANGE_COND(proc_id)) return;
 
     fprintf(block_cache_log_file, "--- [LOG] Dependency Chain Block for Core %u Cycle:%-4llu---\n", proc_id, cycle_count);
     fprintf(block_cache_log_file, "Index PC(Block Starting PC): 0x%llx, OpNum: %llu\n",
@@ -141,7 +143,7 @@ void log_dependency_chain_block(uns proc_id, Dependency_Chain_Cache_Entry* entry
 
 void log_full_cache_state(uns proc_id, Counter cycle_count) {
     if (!dependency_chain_log_file ||
-        !(cycle_count >= DEBUG_CYCLE_START && cycle_count <= DEBUG_CYCLE_STOP)) {
+        !DEBUG_RANGE_COND(proc_id)) {
         return;
     }
 

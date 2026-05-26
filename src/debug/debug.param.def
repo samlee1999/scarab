@@ -102,6 +102,7 @@ DEF_PARAM(  debug_exc_inserts,     DEBUG_EXC_INSERTS,     Flag,  Flag,  FALSE,  
 DEF_PARAM(  debug_bp_conf,         DEBUG_BP_CONF,         Flag,  Flag,  FALSE,  )
 DEF_PARAM(  debug_hbt,             DEBUG_HBT,             Flag,  Flag,  FALSE,  )
 DEF_PARAM(  debug_tea,             DEBUG_TEA,             Flag,  Flag,  FALSE,  )
+DEF_PARAM(  debug_tea_load_addr_log, DEBUG_TEA_LOAD_ADDR_LOG, Flag, Flag, FALSE, )
 DEF_PARAM(  debug_onpath_conf,     DEBUG_ONPATH_CONF,     Flag,  Flag,  FALSE,  )
 
 DEF_PARAM(  debug_stream,          DEBUG_STREAM,          Flag,  Flag,  FALSE,  )

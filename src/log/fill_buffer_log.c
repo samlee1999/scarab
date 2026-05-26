@@ -6,9 +6,11 @@
 
 #include "fill_buffer_log.h"
 #include "../globals/utils.h"
+#include "../globals/global_vars.h"
 #include "../isa/isa.h"
 #include "../table_info.h"
 #include "debug/debug.param.h"
+#include "debug/debug_macros.h"
 #include "../debug/debug_print.h"
 
 extern char* OUTPUT_DIR;
@@ -28,7 +30,7 @@ static void close_fill_buffer_log(void) {
 }
 
 void init_fill_buffer_log(void) {
-    if (fill_buffer_log_file == NULL) {
+    if ((DEBUG_HBT || DEBUG_TEA) && fill_buffer_log_file == NULL) {
         fill_buffer_log_file = file_tag_fopen(OUTPUT_DIR, "fill_buffer", "w");
         if (fill_buffer_log_file) atexit(close_fill_buffer_log);
     }
@@ -69,7 +71,7 @@ static char* disasm_retired_op(Op* op) {
 
 void log_fill_buffer_entry(uns proc_id, Fill_Buffer* fb, Counter cycle_count) {
     if (!fill_buffer_log_file || !fb || fb->count == 0 ||
-        !(cycle_count >= DEBUG_CYCLE_START && cycle_count <= DEBUG_CYCLE_STOP)) {
+        !DEBUG_RANGE_COND(proc_id)) {
         return;
     }
 

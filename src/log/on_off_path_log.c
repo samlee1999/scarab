@@ -3,9 +3,11 @@
 #include <string.h>
 #include "on_off_path_log.h"
 #include "../globals/utils.h"
+#include "../globals/global_vars.h"
 #include "../isa/isa.h"
 #include "../debug/debug_print.h" // Op_Type_str() 매크로를 위해 포함
 #include "debug/debug.param.h"
+#include "debug/debug_macros.h"
 
 extern char* OUTPUT_DIR;
 static FILE* on_off_path_log_file = NULL;
@@ -50,7 +52,7 @@ static void close_on_off_path_log(void) {
 }
 
 void init_on_off_path_log(void) {
-    if (on_off_path_log_file == NULL) {
+    if (DEBUG_ONPATH_CONF && on_off_path_log_file == NULL) {
         on_off_path_log_file = file_tag_fopen(OUTPUT_DIR, "on_off_path", "w");
         if (on_off_path_log_file) atexit(close_on_off_path_log);
     }
@@ -62,7 +64,7 @@ void finalize_on_off_path_log(void) {
 
 void log_on_off_path_entry(uns proc_id, On_Off_Path_Cache_Entry* entry, Counter cycle_count) {
     if (!on_off_path_log_file || !entry || !entry->is_valid||
-        !(cycle_count >= DEBUG_CYCLE_START && cycle_count <= DEBUG_CYCLE_STOP)) return;
+        !DEBUG_RANGE_COND(proc_id)) return;
 
     fprintf(on_off_path_log_file, "--- [LOG] On-Off Path for Core %u ---\n", proc_id);
     fprintf(on_off_path_log_file, "Triggering H2P Branch PC: 0x%llx, OpNum: %llu, Path Length: %u\n",

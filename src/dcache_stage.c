@@ -273,6 +273,8 @@ void update_dcache_stage(Stage_Data* src_sd) {
           tea_chain_note_load_result(op->proc_id, op,
                                      TEA_LOAD_RESULT_STORE_FORWARD,
                                      DCACHE_CYCLES);
+          tea_log_chain_load_addr(op, MAX_CTR, "STORE_FORWARD",
+                                  DCACHE_CYCLES);
         } else {
           /* [EXPERIMENT: TEA_PERFECT_LOAD] original: goto tea_load_dcache_access; */
           if (TEA_PERFECT_LOAD) {
@@ -291,6 +293,8 @@ void update_dcache_stage(Stage_Data* src_sd) {
             tea_chain_note_load_result(op->proc_id, op,
                                        TEA_LOAD_RESULT_BYPASS,
                                        latency);
+            tea_log_chain_load_addr(op, MAX_CTR, "PERFECT_LOAD_BYPASS",
+                                    latency);
             /* falls through to tea_op_completed + stage removal below */
           } else {
             goto tea_load_dcache_access;
@@ -363,6 +367,7 @@ tea_load_dcache_access:
         {
           Counter _lat = op->done_cycle - cycle_count;
           STAT_EVENT(dc->proc_id, TEA_LOADS_EXECUTED);
+          STAT_EVENT(dc->proc_id, TEA_LOADS_DCACHE_ACCESS);
           STAT_EVENT(dc->proc_id, TEA_LOADS_DCACHE_HIT);
           STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_SAMPLES);
           INC_STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_TOTAL, _lat);
@@ -371,6 +376,8 @@ tea_load_dcache_access:
           tea_chain_note_load_result(dc->proc_id, op,
                                      TEA_LOAD_RESULT_DCACHE_HIT,
                                      _lat);
+          tea_log_chain_load_addr(op, line_addr, "PERFECT_DCACHE_HIT",
+                                  _lat);
         }
         tea_op_completed(dc->proc_id, op);
       }
@@ -381,10 +388,11 @@ tea_load_dcache_access:
       dcache_cacheline_hit(op, line_addr, line);
       /* TEA load via normal dcache (cache hit): mark completed */
       if (TEA_ENABLE && op->thread_id == 1) {
-        /* [EXPERIMENT: TEA_PERFECT_LOAD] real L1 hit stats */
+        /* [EXPERIMENT: TEA_PERFECT_LOAD] first-level data cache/L1D hit stats */
         {
           Counter _lat = op->done_cycle - cycle_count;
           STAT_EVENT(dc->proc_id, TEA_LOADS_EXECUTED);
+          STAT_EVENT(dc->proc_id, TEA_LOADS_DCACHE_ACCESS);
           STAT_EVENT(dc->proc_id, TEA_LOADS_DCACHE_HIT);
           STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_SAMPLES);
           INC_STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_TOTAL, _lat);
@@ -393,6 +401,7 @@ tea_load_dcache_access:
           tea_chain_note_load_result(dc->proc_id, op,
                                      TEA_LOAD_RESULT_DCACHE_HIT,
                                      _lat);
+          tea_log_chain_load_addr(op, line_addr, "L1D_HIT", _lat);
         }
         tea_op_completed(dc->proc_id, op);
       }
@@ -722,6 +731,7 @@ static inline void dcache_cacheline_miss(Op* op, Addr line_addr) {
            * scan_stores() found a matching store in the memory request buffer. */
           Counter _lat = op->done_cycle - cycle_count;
           STAT_EVENT(dc->proc_id, TEA_LOADS_EXECUTED);
+          STAT_EVENT(dc->proc_id, TEA_LOADS_DCACHE_ACCESS);
           STAT_EVENT(dc->proc_id, TEA_LOADS_STORE_SCAN_FWD);
           STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_SAMPLES);
           INC_STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_TOTAL, _lat);
@@ -729,6 +739,7 @@ static inline void dcache_cacheline_miss(Op* op, Addr line_addr) {
           tea_chain_note_load_result(dc->proc_id, op,
                                      TEA_LOAD_RESULT_STORE_SCAN_FWD,
                                      _lat);
+          tea_log_chain_load_addr(op, line_addr, "STORE_SCAN_FWD", _lat);
           tea_op_completed(dc->proc_id, op);
         }
         break;
@@ -978,9 +989,17 @@ static inline void dcache_fill_process_cacheline(Mem_Req* req, Dcache_Data* data
 
     /* TEA load via normal dcache (cache miss fill): mark completed */
     if (TEA_ENABLE && op->thread_id == 1) {
-      /* [EXPERIMENT: TEA_PERFECT_LOAD] L1 miss fill stats (full memory latency) */
+      /* [EXPERIMENT: TEA_PERFECT_LOAD] DCACHE miss fill stats split by lower-level source */
       STAT_EVENT(dc->proc_id, TEA_LOADS_EXECUTED);
+      STAT_EVENT(dc->proc_id, TEA_LOADS_DCACHE_ACCESS);
       STAT_EVENT(dc->proc_id, TEA_LOADS_DCACHE_MISS);
+      if (req->mlc_hit) {
+        STAT_EVENT(dc->proc_id, TEA_LOADS_MLC_HIT);
+      } else if (req->l1_hit) {
+        STAT_EVENT(dc->proc_id, TEA_LOADS_SCARAB_L1_HIT);
+      } else {
+        STAT_EVENT(dc->proc_id, TEA_LOADS_MEM_ACCESS);
+      }
       if (op->dcache_cycle != MAX_CTR && op->done_cycle >= op->dcache_cycle) {
         Counter _lat = op->done_cycle - op->dcache_cycle;
         STAT_EVENT(dc->proc_id, TEA_LOAD_LATENCY_SAMPLES);
@@ -989,6 +1008,11 @@ static inline void dcache_fill_process_cacheline(Mem_Req* req, Dcache_Data* data
         tea_chain_note_load_result(dc->proc_id, op,
                                    TEA_LOAD_RESULT_DCACHE_MISS,
                                    _lat);
+        tea_log_chain_load_addr(op, req->addr,
+                                req->mlc_hit ? "MLC_HIT" :
+                                (req->l1_hit ? "SCARAB_L1_HIT" :
+                                               "MEM_ACCESS"),
+                                _lat);
       }
       tea_op_completed(dc->proc_id, op);
     }

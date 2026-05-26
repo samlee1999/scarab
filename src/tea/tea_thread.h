@@ -209,6 +209,8 @@ void tea_op_completed(uns proc_id, Op* op);
 void tea_record_load_issue_order(Op* op);
 void tea_record_load_cache_access_order(Op* op, Addr line_addr);
 void tea_record_load_cache_hit_warm_source(Op* op, Addr line_addr);
+void tea_log_chain_load_addr(Op* op, Addr line_addr,
+                             const char* result, Counter latency);
 void tea_chain_note_load_result(uns proc_id, Op* op,
                                 Tea_Load_Result result,
                                 Counter latency);

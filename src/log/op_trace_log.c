@@ -7,6 +7,7 @@
 #include "op.h"
 #include "debug/debug_print.h"
 #include "debug/debug.param.h"
+#include "debug/debug_macros.h"
 #include "bp/bp_conf.h"
 #include "bp/hbt.h"
 
@@ -29,7 +30,7 @@ void close_retired_op_log_file(void) {
 }
 
 void init_op_trace_log(void) {
-    if (op_asm_log_file == NULL) {
+    if (DEBUG_NODE_STAGE && op_asm_log_file == NULL) {
         op_asm_log_file = file_tag_fopen(OUTPUT_DIR, "fill_rob_op_per_cycle", "w");
         if (op_asm_log_file == NULL) {
             perror("Error opening fill_rob_op_per_cycle in output directory");
@@ -37,7 +38,7 @@ void init_op_trace_log(void) {
             atexit(close_op_asm_log_file);
         }
     }
-    if (retired_op_log_file == NULL) {
+    if (DEBUG_RETIRED_UOPS && retired_op_log_file == NULL) {
         retired_op_log_file = file_tag_fopen(OUTPUT_DIR, "retired_op_per_cycle", "w");
         if (retired_op_log_file == NULL) {
             perror("Error opening retired_op_per_cycle in output directory");
@@ -48,7 +49,7 @@ void init_op_trace_log(void) {
 }
 
 void log_fill_rob_op(Op* op, Counter cycle_count) {
-    if (op_asm_log_file && cycle_count >= DEBUG_CYCLE_START && cycle_count <= DEBUG_CYCLE_STOP) {
+    if (op_asm_log_file && DEBUG_RANGE_COND(op->proc_id)) {
         const char* disasm_str = disasm_op(op, TRUE);
         if (op->table_info->cf_type) {
 
@@ -78,7 +79,7 @@ void log_fill_rob_op(Op* op, Counter cycle_count) {
 }
 
 void log_retired_ops(Counter cycle_count, uns ret_count) {
-    if (retired_op_log_file && cycle_count >= DEBUG_CYCLE_START && cycle_count <= DEBUG_CYCLE_STOP) {
+    if (retired_op_log_file && DEBUG_RANGE_COND(0)) {
         if (ret_count > 0) {
             fprintf(retired_op_log_file, "Cycle:%-10llu Retired Ops: %u\n", cycle_count, ret_count);
             fflush(retired_op_log_file);

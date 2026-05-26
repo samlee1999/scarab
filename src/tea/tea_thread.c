@@ -31,6 +31,7 @@
 #include "tea/tea_rename.h"
 #include "globals/assert.h"
 #include "globals/global_vars.h"
+#include "globals/utils.h"
 #include "core.param.h"
 #include "memory/memory.param.h"
 #include "dependency_chain_cache.h"
@@ -40,6 +41,7 @@
 #include "debug/debug.param.h"
 #include "debug/debug_macros.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -47,6 +49,8 @@
 /* Global Variables */
 
 Tea_Thread** tea_threads = NULL;
+static FILE* tea_load_addr_log_file = NULL;
+static Counter tea_load_addr_log_lines = 0;
 
 /**************************************************************************************/
 /* Static helpers */
@@ -93,6 +97,35 @@ static inline uns tea_recent_load_index(Addr line_addr) {
 static inline uns tea_h2p_pc_tracker_index(Addr pc) {
   return (uns)(((pc >> 2) ^ (pc >> 11) ^ (pc >> 19)) &
                (TEA_H2P_PC_TRACKER_SIZE - 1));
+}
+
+static void close_tea_load_addr_log(void) {
+  if (tea_load_addr_log_file) {
+    fclose(tea_load_addr_log_file);
+    tea_load_addr_log_file = NULL;
+  }
+}
+
+static inline Flag tea_load_addr_log_range_enabled(uns proc_id) {
+  return DEBUG_RANGE_COND(proc_id);
+}
+
+static FILE* get_tea_load_addr_log_file(void) {
+  if (!tea_load_addr_log_file) {
+    tea_load_addr_log_file = file_tag_fopen(OUTPUT_DIR,
+                                            "tea_chain_load_addr", "w");
+    if (!tea_load_addr_log_file)
+      return NULL;
+
+    fprintf(tea_load_addr_log_file,
+            "cycle,proc_id,chain_id,chain_slot,trigger_cycle,"
+            "main_h2p_pc,main_h2p_op_num,main_h2p_unique_num,"
+            "main_h2p_mispred,load_pc,load_op_num,load_unique_num,"
+            "load_va,line_addr,line_index,mem_size,result,latency\n");
+    atexit(close_tea_load_addr_log);
+  }
+
+  return tea_load_addr_log_file;
 }
 
 static void clear_tea_tracking_tables(uns proc_id) {
@@ -145,8 +178,7 @@ static int find_next_fetching_chain(uns proc_id) {
   Tea_Thread* tea = tea_threads[proc_id];
   int max_chains = (int)tea_max_chains(proc_id);
   int start = (tea->current_fetch_chain < 0) ? 0 : tea->current_fetch_chain;
-  int search_count = (tea->current_fetch_chain < 0) ? max_chains : max_chains - 1;
-  for (int i = 0; i < search_count; i++) {
+  for (int i = 0; i < max_chains; i++) {
     int idx = (start + 1 + i) % max_chains;
     if (tea->chains[idx].state == CHAIN_FETCHING)
       return idx;
@@ -793,6 +825,62 @@ void tea_record_load_cache_hit_warm_source(Op* op, Addr line_addr) {
       STAT_EVENT(op->proc_id, TEA_LOAD_CACHE_HIT_MAIN_PC_LINE_BEFORE_TEA_BEFORE_TRIGGER_RATE);
     }
   }
+}
+
+void tea_log_chain_load_addr(Op* op, Addr line_addr,
+                             const char* result, Counter latency) {
+  if (!TEA_ENABLE || !op || op->thread_id != 1 ||
+      !op->table_info || op->table_info->mem_type != MEM_LD ||
+      op->proc_id >= MAX_NUM_PROCS ||
+      !tea_load_addr_log_range_enabled(op->proc_id))
+    return;
+
+  int slot = (int)op->h2p_chain_id - 1;
+  if (!tea_chain_slot_is_valid(op->proc_id, slot))
+    return;
+
+  Tea_H2P_Chain* c = &tea_threads[op->proc_id]->chains[slot];
+  if (!c || c->state == CHAIN_INACTIVE)
+    return;
+
+  FILE* log_file = get_tea_load_addr_log_file();
+  if (!log_file)
+    return;
+
+  if (line_addr == MAX_CTR)
+    line_addr = tea_line_addr_from_va(op->oracle_info.va);
+
+  Addr load_pc = op->inst_info ? op->inst_info->addr : 0;
+  Flag h2p_mispred = c->h2p_oracle_info.mispred ||
+                     c->h2p_oracle_info.misfetch;
+
+  fprintf(log_file,
+          "%llu,%u,%u,%d,%llu,"
+          "0x%llx,%llu,%llu,%u,"
+          "0x%llx,%llu,%llu,"
+          "0x%llx,0x%llx,%llu,%u,%s,%llu\n",
+          (unsigned long long)cycle_count,
+          (unsigned)op->proc_id,
+          (unsigned)op->h2p_chain_id,
+          slot,
+          (unsigned long long)c->trigger_cycle,
+          (unsigned long long)c->target_h2p_pc,
+          (unsigned long long)c->target_h2p_op_num,
+          (unsigned long long)c->saved_unique_num,
+          (unsigned)h2p_mispred,
+          (unsigned long long)load_pc,
+          (unsigned long long)op->op_num,
+          (unsigned long long)op->unique_num,
+          (unsigned long long)op->oracle_info.va,
+          (unsigned long long)line_addr,
+          (unsigned long long)(line_addr >> LOG2(DCACHE_LINE_SIZE)),
+          (unsigned)op->oracle_info.mem_size,
+          result ? result : "UNKNOWN",
+          (unsigned long long)latency);
+
+  tea_load_addr_log_lines++;
+  if ((tea_load_addr_log_lines & 0xfff) == 0)
+    fflush(log_file);
 }
 
 void tea_chain_note_load_result(uns proc_id, Op* op,

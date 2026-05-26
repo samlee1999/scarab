@@ -335,7 +335,13 @@ DEF_STAT(DCC_TRIGGER_ENTRY_AGE_UNIQUE_1000_9999, COUNT, NO_RATIO)
 DEF_STAT(DCC_TRIGGER_ENTRY_AGE_UNIQUE_10000_99999, COUNT, NO_RATIO)
 DEF_STAT(DCC_TRIGGER_ENTRY_AGE_UNIQUE_100000_PLUS, COUNT, NO_RATIO)
 
-/* [EXPERIMENT: TEA_PERFECT_LOAD] TEA load instrumentation stats */
+/* [EXPERIMENT: TEA_PERFECT_LOAD] TEA load instrumentation stats
+ * Naming follows Scarab cache-level terminology:
+ *   DCACHE    = first-level data cache, i.e., architectural L1D
+ *   MLC       = Scarab mid-level cache, roughly L2
+ *   SCARAB_L1 = Scarab lower-level cache named "L1" in memory/, LLC-like here
+ *   MEM       = memory/DRAM path after DCACHE+MLC+SCARAB_L1 miss
+ */
 DEF_STAT(TEA_CHAIN_LOAD_OPS_TOTAL, COUNT, NO_RATIO)  /* load ops in triggered dep chains */
 DEF_STAT(TEA_CHAIN_LOAD_OPS_AVG, RATIO, TEA_TRIGGERS)
 DEF_STAT(TEA_CHAIN_LOAD_OPS_0, COUNT, NO_RATIO)
@@ -348,10 +354,14 @@ DEF_STAT(TEA_CHAIN_LOAD_OPS_17_PLUS, COUNT, NO_RATIO)
 DEF_STAT(TEA_LOADS_FETCHED,        COUNT, NO_RATIO)  /* load ops created by TEA fetch stage */
 DEF_STAT(TEA_LOADS_EXECUTED,       COUNT, NO_RATIO)  /* TEA loads processed by dcache stage */
 DEF_STAT(TEA_LOADS_STORE_FORWARD,  COUNT, NO_RATIO)  /* TEA loads satisfied by TEA store buffer */
-DEF_STAT(TEA_LOADS_DCACHE_HIT,     COUNT, NO_RATIO)  /* TEA loads hitting real L1 (non-forwarded) */
-DEF_STAT(TEA_LOADS_DCACHE_MISS,    COUNT, NO_RATIO)  /* TEA loads missing L1 (full memory latency) */
+DEF_STAT(TEA_LOADS_DCACHE_ACCESS,  COUNT, NO_RATIO)  /* TEA loads resolved through DCACHE path */
+DEF_STAT(TEA_LOADS_DCACHE_HIT,     COUNT, NO_RATIO)  /* TEA loads hitting first-level data cache/L1D */
+DEF_STAT(TEA_LOADS_DCACHE_MISS,    COUNT, NO_RATIO)  /* TEA DCACHE misses filled by lower hierarchy */
 DEF_STAT(TEA_LOADS_STORE_SCAN_FWD, COUNT, NO_RATIO)  /* TEA loads forwarded by main store-buffer scan after L1 miss */
 DEF_STAT(TEA_LOADS_BYPASSED,       COUNT, NO_RATIO)  /* TEA loads bypassed by TEA_PERFECT_LOAD */
+DEF_STAT(TEA_LOADS_MLC_HIT,        COUNT, NO_RATIO)  /* TEA DCACHE misses that hit Scarab MLC */
+DEF_STAT(TEA_LOADS_SCARAB_L1_HIT,  COUNT, NO_RATIO)  /* TEA DCACHE misses that hit Scarab L1/LLC-like cache */
+DEF_STAT(TEA_LOADS_MEM_ACCESS,     COUNT, NO_RATIO)  /* TEA DCACHE misses served from memory/DRAM path */
 DEF_STAT(TEA_LOAD_LATENCY_SAMPLES, COUNT, NO_RATIO)  /* samples for average latency */
 DEF_STAT(TEA_LOAD_LATENCY_TOTAL,   COUNT, NO_RATIO)  /* sum of per-load latency (cycles) */
 DEF_STAT(TEA_LOAD_LATENCY_AVG,     RATIO, TEA_LOAD_LATENCY_SAMPLES)

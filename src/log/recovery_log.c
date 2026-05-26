@@ -11,6 +11,7 @@
 #include "globals/utils.h"
 #include "op.h"
 #include "debug/debug.param.h"
+#include "debug/debug_macros.h"
 #include "op_trace_log.h"
 #include "bp/bp_conf.h"
 #include "bp/hbt.h"
@@ -36,7 +37,8 @@ void close_recovery_log_file(void) {
 
 // 이 파일 전용 로그 파일을 초기화하는 함수입니다.
 void init_recovery_log(void) {
-    if (recovery_log_file == NULL) {
+    if ((DEBUG_BP || DEBUG_DECODE_STAGE || DEBUG_EXEC_STAGE) &&
+        recovery_log_file == NULL) {
         recovery_log_file = file_tag_fopen(OUTPUT_DIR, "recovery_log", "w");
         if (recovery_log_file == NULL) {
             perror("Error opening recovery_log in output directory");
@@ -77,7 +79,7 @@ void log_rat_state(FILE* log_file, const char* title, struct reg_table_entry* ar
  * @brief 분기 예측 실패가 감지되었을 때의 시스템 상태를 기록합니다.
  */
 void log_misprediction_detection_at_decode(Op* op, Node_Stage* node, Counter cycle_count, Bp_Recovery_Info* bp_recovery_info) {
-    if ((!recovery_log_file && !retired_op_log_file) || cycle_count < DEBUG_CYCLE_START || cycle_count > DEBUG_CYCLE_STOP) return;
+    if ((!recovery_log_file && !retired_op_log_file) || !DEBUG_RANGE_COND(op->proc_id)) return;
 
     Addr pc_val = op->inst_info->addr;
     
@@ -193,7 +195,7 @@ void log_misprediction_detection_at_decode(Op* op, Node_Stage* node, Counter cyc
 
 
 void log_misprediction_detection_at_exec(Op* op, Node_Stage* node, Counter cycle_count, Bp_Recovery_Info* bp_recovery_info) {
-    if ((!recovery_log_file && !retired_op_log_file) || cycle_count < DEBUG_CYCLE_START || cycle_count > DEBUG_CYCLE_STOP) return;
+    if ((!recovery_log_file && !retired_op_log_file) || !DEBUG_RANGE_COND(op->proc_id)) return;
 
     Addr pc_val = op->inst_info->addr;
 
@@ -312,7 +314,7 @@ void log_misprediction_detection_at_exec(Op* op, Node_Stage* node, Counter cycle
  * @brief 분기 예측 실패로부터 복구가 완료된 시점의 시스템 상태를 기록합니다.
  */
 void log_recovery_end(Node_Stage* node, Counter cycle_count, Bp_Recovery_Info* bp_recovery_info) {
-    if ((!recovery_log_file && !retired_op_log_file) || cycle_count < DEBUG_CYCLE_START || cycle_count > DEBUG_CYCLE_STOP) return;
+    if ((!recovery_log_file && !retired_op_log_file) || !DEBUG_RANGE_COND(node->proc_id)) return;
 
     Op* op = bp_recovery_info->recovery_op;
     Addr pc_val = op->inst_info->addr;
