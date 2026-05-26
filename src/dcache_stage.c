@@ -76,6 +76,9 @@ Dcache_Stage* dc = NULL;
 static inline Flag dcache_stage_addr_unready(Op* op);
 static inline Flag dcache_stage_check_mem_type(Op* op);
 static inline void dcache_stage_remove_src_op(Stage_Data* src_sd, int ii);
+static inline int dcache_stage_count_valid_ops(void);
+static inline void dcache_stage_assert_occupancy(const char* context);
+static inline void dcache_stage_preserve_unprocessed_ops_after_full_tea_flush(Counter last_processed_op_num);
 
 static inline void dcache_cacheline_hit(Op* op, Addr line_addr, Dcache_Data* line);
 static inline void dcache_cacheline_miss(Op* op, Addr line_addr);
@@ -203,6 +206,7 @@ void update_dcache_stage(Stage_Data* src_sd) {
     dcache_stage_remove_src_op(src_sd, ii);
     ASSERTM(dc->proc_id, cycle_count >= op->exec_cycle, "o:%s  %s\n", unsstr64(op->op_num), Op_State_str(op->state));
   }
+  dcache_stage_assert_occupancy("phase1");
 
   /* phase 2 - check the dcache port availability and do dcache access */
   int start_op_count = dc->sd.op_count;
@@ -239,15 +243,17 @@ void update_dcache_stage(Stage_Data* src_sd) {
                                     op->oracle_info.new_mem_value,
                                     op->oracle_info.mem_size,
                                     op->h2p_chain_id)) {
+          Counter flushed_op_num = op->op_num;
           /* Buffer full: terminate TEA thread immediately.
-           * terminate_tea_thread() flushes all TEA ops, so skip further
-           * processing of this op (it may already be freed). */
+           * terminate_tea_thread() owns dcache-stage TEA op removal and may
+           * free this op through the node table.  The local start_op_count
+           * snapshot is no longer valid after that pipeline squash, so preserve
+           * unprocessed surviving ops for the next cycle and stop this update. */
           STAT_EVENT(op->proc_id, TEA_STORE_BUFFER_FULL);
           terminate_tea_thread(op->proc_id);
-          dc->sd.ops[oldest_index] = NULL;
-          dc->sd.op_count--;
-          ASSERT(dc->proc_id, dc->sd.op_count >= 0);
-          continue;
+          dcache_stage_preserve_unprocessed_ops_after_full_tea_flush(flushed_op_num);
+          dcache_stage_assert_occupancy("TEA store-buffer-full flush");
+          return;
         }
         STAT_EVENT(op->proc_id, TEA_STORES_BUFFERED);
         op->done_cycle = cycle_count + DCACHE_CYCLES;
@@ -417,6 +423,7 @@ tea_load_dcache_access:
     update_l2way_pref_req_queue();
   if (L2MARKV_PREF_ON && !L1MARKV_PREF_IMMEDIATE)
     update_l2markv_pref_req_queue();
+  dcache_stage_assert_occupancy("phase2");
 }
 
 /**************************************************************************************/
@@ -491,6 +498,42 @@ Flag do_oracle_dcache_access(Op* op, Addr* line_addr) {
 
 /**************************************************************************************/
 /* Inline Methods */
+
+static inline int dcache_stage_count_valid_ops(void) {
+  int count = 0;
+  for (uns ii = 0; ii < dc->sd.max_op_count; ii++) {
+    if (dc->sd.ops[ii])
+      count++;
+  }
+  return count;
+}
+
+static inline void dcache_stage_assert_occupancy(const char* context) {
+  int valid_ops = dcache_stage_count_valid_ops();
+  ASSERTM(dc->proc_id, dc->sd.op_count == valid_ops,
+          "dcache stage occupancy mismatch after %s: op_count=%d valid_ops=%d C=%llu\n",
+          context ? context : "unknown", dc->sd.op_count, valid_ops,
+          cycle_count);
+}
+
+static inline void dcache_stage_preserve_unprocessed_ops_after_full_tea_flush(Counter last_processed_op_num) {
+  for (uns ii = 0; ii < dc->sd.max_op_count; ii++) {
+    Op* pending = dc->sd.ops[ii];
+    if (!pending || pending->op_num <= last_processed_op_num)
+      continue;
+
+    /* The local dcache worklist was invalidated by a TEA pipeline squash.
+     * Surviving main-thread memory ops after the flushed TEA op have not
+     * accessed the cache in this cycle, so keep them resident and retry them
+     * next cycle instead of letting phase 1 discard them as completed ops. */
+    ASSERTM(dc->proc_id, pending->thread_id != 1,
+            "TEA op survived full-thread flush in dcache stage: op_num=%s chain=%u state=%d C=%llu\n",
+            unsstr64(pending->op_num), pending->h2p_chain_id,
+            pending->state, cycle_count);
+    if (pending->state != OS_WAIT_MEM)
+      pending->state = OS_WAIT_DCACHE;
+  }
+}
 
 static inline void dcache_stage_remove_src_op(Stage_Data* src_sd, int ii) {
   src_sd->ops[ii] = NULL;
