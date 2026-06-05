@@ -63,6 +63,10 @@ extern Backward_Walk_Engine** bw_engines;
 // =================================================================
 // Function prototypes (원형) 선언
 // =================================================================
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void init_dependency_chain_cache(uns proc_id);
 void reset_dependency_chain_cache(uns proc_id);
 void add_dependency_chain(uns proc_id, Op* snapshot_buffer, int op_count);
@@ -72,5 +76,9 @@ Dependency_Chain_Cache_Entry* get_dependency_chain(uns proc_id, Addr pc);
 Dependency_Chain_Cache_Entry* get_dependency_chain_block(uns proc_id, Addr pc);
 extern Dependency_Chain_Cache_Entry** dependency_chain_caches;
 extern Dependency_Chain_Cache_Entry** block_caches;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // __DEPENDENCY_CHAIN_CACHE_H__

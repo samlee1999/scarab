@@ -390,3 +390,6 @@ DEF_PARAM(tea_trigger_oracle_mispred_only, TEA_TRIGGER_ORACLE_MISPRED_ONLY, Flag
 /* [EXPERIMENT: TEA_PERFECT_LOAD] Perfect-load sensitivity experiment parameters */
 DEF_PARAM(tea_perfect_load, TEA_PERFECT_LOAD, Flag, Flag, FALSE, )
 DEF_PARAM(tea_perfect_load_latency, TEA_PERFECT_LOAD_LATENCY, uns, uns, 0, )
+/* [EXPERIMENT: TEA_MAIN_CHAIN_PERFECT_LOAD] Main-thread H2P-chain load oracle */
+DEF_PARAM(tea_main_chain_perfect_load, TEA_MAIN_CHAIN_PERFECT_LOAD, Flag, Flag, FALSE, )
+DEF_PARAM(tea_main_chain_perfect_load_latency, TEA_MAIN_CHAIN_PERFECT_LOAD_LATENCY, uns, uns, 0, )

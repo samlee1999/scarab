@@ -6,6 +6,8 @@
 #include <tuple>
 #include <vector>
 
+#include "core.param.h"
+#include "dependency_chain_cache.h"
 #include "memory/memory.param.h"
 #include "prefetcher/pref.param.h"
 
@@ -18,6 +20,7 @@
 #include "thread.h"
 
 #include "confidence/conf.hpp"
+#include "statistics.h"
 
 #define DEBUG(proc_id, args...) _DEBUG(proc_id, DEBUG_DECOUPLED_FE, ##args)
 
@@ -50,6 +53,8 @@ class Decoupled_FE {
 
  private:
   void init(uns proc_id);
+  void reset_main_chain_block_tracking();
+  void apply_main_chain_block_tag(Op* op);
 
   uns proc_id;
 
@@ -71,6 +76,13 @@ class Decoupled_FE {
   bool trace_mode;
   Op* cur_op;
   Conf* conf;
+
+  bool main_chain_block_valid;
+  bool main_chain_block_hit;
+  Addr main_chain_block_start_pc;
+  uns main_chain_block_op_idx;
+  uint64_t main_chain_block_dependency_mask;
+  uns main_chain_block_total_ops;
 };
 
 /* Global Variables */
@@ -233,6 +245,7 @@ void Decoupled_FE::init(uns _proc_id) {
   stalled = false;
   ftq_ft_num = FE_FTQ_BLOCK_NUM;
   cur_op = nullptr;
+  reset_main_chain_block_tracking();
 
   current_ft_to_push = FT(proc_id);
   current_ft_to_push.set_ft_started_by(FT_STARTED_BY_APP);
@@ -245,6 +258,7 @@ void Decoupled_FE::recover() {
   off_path = false;
   sched_off_path = false;
   cur_op = nullptr;
+  reset_main_chain_block_tracking();
   recovery_addr = bp_recovery_info->recovery_fetch_addr;
 
   Counter recovery_op_num = bp_recovery_info->recovery_op_num;
@@ -347,6 +361,64 @@ void Decoupled_FE::recover() {
     conf->recover(op);
 }
 
+void Decoupled_FE::reset_main_chain_block_tracking() {
+  main_chain_block_valid = false;
+  main_chain_block_hit = false;
+  main_chain_block_start_pc = 0;
+  main_chain_block_op_idx = 0;
+  main_chain_block_dependency_mask = 0;
+  main_chain_block_total_ops = 0;
+}
+
+void Decoupled_FE::apply_main_chain_block_tag(Op* op) {
+  op->chain_bit = FALSE;
+
+  if (!TEA_MAIN_CHAIN_PERFECT_LOAD || op->thread_id != 0 || op->off_path ||
+      !op->inst_info || !op->table_info) {
+    reset_main_chain_block_tracking();
+    return;
+  }
+
+  if (!main_chain_block_valid) {
+    main_chain_block_valid = true;
+    main_chain_block_hit = false;
+    main_chain_block_start_pc = op->inst_info->addr;
+    main_chain_block_op_idx = 0;
+    main_chain_block_dependency_mask = 0;
+    main_chain_block_total_ops = 0;
+
+    STAT_EVENT(proc_id, TEA_MAIN_CHAIN_TAG_BLOCK_LOOKUPS);
+    Dependency_Chain_Cache_Entry* block =
+      get_dependency_chain_block(proc_id, main_chain_block_start_pc);
+    if (block && block->dependency_mask) {
+      main_chain_block_hit = true;
+      main_chain_block_dependency_mask = block->dependency_mask;
+      main_chain_block_total_ops = block->total_ops_in_block;
+      STAT_EVENT(proc_id, TEA_MAIN_CHAIN_TAG_BLOCK_HITS);
+    } else {
+      STAT_EVENT(proc_id, TEA_MAIN_CHAIN_TAG_BLOCK_MISSES);
+    }
+  }
+
+  if (main_chain_block_hit) {
+    if (main_chain_block_op_idx < 64 &&
+        main_chain_block_op_idx < main_chain_block_total_ops) {
+      if ((main_chain_block_dependency_mask >> main_chain_block_op_idx) & 1ULL) {
+        op->chain_bit = TRUE;
+        STAT_EVENT(proc_id, TEA_MAIN_CHAIN_TAG_OPS);
+        if (op->table_info->mem_type == MEM_LD)
+          STAT_EVENT(proc_id, TEA_MAIN_CHAIN_TAG_LOADS);
+      }
+    } else {
+      STAT_EVENT(proc_id, TEA_MAIN_CHAIN_TAG_MASK_INDEX_OUT_OF_RANGE);
+    }
+  }
+
+  main_chain_block_op_idx++;
+  if (op->table_info->cf_type != NOT_CF)
+    reset_main_chain_block_tracking();
+}
+
 void Decoupled_FE::update() {
   uns cf_num = 0;
   uint64_t bytes_this_cycle = 0;
@@ -426,6 +498,7 @@ void Decoupled_FE::update() {
     op->off_path = off_path;
     if (!CONFIDENCE_ENABLE)
       op->conf_off_path = FALSE;
+    apply_main_chain_block_tag(op);
 
     cur_op = op;
     DEBUG(proc_id, "Set cur_op off_path:%i, op_num:%llu, cf_type:%i\n", cur_op->off_path, cur_op->op_num,

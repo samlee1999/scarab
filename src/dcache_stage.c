@@ -42,6 +42,7 @@
 
 #include "core.param.h"
 #include "memory/memory.param.h"
+#include "memory/memory.h"
 #include "prefetcher//stream.param.h"
 #include "prefetcher/pref.param.h"
 
@@ -75,6 +76,7 @@ Dcache_Stage* dc = NULL;
 
 static inline Flag dcache_stage_addr_unready(Op* op);
 static inline Flag dcache_stage_check_mem_type(Op* op);
+static inline Flag dcache_stage_try_main_chain_load_oracle(Op* op);
 static inline void dcache_stage_remove_src_op(Stage_Data* src_sd, int ii);
 static inline int dcache_stage_count_valid_ops(void);
 static inline void dcache_stage_assert_occupancy(const char* context);
@@ -317,6 +319,9 @@ void update_dcache_stage(Stage_Data* src_sd) {
     }
 tea_load_dcache_access:
     ;  /* Empty statement required after label in C */
+
+    if (dcache_stage_try_main_chain_load_oracle(op))
+      continue;
 
     /* check on the availability of a read port for the given bank */
     // the bank bits are the lowest order cache index bits
@@ -574,6 +579,34 @@ static inline Flag dcache_stage_check_mem_type(Op* op) {
     return FALSE;
   }
 
+  return TRUE;
+}
+
+static inline Flag dcache_stage_try_main_chain_load_oracle(Op* op) {
+  if (!TEA_MAIN_CHAIN_PERFECT_LOAD || op->thread_id != 0 ||
+      op->table_info->mem_type != MEM_LD || !op->chain_bit || op->off_path)
+    return FALSE;
+
+  STAT_EVENT(op->proc_id, TEA_MAIN_CHAIN_LOAD_ORACLE_CANDIDATES);
+
+  if (scan_stores(op->oracle_info.va, op->oracle_info.mem_size)) {
+    STAT_EVENT(op->proc_id, TEA_MAIN_CHAIN_LOAD_ORACLE_STORE_FWD_EXCLUDED);
+    return FALSE;
+  }
+
+  Counter latency = TEA_MAIN_CHAIN_PERFECT_LOAD_LATENCY;
+  op->state = OS_SCHEDULED;
+  op->dcache_cycle = cycle_count;
+  op->done_cycle = cycle_count + latency;
+  op->wake_cycle = op->done_cycle;
+  op->oracle_info.dcmiss = FALSE;
+  op->engine_info.dcmiss = FALSE;
+  wake_up_ops(op, REG_DATA_DEP, model->wake_hook);
+
+  STAT_EVENT(op->proc_id, TEA_MAIN_CHAIN_LOAD_ORACLE_BYPASSED);
+  STAT_EVENT(op->proc_id, TEA_MAIN_CHAIN_LOAD_ORACLE_LATENCY_SAMPLES);
+  INC_STAT_EVENT(op->proc_id, TEA_MAIN_CHAIN_LOAD_ORACLE_LATENCY_TOTAL, latency);
+  INC_STAT_EVENT(op->proc_id, TEA_MAIN_CHAIN_LOAD_ORACLE_LATENCY_AVG, latency);
   return TRUE;
 }
 
