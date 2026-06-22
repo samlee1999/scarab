@@ -88,6 +88,7 @@ extern Dcache_Stage* dc;
 void set_dcache_stage(Dcache_Stage*);
 void init_dcache_stage(uns8, const char*);
 void reset_dcache_stage(void);
+void reset_h2p_chain_load_profile_tables(void);
 void recover_dcache_stage(void);
 void debug_dcache_stage(void);
 void update_dcache_stage(Stage_Data*);

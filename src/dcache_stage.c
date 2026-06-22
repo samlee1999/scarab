@@ -41,6 +41,7 @@
 #include "debug/debug_print.h"
 
 #include "core.param.h"
+#include "libs/hash_lib.h"
 #include "memory/memory.param.h"
 #include "memory/memory.h"
 #include "prefetcher//stream.param.h"
@@ -71,12 +72,126 @@
 
 Dcache_Stage* dc = NULL;
 
+#define H2P_CHAIN_LOAD_PROFILE_PC_TABLE_SIZE 32768
+#define H2P_CHAIN_LOAD_PROFILE_SLOT_TABLE_SIZE 65536
+#define H2P_CHAIN_LOAD_PROFILE_STRIDE_SLOTS 8
+#define H2P_CHAIN_LOAD_PATTERN_TOPK 8
+#define H2P_CHAIN_LOAD_PATTERN_SINGLE_STRIDE_PCT 90.0
+#define H2P_CHAIN_LOAD_PATTERN_MULTI_STRIDE_PCT 90.0
+#define H2P_CHAIN_LOAD_PATTERN_CONSTANT_PCT 95.0
+#define H2P_CHAIN_LOAD_REPEATABILITY_HIST_BUCKETS 8192
+
+typedef enum H2P_Chain_Load_Profile_Result_enum {
+  H2P_CHAIN_LOAD_PROFILE_RESULT_DCACHE_HIT = 0,
+  H2P_CHAIN_LOAD_PROFILE_RESULT_STORE_REQ_BUFFER_HIT,
+  H2P_CHAIN_LOAD_PROFILE_RESULT_MLC_HIT,
+  H2P_CHAIN_LOAD_PROFILE_RESULT_SCARAB_L1_HIT,
+  H2P_CHAIN_LOAD_PROFILE_RESULT_MEM_ACCESS,
+} H2P_Chain_Load_Profile_Result;
+
+typedef struct H2P_Chain_Load_Profile_Summary_Entry_struct {
+  Flag valid;
+  Addr block_start_pc;
+  uns block_op_idx;
+  Addr load_pc;
+
+  Counter accesses;
+  Counter dcache_hit;
+  Counter store_req_buffer_hit;
+  Counter dcache_miss;
+  Counter mlc_hit;
+  Counter scarab_l1_hit;
+  Counter mem_access;
+  Counter latency_samples;
+  Counter latency_total;
+
+  Flag has_last_addr;
+  Addr last_va;
+  Addr last_line_addr;
+  Counter reuse;
+  Counter same_va;
+  Counter same_va_line;
+  Counter stride_zero;
+  Counter stride_pos_1;
+  Counter stride_neg_1;
+  Counter stride_small_abs_le_4;
+  Counter stride_small_abs_le_16;
+  Counter stride_other;
+
+  Flag stride_valid[H2P_CHAIN_LOAD_PROFILE_STRIDE_SLOTS];
+  SCounter stride_value[H2P_CHAIN_LOAD_PROFILE_STRIDE_SLOTS];
+  Counter stride_count[H2P_CHAIN_LOAD_PROFILE_STRIDE_SLOTS];
+
+  Counter unique_vaddr;
+  Counter unique_line;
+  Flag byte_delta_valid[H2P_CHAIN_LOAD_PATTERN_TOPK];
+  SCounter byte_delta_value[H2P_CHAIN_LOAD_PATTERN_TOPK];
+  Counter byte_delta_count[H2P_CHAIN_LOAD_PATTERN_TOPK];
+  Flag line_delta_valid[H2P_CHAIN_LOAD_PATTERN_TOPK];
+  SCounter line_delta_value[H2P_CHAIN_LOAD_PATTERN_TOPK];
+  Counter line_delta_count[H2P_CHAIN_LOAD_PATTERN_TOPK];
+} H2P_Chain_Load_Profile_Summary_Entry;
+
+typedef struct H2P_Chain_Load_Pattern_Value_Key_struct {
+  Addr load_pc;
+  Addr value;
+  Counter count;
+} H2P_Chain_Load_Pattern_Value_Key;
+
+typedef struct H2P_Chain_Load_Pattern_Delta_Key_struct {
+  Addr load_pc;
+  SCounter delta;
+  Counter count;
+} H2P_Chain_Load_Pattern_Delta_Key;
+
+typedef struct H2P_Chain_Load_Pattern_Top_Entry_struct {
+  Flag valid;
+  SCounter delta;
+  Counter count;
+} H2P_Chain_Load_Pattern_Top_Entry;
+
+typedef struct H2P_Chain_Load_Addr_Repeatability_Entry_struct {
+  Counter repeatability;
+  Counter target_load_accesses;
+  Counter unique_pc_vaddr_count;
+} H2P_Chain_Load_Addr_Repeatability_Entry;
+
+static H2P_Chain_Load_Profile_Summary_Entry*
+  h2p_chain_load_pc_profile_table[MAX_NUM_PROCS];
+static H2P_Chain_Load_Profile_Summary_Entry*
+  h2p_chain_load_slot_profile_table[MAX_NUM_PROCS];
+static Counter h2p_chain_load_pc_profile_overflow[MAX_NUM_PROCS];
+static Counter h2p_chain_load_slot_profile_overflow[MAX_NUM_PROCS];
+static Flag h2p_chain_load_profile_dump_registered = FALSE;
+
+static Hash_Table h2p_chain_load_unique_vaddr_table[MAX_NUM_PROCS];
+static Hash_Table h2p_chain_load_unique_line_table[MAX_NUM_PROCS];
+static Hash_Table h2p_chain_load_byte_delta_table[MAX_NUM_PROCS];
+static Hash_Table h2p_chain_load_line_delta_table[MAX_NUM_PROCS];
+static Flag h2p_chain_load_unique_vaddr_table_valid[MAX_NUM_PROCS];
+static Flag h2p_chain_load_unique_line_table_valid[MAX_NUM_PROCS];
+static Flag h2p_chain_load_byte_delta_table_valid[MAX_NUM_PROCS];
+static Flag h2p_chain_load_line_delta_table_valid[MAX_NUM_PROCS];
+
 /**************************************************************************************/
 /* Prototypes for Inline Methods */
 
 static inline Flag dcache_stage_addr_unready(Op* op);
 static inline Flag dcache_stage_check_mem_type(Op* op);
 static inline Flag dcache_stage_try_main_chain_load_oracle(Op* op);
+static inline Flag dcache_stage_main_onpath_load(Op* op);
+static inline Flag dcache_stage_main_chain_load_profile_op(Op* op);
+static inline void dcache_stage_record_main_onpath_load_access(Op* op);
+static inline void dcache_stage_record_main_chain_load_profile_access(Op* op, Addr line_addr, Flag first_access);
+static inline void dcache_stage_record_main_chain_load_profile_dcache_hit(Op* op);
+static inline void dcache_stage_record_main_chain_load_profile_store_fwd(Op* op);
+static inline void dcache_stage_record_main_chain_load_profile_fill(Op* op, Mem_Req* req);
+static inline void h2p_chain_load_profile_record_access(Op* op, Addr line_addr);
+static inline void h2p_chain_load_profile_record_result(
+  Op* op, H2P_Chain_Load_Profile_Result result);
+static inline void h2p_chain_load_pattern_record_pc_access(
+  H2P_Chain_Load_Profile_Summary_Entry* entry, Op* op, Addr line_addr);
+static void dump_h2p_chain_load_profile_tables(void);
 static inline void dcache_stage_remove_src_op(Stage_Data* src_sd, int ii);
 static inline int dcache_stage_count_valid_ops(void);
 static inline void dcache_stage_assert_occupancy(const char* context);
@@ -137,6 +252,31 @@ void reset_dcache_stage(void) {
     dc->sd.ops[ii] = NULL;
   dc->sd.op_count = 0;
   dc->idle_cycle = 0;
+}
+
+void reset_h2p_chain_load_profile_tables(void) {
+  for (uns proc_id = 0; proc_id < MAX_NUM_PROCS; proc_id++) {
+    if (h2p_chain_load_pc_profile_table[proc_id]) {
+      memset(h2p_chain_load_pc_profile_table[proc_id], 0,
+             sizeof(H2P_Chain_Load_Profile_Summary_Entry) *
+               H2P_CHAIN_LOAD_PROFILE_PC_TABLE_SIZE);
+    }
+    if (h2p_chain_load_slot_profile_table[proc_id]) {
+      memset(h2p_chain_load_slot_profile_table[proc_id], 0,
+             sizeof(H2P_Chain_Load_Profile_Summary_Entry) *
+               H2P_CHAIN_LOAD_PROFILE_SLOT_TABLE_SIZE);
+    }
+    h2p_chain_load_pc_profile_overflow[proc_id] = 0;
+    h2p_chain_load_slot_profile_overflow[proc_id] = 0;
+    if (h2p_chain_load_unique_vaddr_table_valid[proc_id])
+      hash_table_clear(&h2p_chain_load_unique_vaddr_table[proc_id]);
+    if (h2p_chain_load_unique_line_table_valid[proc_id])
+      hash_table_clear(&h2p_chain_load_unique_line_table[proc_id]);
+    if (h2p_chain_load_byte_delta_table_valid[proc_id])
+      hash_table_clear(&h2p_chain_load_byte_delta_table[proc_id]);
+    if (h2p_chain_load_line_delta_table_valid[proc_id])
+      hash_table_clear(&h2p_chain_load_line_delta_table[proc_id]);
+  }
 }
 
 void recover_dcache_stage() {
@@ -343,9 +483,14 @@ tea_load_dcache_access:
 
     /* now access the dcache with it */
     Addr line_addr;
+    Flag first_dcache_access = (op->dcache_cycle == MAX_CTR);
     Dcache_Data* line = (Dcache_Data*)cache_access(&dc->dcache, op->oracle_info.va, &line_addr, TRUE);
     tea_record_load_cache_access_order(op, line_addr);
     op->dcache_cycle = cycle_count;
+    if (first_dcache_access)
+      dcache_stage_record_main_onpath_load_access(op);
+    dcache_stage_record_main_chain_load_profile_access(op, line_addr,
+                                                       first_dcache_access);
     dc->idle_cycle = MAX2(dc->idle_cycle, cycle_count + DCACHE_CYCLES);
 
     if (op->table_info->mem_type == MEM_ST)
@@ -372,6 +517,7 @@ tea_load_dcache_access:
         op->wake_cycle = op->done_cycle;
         wake_up_ops(op, REG_DATA_DEP, model->wake_hook);
       }
+      dcache_stage_record_main_chain_load_profile_dcache_hit(op);
       /* TEA load via normal dcache (PERFECT_DCACHE): mark completed */
       if (TEA_ENABLE && op->thread_id == 1) {
         /* [EXPERIMENT: TEA_PERFECT_LOAD] PERFECT_DCACHE hit stats */
@@ -397,6 +543,7 @@ tea_load_dcache_access:
 
     if (line) {
       dcache_cacheline_hit(op, line_addr, line);
+      dcache_stage_record_main_chain_load_profile_dcache_hit(op);
       /* TEA load via normal dcache (cache hit): mark completed */
       if (TEA_ENABLE && op->thread_id == 1) {
         /* [EXPERIMENT: TEA_PERFECT_LOAD] first-level data cache/L1D hit stats */
@@ -582,19 +729,528 @@ static inline Flag dcache_stage_check_mem_type(Op* op) {
   return TRUE;
 }
 
+static inline Flag dcache_stage_main_onpath_load(Op* op) {
+  return op && op->thread_id == 0 && op->table_info &&
+         op->table_info->mem_type == MEM_LD && !op->off_path;
+}
+
+static inline Flag dcache_stage_main_chain_load_profile_op(Op* op) {
+  return H2P_CHAIN_LOAD_PROFILE && dcache_stage_main_onpath_load(op) &&
+         op->chain_bit && op->inst_info;
+}
+
+static inline void dcache_stage_record_main_onpath_load_access(Op* op) {
+  if (dcache_stage_main_onpath_load(op))
+    STAT_EVENT(op->proc_id, H2P_MAIN_ONPATH_LOADS_DCACHE_ACCESS);
+}
+
+static inline double h2p_chain_profile_pct(Counter num, Counter den) {
+  return den ? (100.0 * (double)num / (double)den) : 0.0;
+}
+
+static inline uns h2p_chain_load_pattern_buckets(void) {
+  return H2P_CHAIN_LOAD_PATTERN_HASH_BUCKETS ?
+           H2P_CHAIN_LOAD_PATTERN_HASH_BUCKETS : 1;
+}
+
+static inline SCounter h2p_chain_load_pattern_delta(Addr curr, Addr prev) {
+  return curr >= prev ? (SCounter)(curr - prev) : -(SCounter)(prev - curr);
+}
+
+static inline int64 h2p_chain_load_pattern_hash_key(Addr load_pc,
+                                                    uns64 value) {
+  uns64 x = load_pc ^ (load_pc >> 17) ^ (value << 7) ^ (value >> 13);
+  x ^= x >> 33;
+  x *= 0xff51afd7ed558ccdULL;
+  x ^= x >> 33;
+  x *= 0xc4ceb9fe1a85ec53ULL;
+  x ^= x >> 33;
+  return (int64)x;
+}
+
+static Flag h2p_chain_load_pattern_value_key_eq(void const* lhs,
+                                                void const* rhs) {
+  H2P_Chain_Load_Pattern_Value_Key const* lhs_key =
+    (H2P_Chain_Load_Pattern_Value_Key const*)lhs;
+  H2P_Chain_Load_Pattern_Value_Key const* rhs_key =
+    (H2P_Chain_Load_Pattern_Value_Key const*)rhs;
+  return lhs_key->load_pc == rhs_key->load_pc &&
+         lhs_key->value == rhs_key->value;
+}
+
+static Flag h2p_chain_load_pattern_delta_key_eq(void const* lhs,
+                                                void const* rhs) {
+  H2P_Chain_Load_Pattern_Delta_Key const* lhs_key =
+    (H2P_Chain_Load_Pattern_Delta_Key const*)lhs;
+  H2P_Chain_Load_Pattern_Delta_Key const* rhs_key =
+    (H2P_Chain_Load_Pattern_Delta_Key const*)rhs;
+  return lhs_key->load_pc == rhs_key->load_pc &&
+         lhs_key->delta == rhs_key->delta;
+}
+
+static inline void h2p_chain_load_pattern_init_table(
+  Hash_Table* table, Flag* valid, const char* name, uns data_size,
+  Flag (*eq_func)(void const*, void const*)) {
+  if (!*valid) {
+    init_complex_hash_table(table, name, h2p_chain_load_pattern_buckets(),
+                            data_size, eq_func);
+    *valid = TRUE;
+  }
+}
+
+static inline Flag h2p_chain_load_pattern_note_unique_value(
+  Hash_Table* table, Flag* valid, const char* name, Addr load_pc,
+  Addr value) {
+  h2p_chain_load_pattern_init_table(table, valid, name,
+                                    sizeof(H2P_Chain_Load_Pattern_Value_Key),
+                                    h2p_chain_load_pattern_value_key_eq);
+
+  H2P_Chain_Load_Pattern_Value_Key key;
+  key.load_pc = load_pc;
+  key.value = value;
+  key.count = 0;
+
+  Flag new_entry = FALSE;
+  H2P_Chain_Load_Pattern_Value_Key* entry =
+    (H2P_Chain_Load_Pattern_Value_Key*)complex_hash_table_access_create(
+      table, h2p_chain_load_pattern_hash_key(load_pc, value), &key,
+      &new_entry);
+  if (new_entry)
+    *entry = key;
+  entry->count++;
+  return new_entry;
+}
+
+static inline Counter h2p_chain_load_pattern_note_delta(
+  Hash_Table* table, Flag* valid, const char* name, Addr load_pc,
+  SCounter delta) {
+  h2p_chain_load_pattern_init_table(table, valid, name,
+                                    sizeof(H2P_Chain_Load_Pattern_Delta_Key),
+                                    h2p_chain_load_pattern_delta_key_eq);
+
+  H2P_Chain_Load_Pattern_Delta_Key key;
+  key.load_pc = load_pc;
+  key.delta = delta;
+  key.count = 0;
+
+  Flag new_entry = FALSE;
+  H2P_Chain_Load_Pattern_Delta_Key* entry =
+    (H2P_Chain_Load_Pattern_Delta_Key*)complex_hash_table_access_create(
+      table, h2p_chain_load_pattern_hash_key(load_pc, (uns64)delta), &key,
+      &new_entry);
+  if (new_entry)
+    *entry = key;
+  entry->count++;
+  return entry->count;
+}
+
+static inline void h2p_chain_load_pattern_update_top(
+  Flag valid[H2P_CHAIN_LOAD_PATTERN_TOPK],
+  SCounter value[H2P_CHAIN_LOAD_PATTERN_TOPK],
+  Counter count[H2P_CHAIN_LOAD_PATTERN_TOPK], SCounter delta,
+  Counter new_count) {
+  int empty_slot = -1;
+  int min_slot = 0;
+
+  for (int ii = 0; ii < H2P_CHAIN_LOAD_PATTERN_TOPK; ii++) {
+    if (valid[ii] && value[ii] == delta) {
+      count[ii] = new_count;
+      return;
+    }
+    if (!valid[ii] && empty_slot < 0)
+      empty_slot = ii;
+    if (!valid[min_slot] || (valid[ii] && count[ii] < count[min_slot]))
+      min_slot = ii;
+  }
+
+  if (empty_slot >= 0) {
+    valid[empty_slot] = TRUE;
+    value[empty_slot] = delta;
+    count[empty_slot] = new_count;
+  } else if (new_count > count[min_slot]) {
+    value[min_slot] = delta;
+    count[min_slot] = new_count;
+  }
+}
+
+static inline uns h2p_chain_load_profile_hash(Addr block_start_pc,
+                                              uns block_op_idx,
+                                              Addr load_pc,
+                                              uns table_mask) {
+  uns64 x = load_pc ^ (load_pc >> 17) ^ (block_start_pc << 7) ^
+            (block_start_pc >> 13) ^ ((uns64)block_op_idx << 32) ^
+            (uns64)block_op_idx;
+  x ^= x >> 33;
+  x *= 0xff51afd7ed558ccdULL;
+  x ^= x >> 33;
+  return (uns)(x & table_mask);
+}
+
+static inline void h2p_chain_load_profile_register_dump(void) {
+  if (!h2p_chain_load_profile_dump_registered) {
+    atexit(dump_h2p_chain_load_profile_tables);
+    h2p_chain_load_profile_dump_registered = TRUE;
+  }
+}
+
+static H2P_Chain_Load_Profile_Summary_Entry*
+h2p_chain_load_profile_get_pc_entry(uns proc_id, Addr load_pc, Flag create) {
+  if (proc_id >= MAX_NUM_PROCS)
+    return NULL;
+
+  if (!h2p_chain_load_pc_profile_table[proc_id]) {
+    if (!create)
+      return NULL;
+    h2p_chain_load_profile_register_dump();
+    h2p_chain_load_pc_profile_table[proc_id] =
+      (H2P_Chain_Load_Profile_Summary_Entry*)calloc(
+        H2P_CHAIN_LOAD_PROFILE_PC_TABLE_SIZE,
+        sizeof(H2P_Chain_Load_Profile_Summary_Entry));
+    ASSERT(proc_id, h2p_chain_load_pc_profile_table[proc_id]);
+  }
+
+  H2P_Chain_Load_Profile_Summary_Entry* table =
+    h2p_chain_load_pc_profile_table[proc_id];
+  uns index = h2p_chain_load_profile_hash(0, 0, load_pc,
+                                          H2P_CHAIN_LOAD_PROFILE_PC_TABLE_SIZE - 1);
+  for (uns probe = 0; probe < H2P_CHAIN_LOAD_PROFILE_PC_TABLE_SIZE; probe++) {
+    H2P_Chain_Load_Profile_Summary_Entry* entry =
+      &table[(index + probe) & (H2P_CHAIN_LOAD_PROFILE_PC_TABLE_SIZE - 1)];
+    if (!entry->valid) {
+      if (!create)
+        return NULL;
+      entry->valid = TRUE;
+      entry->load_pc = load_pc;
+      return entry;
+    }
+    if (entry->load_pc == load_pc)
+      return entry;
+  }
+
+  if (create)
+    h2p_chain_load_pc_profile_overflow[proc_id]++;
+  return NULL;
+}
+
+static H2P_Chain_Load_Profile_Summary_Entry*
+h2p_chain_load_profile_get_slot_entry(uns proc_id, Addr block_start_pc,
+                                      uns block_op_idx, Addr load_pc,
+                                      Flag create) {
+  if (proc_id >= MAX_NUM_PROCS)
+    return NULL;
+
+  if (!h2p_chain_load_slot_profile_table[proc_id]) {
+    if (!create)
+      return NULL;
+    h2p_chain_load_profile_register_dump();
+    h2p_chain_load_slot_profile_table[proc_id] =
+      (H2P_Chain_Load_Profile_Summary_Entry*)calloc(
+        H2P_CHAIN_LOAD_PROFILE_SLOT_TABLE_SIZE,
+        sizeof(H2P_Chain_Load_Profile_Summary_Entry));
+    ASSERT(proc_id, h2p_chain_load_slot_profile_table[proc_id]);
+  }
+
+  H2P_Chain_Load_Profile_Summary_Entry* table =
+    h2p_chain_load_slot_profile_table[proc_id];
+  uns index = h2p_chain_load_profile_hash(
+    block_start_pc, block_op_idx, load_pc,
+    H2P_CHAIN_LOAD_PROFILE_SLOT_TABLE_SIZE - 1);
+  for (uns probe = 0; probe < H2P_CHAIN_LOAD_PROFILE_SLOT_TABLE_SIZE; probe++) {
+    H2P_Chain_Load_Profile_Summary_Entry* entry =
+      &table[(index + probe) & (H2P_CHAIN_LOAD_PROFILE_SLOT_TABLE_SIZE - 1)];
+    if (!entry->valid) {
+      if (!create)
+        return NULL;
+      entry->valid = TRUE;
+      entry->block_start_pc = block_start_pc;
+      entry->block_op_idx = block_op_idx;
+      entry->load_pc = load_pc;
+      return entry;
+    }
+    if (entry->block_start_pc == block_start_pc &&
+        entry->block_op_idx == block_op_idx && entry->load_pc == load_pc)
+      return entry;
+  }
+
+  if (create)
+    h2p_chain_load_slot_profile_overflow[proc_id]++;
+  return NULL;
+}
+
+static inline void h2p_chain_load_profile_record_stride_hist(
+  H2P_Chain_Load_Profile_Summary_Entry* entry, SCounter stride) {
+  int empty_slot = -1;
+  int min_slot = 0;
+  for (int ii = 0; ii < H2P_CHAIN_LOAD_PROFILE_STRIDE_SLOTS; ii++) {
+    if (entry->stride_valid[ii] && entry->stride_value[ii] == stride) {
+      entry->stride_count[ii]++;
+      return;
+    }
+    if (!entry->stride_valid[ii] && empty_slot < 0)
+      empty_slot = ii;
+    if (entry->stride_count[ii] < entry->stride_count[min_slot])
+      min_slot = ii;
+  }
+
+  int slot = empty_slot >= 0 ? empty_slot : min_slot;
+  entry->stride_valid[slot] = TRUE;
+  entry->stride_value[slot] = stride;
+  entry->stride_count[slot] = 1;
+}
+
+static inline void h2p_chain_load_profile_record_reuse(
+  H2P_Chain_Load_Profile_Summary_Entry* entry, Op* op, Addr line_addr) {
+  if (entry->has_last_addr) {
+    Addr prev_line = entry->last_line_addr >> LOG2(DCACHE_LINE_SIZE);
+    Addr curr_line = line_addr >> LOG2(DCACHE_LINE_SIZE);
+    Counter stride_abs = curr_line >= prev_line ? curr_line - prev_line :
+                                                   prev_line - curr_line;
+    SCounter stride = curr_line >= prev_line ? (SCounter)stride_abs :
+                                               -(SCounter)stride_abs;
+
+    entry->reuse++;
+    if (entry->last_va == op->oracle_info.va)
+      entry->same_va++;
+    if (entry->last_line_addr == line_addr)
+      entry->same_va_line++;
+
+    if (stride_abs == 0)
+      entry->stride_zero++;
+    else if (stride == 1)
+      entry->stride_pos_1++;
+    else if (stride == -1)
+      entry->stride_neg_1++;
+    else if (stride_abs <= 4)
+      entry->stride_small_abs_le_4++;
+    else if (stride_abs <= 16)
+      entry->stride_small_abs_le_16++;
+    else
+      entry->stride_other++;
+
+    h2p_chain_load_profile_record_stride_hist(entry, stride);
+  }
+
+  entry->has_last_addr = TRUE;
+  entry->last_va = op->oracle_info.va;
+  entry->last_line_addr = line_addr;
+}
+
+static inline void h2p_chain_load_pattern_record_pc_access(
+  H2P_Chain_Load_Profile_Summary_Entry* entry, Op* op, Addr line_addr) {
+  if (!H2P_CHAIN_LOAD_PATTERN_PROFILE || !entry || !op || !op->inst_info)
+    return;
+
+  uns proc_id = op->proc_id;
+  if (proc_id >= MAX_NUM_PROCS)
+    return;
+
+  Addr load_pc = op->inst_info->addr;
+  Addr vaddr = op->oracle_info.va;
+  Addr line_num = line_addr >> LOG2(DCACHE_LINE_SIZE);
+
+  if (h2p_chain_load_pattern_note_unique_value(
+        &h2p_chain_load_unique_vaddr_table[proc_id],
+        &h2p_chain_load_unique_vaddr_table_valid[proc_id],
+        "H2P chain load unique vaddr", load_pc, vaddr)) {
+    entry->unique_vaddr++;
+  }
+
+  if (h2p_chain_load_pattern_note_unique_value(
+        &h2p_chain_load_unique_line_table[proc_id],
+        &h2p_chain_load_unique_line_table_valid[proc_id],
+        "H2P chain load unique line", load_pc, line_num)) {
+    entry->unique_line++;
+  }
+
+  if (!entry->has_last_addr)
+    return;
+
+  SCounter byte_delta =
+    h2p_chain_load_pattern_delta(vaddr, entry->last_va);
+  SCounter line_delta =
+    h2p_chain_load_pattern_delta(line_num,
+                                 entry->last_line_addr >>
+                                   LOG2(DCACHE_LINE_SIZE));
+  Counter byte_delta_count = h2p_chain_load_pattern_note_delta(
+    &h2p_chain_load_byte_delta_table[proc_id],
+    &h2p_chain_load_byte_delta_table_valid[proc_id],
+    "H2P chain load byte delta", load_pc, byte_delta);
+  Counter line_delta_count = h2p_chain_load_pattern_note_delta(
+    &h2p_chain_load_line_delta_table[proc_id],
+    &h2p_chain_load_line_delta_table_valid[proc_id],
+    "H2P chain load line delta", load_pc, line_delta);
+
+  h2p_chain_load_pattern_update_top(entry->byte_delta_valid,
+                                    entry->byte_delta_value,
+                                    entry->byte_delta_count, byte_delta,
+                                    byte_delta_count);
+  h2p_chain_load_pattern_update_top(entry->line_delta_valid,
+                                    entry->line_delta_value,
+                                    entry->line_delta_count, line_delta,
+                                    line_delta_count);
+}
+
+static inline void h2p_chain_load_profile_record_access(Op* op,
+                                                        Addr line_addr) {
+  if (!dcache_stage_main_chain_load_profile_op(op))
+    return;
+
+  Addr load_pc = op->inst_info->addr;
+  H2P_Chain_Load_Profile_Summary_Entry* pc_entry =
+    h2p_chain_load_profile_get_pc_entry(op->proc_id, load_pc, TRUE);
+  H2P_Chain_Load_Profile_Summary_Entry* slot_entry =
+    h2p_chain_load_profile_get_slot_entry(
+      op->proc_id, op->h2p_chain_block_start_pc,
+      op->h2p_chain_block_op_idx, load_pc, TRUE);
+
+  if (pc_entry) {
+    pc_entry->accesses++;
+    h2p_chain_load_pattern_record_pc_access(pc_entry, op, line_addr);
+    h2p_chain_load_profile_record_reuse(pc_entry, op, line_addr);
+  }
+  if (slot_entry) {
+    slot_entry->accesses++;
+    h2p_chain_load_profile_record_reuse(slot_entry, op, line_addr);
+  }
+
+  op->h2p_chain_profile_access_recorded = TRUE;
+}
+
+static inline void h2p_chain_load_profile_record_result_for_entry(
+  H2P_Chain_Load_Profile_Summary_Entry* entry, Op* op,
+  H2P_Chain_Load_Profile_Result result) {
+  if (!entry)
+    return;
+
+  switch (result) {
+    case H2P_CHAIN_LOAD_PROFILE_RESULT_DCACHE_HIT:
+      entry->dcache_hit++;
+      break;
+    case H2P_CHAIN_LOAD_PROFILE_RESULT_STORE_REQ_BUFFER_HIT:
+      entry->store_req_buffer_hit++;
+      break;
+    case H2P_CHAIN_LOAD_PROFILE_RESULT_MLC_HIT:
+      entry->dcache_miss++;
+      entry->mlc_hit++;
+      break;
+    case H2P_CHAIN_LOAD_PROFILE_RESULT_SCARAB_L1_HIT:
+      entry->dcache_miss++;
+      entry->scarab_l1_hit++;
+      break;
+    case H2P_CHAIN_LOAD_PROFILE_RESULT_MEM_ACCESS:
+      entry->dcache_miss++;
+      entry->mem_access++;
+      break;
+  }
+
+  if (op->dcache_cycle != MAX_CTR && op->done_cycle >= op->dcache_cycle) {
+    entry->latency_samples++;
+    entry->latency_total += op->done_cycle - op->dcache_cycle;
+  }
+}
+
+static inline void h2p_chain_load_profile_record_result(
+  Op* op, H2P_Chain_Load_Profile_Result result) {
+  if (!dcache_stage_main_chain_load_profile_op(op) ||
+      !op->h2p_chain_profile_access_recorded)
+    return;
+
+  Addr load_pc = op->inst_info->addr;
+  h2p_chain_load_profile_record_result_for_entry(
+    h2p_chain_load_profile_get_pc_entry(op->proc_id, load_pc, FALSE), op,
+    result);
+  h2p_chain_load_profile_record_result_for_entry(
+    h2p_chain_load_profile_get_slot_entry(
+      op->proc_id, op->h2p_chain_block_start_pc,
+      op->h2p_chain_block_op_idx, load_pc, FALSE),
+    op, result);
+}
+
+static inline void dcache_stage_record_main_chain_load_profile_access(
+  Op* op, Addr line_addr, Flag first_access) {
+  if (!first_access || !dcache_stage_main_chain_load_profile_op(op))
+    return;
+
+  STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_DCACHE_ACCESS);
+  h2p_chain_load_profile_record_access(op, line_addr);
+}
+
+static inline void dcache_stage_record_main_chain_load_profile_latency(Op* op) {
+  if (!dcache_stage_main_chain_load_profile_op(op) ||
+      op->dcache_cycle == MAX_CTR || op->done_cycle < op->dcache_cycle)
+    return;
+
+  Counter latency = op->done_cycle - op->dcache_cycle;
+  STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_LATENCY_SAMPLES);
+  INC_STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_LATENCY_TOTAL,
+                 latency);
+  INC_STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_LATENCY_AVG,
+                 latency);
+}
+
+static inline void dcache_stage_record_main_chain_load_profile_dcache_hit(
+  Op* op) {
+  if (!dcache_stage_main_chain_load_profile_op(op))
+    return;
+
+  STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_DCACHE_HIT);
+  STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_DCACHE_HIT_PCT);
+  dcache_stage_record_main_chain_load_profile_latency(op);
+  h2p_chain_load_profile_record_result(
+    op, H2P_CHAIN_LOAD_PROFILE_RESULT_DCACHE_HIT);
+}
+
+static inline void dcache_stage_record_main_chain_load_profile_store_fwd(
+  Op* op) {
+  if (!dcache_stage_main_chain_load_profile_op(op))
+    return;
+
+  STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_STORE_FWD);
+  STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_STORE_FWD_PCT);
+  dcache_stage_record_main_chain_load_profile_latency(op);
+  h2p_chain_load_profile_record_result(
+    op, H2P_CHAIN_LOAD_PROFILE_RESULT_STORE_REQ_BUFFER_HIT);
+}
+
+static inline void dcache_stage_record_main_chain_load_profile_fill(Op* op,
+                                                                    Mem_Req* req) {
+  if (!dcache_stage_main_chain_load_profile_op(op))
+    return;
+
+  STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_DCACHE_MISS);
+  STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_DCACHE_MISS_PCT);
+  if (req->mlc_hit) {
+    STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_MLC_HIT);
+    STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_MLC_HIT_PCT);
+    h2p_chain_load_profile_record_result(
+      op, H2P_CHAIN_LOAD_PROFILE_RESULT_MLC_HIT);
+  } else if (req->l1_hit) {
+    STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_SCARAB_L1_HIT);
+    STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_SCARAB_L1_HIT_PCT);
+    h2p_chain_load_profile_record_result(
+      op, H2P_CHAIN_LOAD_PROFILE_RESULT_SCARAB_L1_HIT);
+  } else {
+    STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_MEM_ACCESS);
+    STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_MEM_ACCESS_PCT);
+    h2p_chain_load_profile_record_result(
+      op, H2P_CHAIN_LOAD_PROFILE_RESULT_MEM_ACCESS);
+  }
+  dcache_stage_record_main_chain_load_profile_latency(op);
+}
+
 static inline Flag dcache_stage_try_main_chain_load_oracle(Op* op) {
-  if (!TEA_MAIN_CHAIN_PERFECT_LOAD || op->thread_id != 0 ||
+  if (!H2P_CHAIN_PERFECT_LOAD || op->thread_id != 0 ||
       op->table_info->mem_type != MEM_LD || !op->chain_bit || op->off_path)
     return FALSE;
 
-  STAT_EVENT(op->proc_id, TEA_MAIN_CHAIN_LOAD_ORACLE_CANDIDATES);
+  STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_ORACLE_CANDIDATES);
 
   if (scan_stores(op->oracle_info.va, op->oracle_info.mem_size)) {
-    STAT_EVENT(op->proc_id, TEA_MAIN_CHAIN_LOAD_ORACLE_STORE_FWD_EXCLUDED);
+    STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_ORACLE_STORE_FWD_EXCLUDED);
     return FALSE;
   }
 
-  Counter latency = TEA_MAIN_CHAIN_PERFECT_LOAD_LATENCY;
+  Counter latency = H2P_CHAIN_PERFECT_LOAD_LATENCY;
   op->state = OS_SCHEDULED;
   op->dcache_cycle = cycle_count;
   op->done_cycle = cycle_count + latency;
@@ -603,11 +1259,642 @@ static inline Flag dcache_stage_try_main_chain_load_oracle(Op* op) {
   op->engine_info.dcmiss = FALSE;
   wake_up_ops(op, REG_DATA_DEP, model->wake_hook);
 
-  STAT_EVENT(op->proc_id, TEA_MAIN_CHAIN_LOAD_ORACLE_BYPASSED);
-  STAT_EVENT(op->proc_id, TEA_MAIN_CHAIN_LOAD_ORACLE_LATENCY_SAMPLES);
-  INC_STAT_EVENT(op->proc_id, TEA_MAIN_CHAIN_LOAD_ORACLE_LATENCY_TOTAL, latency);
-  INC_STAT_EVENT(op->proc_id, TEA_MAIN_CHAIN_LOAD_ORACLE_LATENCY_AVG, latency);
+  dcache_stage_record_main_onpath_load_access(op);
+  STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_ORACLE_BYPASSED);
+  STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_ORACLE_BYPASSED_PCT);
+  STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_ORACLE_LATENCY_SAMPLES);
+  INC_STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_ORACLE_LATENCY_TOTAL, latency);
+  INC_STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_ORACLE_LATENCY_AVG, latency);
   return TRUE;
+}
+
+static void h2p_chain_load_profile_dominant_stride(
+  H2P_Chain_Load_Profile_Summary_Entry* entry, SCounter* stride,
+  Counter* count) {
+  *stride = 0;
+  *count = 0;
+  for (int ii = 0; ii < H2P_CHAIN_LOAD_PROFILE_STRIDE_SLOTS; ii++) {
+    if (entry->stride_valid[ii] && entry->stride_count[ii] > *count) {
+      *stride = entry->stride_value[ii];
+      *count = entry->stride_count[ii];
+    }
+  }
+}
+
+static int h2p_chain_load_profile_entry_access_cmp(const void* lhs,
+                                                   const void* rhs) {
+  const H2P_Chain_Load_Profile_Summary_Entry* lhs_entry =
+    *(const H2P_Chain_Load_Profile_Summary_Entry* const*)lhs;
+  const H2P_Chain_Load_Profile_Summary_Entry* rhs_entry =
+    *(const H2P_Chain_Load_Profile_Summary_Entry* const*)rhs;
+
+  if (lhs_entry->accesses < rhs_entry->accesses)
+    return 1;
+  if (lhs_entry->accesses > rhs_entry->accesses)
+    return -1;
+  if (lhs_entry->load_pc < rhs_entry->load_pc)
+    return -1;
+  if (lhs_entry->load_pc > rhs_entry->load_pc)
+    return 1;
+  if (lhs_entry->block_start_pc < rhs_entry->block_start_pc)
+    return -1;
+  if (lhs_entry->block_start_pc > rhs_entry->block_start_pc)
+    return 1;
+  if (lhs_entry->block_op_idx < rhs_entry->block_op_idx)
+    return -1;
+  if (lhs_entry->block_op_idx > rhs_entry->block_op_idx)
+    return 1;
+  return 0;
+}
+
+static int h2p_chain_load_pattern_top_cmp(const void* lhs,
+                                          const void* rhs) {
+  const H2P_Chain_Load_Pattern_Top_Entry* lhs_entry =
+    (const H2P_Chain_Load_Pattern_Top_Entry*)lhs;
+  const H2P_Chain_Load_Pattern_Top_Entry* rhs_entry =
+    (const H2P_Chain_Load_Pattern_Top_Entry*)rhs;
+
+  if (!lhs_entry->valid && !rhs_entry->valid)
+    return 0;
+  if (!lhs_entry->valid)
+    return 1;
+  if (!rhs_entry->valid)
+    return -1;
+  if (lhs_entry->count < rhs_entry->count)
+    return 1;
+  if (lhs_entry->count > rhs_entry->count)
+    return -1;
+  if (lhs_entry->delta < rhs_entry->delta)
+    return -1;
+  if (lhs_entry->delta > rhs_entry->delta)
+    return 1;
+  return 0;
+}
+
+static void h2p_chain_load_pattern_collect_top(
+  Flag valid[H2P_CHAIN_LOAD_PATTERN_TOPK],
+  SCounter value[H2P_CHAIN_LOAD_PATTERN_TOPK],
+  Counter count[H2P_CHAIN_LOAD_PATTERN_TOPK],
+  H2P_Chain_Load_Pattern_Top_Entry top[H2P_CHAIN_LOAD_PATTERN_TOPK]) {
+  for (int ii = 0; ii < H2P_CHAIN_LOAD_PATTERN_TOPK; ii++) {
+    top[ii].valid = valid[ii];
+    top[ii].delta = value[ii];
+    top[ii].count = count[ii];
+  }
+  qsort(top, H2P_CHAIN_LOAD_PATTERN_TOPK,
+        sizeof(H2P_Chain_Load_Pattern_Top_Entry),
+        h2p_chain_load_pattern_top_cmp);
+}
+
+static Counter h2p_chain_load_pattern_top_coverage(
+  H2P_Chain_Load_Pattern_Top_Entry top[H2P_CHAIN_LOAD_PATTERN_TOPK],
+  int top_k) {
+  Counter count = 0;
+  int limit = MIN2(top_k, H2P_CHAIN_LOAD_PATTERN_TOPK);
+  for (int ii = 0; ii < limit; ii++) {
+    if (top[ii].valid)
+      count += top[ii].count;
+  }
+  return count;
+}
+
+static const char* h2p_chain_load_pattern_classify(
+  Counter accesses, Counter unique_values, Counter reuse, Counter zero_delta,
+  H2P_Chain_Load_Pattern_Top_Entry top[H2P_CHAIN_LOAD_PATTERN_TOPK]) {
+  if (!accesses)
+    return "empty";
+  if (unique_values == 1 ||
+      h2p_chain_profile_pct(zero_delta, reuse) >=
+        H2P_CHAIN_LOAD_PATTERN_CONSTANT_PCT)
+    return "constant";
+  if (top[0].valid && top[0].delta != 0 &&
+      h2p_chain_profile_pct(top[0].count, reuse) >=
+        H2P_CHAIN_LOAD_PATTERN_SINGLE_STRIDE_PCT)
+    return "single_stride";
+  if (h2p_chain_profile_pct(
+        h2p_chain_load_pattern_top_coverage(top, 4), reuse) >=
+      H2P_CHAIN_LOAD_PATTERN_MULTI_STRIDE_PCT)
+    return "multi_stride";
+  return "irregular";
+}
+
+static void h2p_chain_load_profile_dump_entry(
+  FILE* file, uns proc_id, H2P_Chain_Load_Profile_Summary_Entry* entry,
+  Counter total_accesses, Counter cumulative_accesses, uns rank,
+  Flag include_block_key) {
+  Counter lower_level_accesses =
+    entry->mlc_hit + entry->scarab_l1_hit + entry->mem_access;
+  Counter stride_abs_le_4 = entry->stride_zero + entry->stride_pos_1 +
+                            entry->stride_neg_1 +
+                            entry->stride_small_abs_le_4;
+  Counter stride_abs_le_16 = stride_abs_le_4 +
+                             entry->stride_small_abs_le_16;
+  double avg_latency = entry->latency_samples ?
+    (double)entry->latency_total / (double)entry->latency_samples : 0.0;
+  double benefit_score = (double)lower_level_accesses * avg_latency;
+  SCounter dominant_stride = 0;
+  Counter dominant_stride_count = 0;
+  h2p_chain_load_profile_dominant_stride(entry, &dominant_stride,
+                                         &dominant_stride_count);
+
+  if (include_block_key) {
+    fprintf(file, "%u,0x%llx,%u,0x%llx,",
+            (unsigned)proc_id,
+            (unsigned long long)entry->block_start_pc,
+            (unsigned)entry->block_op_idx,
+            (unsigned long long)entry->load_pc);
+  } else {
+    fprintf(file, "%u,0x%llx,",
+            (unsigned)proc_id,
+            (unsigned long long)entry->load_pc);
+  }
+
+  fprintf(file,
+          "%u,%.6f,"
+          "%llu,%.6f,"
+          "%llu,%.6f,%llu,%.6f,%llu,%.6f,"
+          "%llu,%.6f,%llu,%.6f,%llu,%.6f,%llu,%.6f,"
+          "%llu,%llu,%.6f,%llu,%.6f,%.6f,"
+          "%llu,%.6f,%llu,%.6f,%llu,%.6f,"
+          "%llu,%.6f,%llu,%.6f,%llu,%.6f,"
+          "%llu,%.6f,%llu,%.6f,"
+          "%lld,%llu,%.6f\n",
+          (unsigned)rank,
+          h2p_chain_profile_pct(cumulative_accesses, total_accesses),
+          (unsigned long long)entry->accesses,
+          h2p_chain_profile_pct(entry->accesses, total_accesses),
+          (unsigned long long)entry->dcache_hit,
+          h2p_chain_profile_pct(entry->dcache_hit, entry->accesses),
+          (unsigned long long)entry->store_req_buffer_hit,
+          h2p_chain_profile_pct(entry->store_req_buffer_hit, entry->accesses),
+          (unsigned long long)entry->dcache_miss,
+          h2p_chain_profile_pct(entry->dcache_miss, entry->accesses),
+          (unsigned long long)entry->mlc_hit,
+          h2p_chain_profile_pct(entry->mlc_hit, entry->accesses),
+          (unsigned long long)entry->scarab_l1_hit,
+          h2p_chain_profile_pct(entry->scarab_l1_hit, entry->accesses),
+          (unsigned long long)entry->mem_access,
+          h2p_chain_profile_pct(entry->mem_access, entry->accesses),
+          (unsigned long long)lower_level_accesses,
+          h2p_chain_profile_pct(lower_level_accesses, entry->accesses),
+          (unsigned long long)entry->latency_samples,
+          (unsigned long long)entry->latency_total,
+          avg_latency,
+          (unsigned long long)entry->reuse,
+          h2p_chain_profile_pct(entry->reuse, entry->accesses),
+          benefit_score,
+          (unsigned long long)entry->same_va,
+          h2p_chain_profile_pct(entry->same_va, entry->reuse),
+          (unsigned long long)entry->same_va_line,
+          h2p_chain_profile_pct(entry->same_va_line, entry->reuse),
+          (unsigned long long)entry->stride_zero,
+          h2p_chain_profile_pct(entry->stride_zero, entry->reuse),
+          (unsigned long long)entry->stride_pos_1,
+          h2p_chain_profile_pct(entry->stride_pos_1, entry->reuse),
+          (unsigned long long)entry->stride_neg_1,
+          h2p_chain_profile_pct(entry->stride_neg_1, entry->reuse),
+          (unsigned long long)stride_abs_le_4,
+          h2p_chain_profile_pct(stride_abs_le_4, entry->reuse),
+          (unsigned long long)stride_abs_le_16,
+          h2p_chain_profile_pct(stride_abs_le_16, entry->reuse),
+          (unsigned long long)entry->stride_other,
+          h2p_chain_profile_pct(entry->stride_other, entry->reuse),
+          (long long)dominant_stride,
+          (unsigned long long)dominant_stride_count,
+          h2p_chain_profile_pct(dominant_stride_count, entry->reuse));
+}
+
+static void h2p_chain_load_profile_dump_table(
+  const char* name, H2P_Chain_Load_Profile_Summary_Entry** tables,
+  uns table_size, Flag include_block_key) {
+  FILE* file = file_tag_fopen(OUTPUT_DIR, name, "w");
+  if (!file)
+    return;
+
+  if (include_block_key)
+    fprintf(file, "proc_id,block_start_pc,block_op_idx,load_pc,");
+  else
+    fprintf(file, "proc_id,load_pc,");
+
+  fprintf(file,
+          "rank,cumulative_coverage_pct,"
+          "accesses,coverage_pct,"
+          "dcache_hit,dcache_hit_pct,"
+          "store_req_buffer_hit_after_l1_miss,"
+          "store_req_buffer_hit_after_l1_miss_pct,"
+          "dcache_miss,dcache_miss_pct,"
+          "mlc_hit,mlc_hit_pct,"
+          "scarab_l1_hit,scarab_l1_hit_pct,"
+          "mem_access,mem_access_pct,"
+          "lower_level_accesses,lower_level_accesses_pct,"
+          "latency_samples,latency_total,avg_latency,"
+          "reuse,reuse_pct_of_access,benefit_score,"
+          "same_va,same_va_pct_of_reuse,"
+          "same_line,same_line_pct_of_reuse,"
+          "stride_zero,stride_zero_pct_of_reuse,"
+          "stride_pos1,stride_pos1_pct_of_reuse,"
+          "stride_neg1,stride_neg1_pct_of_reuse,"
+          "stride_abs_le4_incl_0_1,stride_abs_le4_incl_0_1_pct_of_reuse,"
+          "stride_abs_le16_incl_le4,"
+          "stride_abs_le16_incl_le4_pct_of_reuse,"
+          "stride_other,stride_other_pct_of_reuse,"
+          "dominant_stride,dominant_stride_count,"
+          "dominant_stride_pct_of_reuse\n");
+
+  for (uns proc_id = 0; proc_id < MAX_NUM_PROCS; proc_id++) {
+    H2P_Chain_Load_Profile_Summary_Entry* table = tables[proc_id];
+    if (!table)
+      continue;
+
+    Counter total_accesses = 0;
+    uns valid_count = 0;
+    for (uns ii = 0; ii < table_size; ii++) {
+      if (table[ii].valid) {
+        total_accesses += table[ii].accesses;
+        valid_count++;
+      }
+    }
+
+    if (!valid_count)
+      continue;
+
+    H2P_Chain_Load_Profile_Summary_Entry** sorted_entries =
+      (H2P_Chain_Load_Profile_Summary_Entry**)calloc(
+        valid_count, sizeof(H2P_Chain_Load_Profile_Summary_Entry*));
+    ASSERT(proc_id, sorted_entries);
+
+    uns valid_idx = 0;
+    for (uns ii = 0; ii < table_size; ii++) {
+      if (table[ii].valid)
+        sorted_entries[valid_idx++] = &table[ii];
+    }
+
+    qsort(sorted_entries, valid_count,
+          sizeof(H2P_Chain_Load_Profile_Summary_Entry*),
+          h2p_chain_load_profile_entry_access_cmp);
+
+    Counter cumulative_accesses = 0;
+    for (uns ii = 0; ii < valid_count; ii++) {
+      cumulative_accesses += sorted_entries[ii]->accesses;
+      h2p_chain_load_profile_dump_entry(file, proc_id, sorted_entries[ii],
+                                        total_accesses,
+                                        cumulative_accesses, ii + 1,
+                                        include_block_key);
+    }
+
+    free(sorted_entries);
+  }
+
+  fclose(file);
+}
+
+static void h2p_chain_load_pattern_dump_pc_entry(
+  FILE* file, uns proc_id, H2P_Chain_Load_Profile_Summary_Entry* entry,
+  Counter total_accesses, Counter cumulative_accesses, uns rank) {
+  H2P_Chain_Load_Pattern_Top_Entry byte_top[H2P_CHAIN_LOAD_PATTERN_TOPK];
+  H2P_Chain_Load_Pattern_Top_Entry line_top[H2P_CHAIN_LOAD_PATTERN_TOPK];
+  h2p_chain_load_pattern_collect_top(entry->byte_delta_valid,
+                                     entry->byte_delta_value,
+                                     entry->byte_delta_count, byte_top);
+  h2p_chain_load_pattern_collect_top(entry->line_delta_valid,
+                                     entry->line_delta_value,
+                                     entry->line_delta_count, line_top);
+
+  Counter byte_top2 = h2p_chain_load_pattern_top_coverage(byte_top, 2);
+  Counter byte_top4 = h2p_chain_load_pattern_top_coverage(byte_top, 4);
+  Counter byte_top8 = h2p_chain_load_pattern_top_coverage(byte_top, 8);
+  Counter line_top2 = h2p_chain_load_pattern_top_coverage(line_top, 2);
+  Counter line_top4 = h2p_chain_load_pattern_top_coverage(line_top, 4);
+  Counter line_top8 = h2p_chain_load_pattern_top_coverage(line_top, 8);
+
+  fprintf(file,
+          "%u,0x%llx,%u,%.6f,"
+          "%llu,%llu,%.6f,%llu,%.6f,"
+          "%llu,%llu,%.6f,%llu,%.6f,"
+          "%lld,%llu,%.6f,%.6f,%.6f,%.6f,"
+          "%lld,%llu,%.6f,%.6f,%.6f,%.6f,"
+          "%s,%s\n",
+          (unsigned)proc_id,
+          (unsigned long long)entry->load_pc,
+          (unsigned)rank,
+          h2p_chain_profile_pct(cumulative_accesses, total_accesses),
+          (unsigned long long)entry->accesses,
+          (unsigned long long)entry->unique_vaddr,
+          h2p_chain_profile_pct(entry->unique_vaddr, entry->accesses),
+          (unsigned long long)entry->unique_line,
+          h2p_chain_profile_pct(entry->unique_line, entry->accesses),
+          (unsigned long long)entry->reuse,
+          (unsigned long long)entry->same_va,
+          h2p_chain_profile_pct(entry->same_va, entry->reuse),
+          (unsigned long long)entry->same_va_line,
+          h2p_chain_profile_pct(entry->same_va_line, entry->reuse),
+          byte_top[0].valid ? (long long)byte_top[0].delta : 0,
+          (unsigned long long)(byte_top[0].valid ? byte_top[0].count : 0),
+          h2p_chain_profile_pct(byte_top[0].valid ? byte_top[0].count : 0,
+                                entry->reuse),
+          h2p_chain_profile_pct(byte_top2, entry->reuse),
+          h2p_chain_profile_pct(byte_top4, entry->reuse),
+          h2p_chain_profile_pct(byte_top8, entry->reuse),
+          line_top[0].valid ? (long long)line_top[0].delta : 0,
+          (unsigned long long)(line_top[0].valid ? line_top[0].count : 0),
+          h2p_chain_profile_pct(line_top[0].valid ? line_top[0].count : 0,
+                                entry->reuse),
+          h2p_chain_profile_pct(line_top2, entry->reuse),
+          h2p_chain_profile_pct(line_top4, entry->reuse),
+          h2p_chain_profile_pct(line_top8, entry->reuse),
+          h2p_chain_load_pattern_classify(entry->accesses,
+                                          entry->unique_vaddr,
+                                          entry->reuse, entry->same_va,
+                                          byte_top),
+          h2p_chain_load_pattern_classify(entry->accesses,
+                                          entry->unique_line,
+                                          entry->reuse,
+                                          entry->same_va_line, line_top));
+}
+
+static void h2p_chain_load_pattern_dump_pc_profile(void) {
+  FILE* file = file_tag_fopen(OUTPUT_DIR,
+                              "h2p_chain_load_pc_pattern_profile", "w");
+  if (!file)
+    return;
+
+  fprintf(file,
+          "proc_id,load_pc,rank,cumulative_coverage_pct,"
+          "accesses,unique_vaddr,unique_vaddr_pct_of_access,"
+          "unique_line,unique_line_pct_of_access,"
+          "reuse,same_va,zero_byte_delta_pct_of_reuse,"
+          "same_line,zero_line_delta_pct_of_reuse,"
+          "dominant_byte_delta,dominant_byte_delta_count,"
+          "dominant_byte_delta_pct_of_reuse,"
+          "top2_byte_delta_coverage_pct_of_reuse,"
+          "top4_byte_delta_coverage_pct_of_reuse,"
+          "top8_byte_delta_coverage_pct_of_reuse,"
+          "dominant_line_delta,dominant_line_delta_count,"
+          "dominant_line_delta_pct_of_reuse,"
+          "top2_line_delta_coverage_pct_of_reuse,"
+          "top4_line_delta_coverage_pct_of_reuse,"
+          "top8_line_delta_coverage_pct_of_reuse,"
+          "byte_pattern_class,line_pattern_class\n");
+
+  for (uns proc_id = 0; proc_id < MAX_NUM_PROCS; proc_id++) {
+    H2P_Chain_Load_Profile_Summary_Entry* table =
+      h2p_chain_load_pc_profile_table[proc_id];
+    if (!table)
+      continue;
+
+    Counter total_accesses = 0;
+    uns valid_count = 0;
+    for (uns ii = 0; ii < H2P_CHAIN_LOAD_PROFILE_PC_TABLE_SIZE; ii++) {
+      if (table[ii].valid) {
+        total_accesses += table[ii].accesses;
+        valid_count++;
+      }
+    }
+    if (!valid_count)
+      continue;
+
+    H2P_Chain_Load_Profile_Summary_Entry** sorted_entries =
+      (H2P_Chain_Load_Profile_Summary_Entry**)calloc(
+        valid_count, sizeof(H2P_Chain_Load_Profile_Summary_Entry*));
+    ASSERT(proc_id, sorted_entries);
+
+    uns valid_idx = 0;
+    for (uns ii = 0; ii < H2P_CHAIN_LOAD_PROFILE_PC_TABLE_SIZE; ii++) {
+      if (table[ii].valid)
+        sorted_entries[valid_idx++] = &table[ii];
+    }
+
+    qsort(sorted_entries, valid_count,
+          sizeof(H2P_Chain_Load_Profile_Summary_Entry*),
+          h2p_chain_load_profile_entry_access_cmp);
+
+    Counter cumulative_accesses = 0;
+    for (uns ii = 0; ii < valid_count; ii++) {
+      cumulative_accesses += sorted_entries[ii]->accesses;
+      h2p_chain_load_pattern_dump_pc_entry(file, proc_id, sorted_entries[ii],
+                                           total_accesses,
+                                           cumulative_accesses, ii + 1);
+    }
+    free(sorted_entries);
+  }
+
+  fclose(file);
+}
+
+typedef struct H2P_Chain_Load_Delta_Dump_Arg_struct {
+  FILE* file;
+  uns proc_id;
+  const char* delta_type;
+} H2P_Chain_Load_Delta_Dump_Arg;
+
+typedef struct H2P_Chain_Load_Addr_Repeatability_Dump_Arg_struct {
+  Hash_Table* histogram;
+  Counter total_target_load_accesses;
+  Counter total_unique_pc_vaddr;
+} H2P_Chain_Load_Addr_Repeatability_Dump_Arg;
+
+static void h2p_chain_load_pattern_dump_delta_entry(void* data, void* arg) {
+  H2P_Chain_Load_Pattern_Delta_Key* entry =
+    (H2P_Chain_Load_Pattern_Delta_Key*)data;
+  H2P_Chain_Load_Delta_Dump_Arg* dump_arg =
+    (H2P_Chain_Load_Delta_Dump_Arg*)arg;
+
+  fprintf(dump_arg->file, "%u,%s,0x%llx,%lld,%llu\n",
+          (unsigned)dump_arg->proc_id, dump_arg->delta_type,
+          (unsigned long long)entry->load_pc, (long long)entry->delta,
+          (unsigned long long)entry->count);
+}
+
+static void h2p_chain_load_pattern_dump_delta_histogram(void) {
+  FILE* file = file_tag_fopen(OUTPUT_DIR,
+                              "h2p_chain_load_pc_delta_histogram", "w");
+  if (!file)
+    return;
+
+  fprintf(file, "proc_id,delta_type,load_pc,delta,count\n");
+
+  for (uns proc_id = 0; proc_id < MAX_NUM_PROCS; proc_id++) {
+    H2P_Chain_Load_Delta_Dump_Arg arg;
+    arg.file = file;
+    arg.proc_id = proc_id;
+
+    if (h2p_chain_load_byte_delta_table_valid[proc_id]) {
+      arg.delta_type = "byte";
+      hash_table_scan(&h2p_chain_load_byte_delta_table[proc_id],
+                      h2p_chain_load_pattern_dump_delta_entry, &arg);
+    }
+    if (h2p_chain_load_line_delta_table_valid[proc_id]) {
+      arg.delta_type = "line";
+      hash_table_scan(&h2p_chain_load_line_delta_table[proc_id],
+                      h2p_chain_load_pattern_dump_delta_entry, &arg);
+    }
+  }
+
+  fclose(file);
+}
+
+static void h2p_chain_load_pattern_collect_addr_repeatability(void* data,
+                                                             void* arg) {
+  H2P_Chain_Load_Pattern_Value_Key* value_entry =
+    (H2P_Chain_Load_Pattern_Value_Key*)data;
+  H2P_Chain_Load_Addr_Repeatability_Dump_Arg* dump_arg =
+    (H2P_Chain_Load_Addr_Repeatability_Dump_Arg*)arg;
+
+  if (!value_entry->count)
+    return;
+
+  Flag new_entry = FALSE;
+  H2P_Chain_Load_Addr_Repeatability_Entry* repeat_entry =
+    (H2P_Chain_Load_Addr_Repeatability_Entry*)hash_table_access_create(
+      dump_arg->histogram, (int64)value_entry->count, &new_entry);
+  if (new_entry) {
+    repeat_entry->repeatability = value_entry->count;
+    repeat_entry->target_load_accesses = 0;
+    repeat_entry->unique_pc_vaddr_count = 0;
+  }
+
+  repeat_entry->target_load_accesses += value_entry->count;
+  repeat_entry->unique_pc_vaddr_count++;
+  dump_arg->total_target_load_accesses += value_entry->count;
+  dump_arg->total_unique_pc_vaddr++;
+}
+
+static int h2p_chain_load_addr_repeatability_entry_cmp(const void* lhs,
+                                                       const void* rhs) {
+  H2P_Chain_Load_Addr_Repeatability_Entry const* lhs_entry =
+    *(H2P_Chain_Load_Addr_Repeatability_Entry const* const*)lhs;
+  H2P_Chain_Load_Addr_Repeatability_Entry const* rhs_entry =
+    *(H2P_Chain_Load_Addr_Repeatability_Entry const* const*)rhs;
+
+  if (lhs_entry->repeatability < rhs_entry->repeatability)
+    return -1;
+  if (lhs_entry->repeatability > rhs_entry->repeatability)
+    return 1;
+  return 0;
+}
+
+static void h2p_chain_load_pattern_dump_addr_repeatability_histogram(void) {
+  FILE* file = file_tag_fopen(OUTPUT_DIR,
+                              "h2p_chain_load_addr_repeatability_histogram",
+                              "w");
+  if (!file)
+    return;
+
+  fprintf(file,
+          "proc_id,repeatability,target_load_accesses,"
+          "unique_pc_vaddr_count,fraction_of_target_load_accesses_pct\n");
+
+  for (uns proc_id = 0; proc_id < MAX_NUM_PROCS; proc_id++) {
+    if (!h2p_chain_load_unique_vaddr_table_valid[proc_id])
+      continue;
+
+    Hash_Table histogram;
+    init_hash_table(&histogram, "H2P chain load address repeatability",
+                    H2P_CHAIN_LOAD_REPEATABILITY_HIST_BUCKETS,
+                    sizeof(H2P_Chain_Load_Addr_Repeatability_Entry));
+
+    H2P_Chain_Load_Addr_Repeatability_Dump_Arg arg;
+    arg.histogram = &histogram;
+    arg.total_target_load_accesses = 0;
+    arg.total_unique_pc_vaddr = 0;
+
+    hash_table_scan(&h2p_chain_load_unique_vaddr_table[proc_id],
+                    h2p_chain_load_pattern_collect_addr_repeatability, &arg);
+
+    if (histogram.count) {
+      H2P_Chain_Load_Addr_Repeatability_Entry** entries =
+        (H2P_Chain_Load_Addr_Repeatability_Entry**)hash_table_flatten(
+          &histogram, NULL);
+      ASSERT(proc_id, entries);
+      qsort(entries, histogram.count,
+            sizeof(H2P_Chain_Load_Addr_Repeatability_Entry*),
+            h2p_chain_load_addr_repeatability_entry_cmp);
+
+      for (int ii = 0; ii < histogram.count; ii++) {
+        H2P_Chain_Load_Addr_Repeatability_Entry* entry = entries[ii];
+        fprintf(file, "%u,%llu,%llu,%llu,%.6f\n", (unsigned)proc_id,
+                (unsigned long long)entry->repeatability,
+                (unsigned long long)entry->target_load_accesses,
+                (unsigned long long)entry->unique_pc_vaddr_count,
+                h2p_chain_profile_pct(entry->target_load_accesses,
+                                      arg.total_target_load_accesses));
+      }
+
+      free(entries);
+    }
+
+    hash_table_clear(&histogram);
+    free(histogram.entries);
+    free(histogram.name);
+  }
+
+  fclose(file);
+}
+
+static void h2p_chain_load_pattern_dump_meta(void) {
+  FILE* file = file_tag_fopen(OUTPUT_DIR,
+                              "h2p_chain_load_pattern_profile_meta", "w");
+  if (!file)
+    return;
+
+  fprintf(file,
+          "proc_id,hash_buckets,unique_vaddr_entries,unique_line_entries,"
+          "byte_delta_entries,line_delta_entries\n");
+  for (uns proc_id = 0; proc_id < MAX_NUM_PROCS; proc_id++) {
+    if (h2p_chain_load_unique_vaddr_table_valid[proc_id] ||
+        h2p_chain_load_unique_line_table_valid[proc_id] ||
+        h2p_chain_load_byte_delta_table_valid[proc_id] ||
+        h2p_chain_load_line_delta_table_valid[proc_id]) {
+      fprintf(file, "%u,%u,%d,%d,%d,%d\n", (unsigned)proc_id,
+              (unsigned)h2p_chain_load_pattern_buckets(),
+              h2p_chain_load_unique_vaddr_table_valid[proc_id] ?
+                h2p_chain_load_unique_vaddr_table[proc_id].count : 0,
+              h2p_chain_load_unique_line_table_valid[proc_id] ?
+                h2p_chain_load_unique_line_table[proc_id].count : 0,
+              h2p_chain_load_byte_delta_table_valid[proc_id] ?
+                h2p_chain_load_byte_delta_table[proc_id].count : 0,
+              h2p_chain_load_line_delta_table_valid[proc_id] ?
+                h2p_chain_load_line_delta_table[proc_id].count : 0);
+    }
+  }
+
+  fclose(file);
+}
+
+static void dump_h2p_chain_load_profile_tables(void) {
+  if (!H2P_CHAIN_LOAD_PROFILE)
+    return;
+
+  h2p_chain_load_profile_dump_table("h2p_chain_load_pc_profile",
+                                    h2p_chain_load_pc_profile_table,
+                                    H2P_CHAIN_LOAD_PROFILE_PC_TABLE_SIZE,
+                                    FALSE);
+  h2p_chain_load_profile_dump_table("h2p_chain_load_block_slot_profile",
+                                    h2p_chain_load_slot_profile_table,
+                                    H2P_CHAIN_LOAD_PROFILE_SLOT_TABLE_SIZE,
+                                    TRUE);
+  if (H2P_CHAIN_LOAD_PATTERN_PROFILE) {
+    h2p_chain_load_pattern_dump_pc_profile();
+    h2p_chain_load_pattern_dump_delta_histogram();
+    h2p_chain_load_pattern_dump_addr_repeatability_histogram();
+    h2p_chain_load_pattern_dump_meta();
+  }
+
+  FILE* file = file_tag_fopen(OUTPUT_DIR, "h2p_chain_load_profile_meta", "w");
+  if (!file)
+    return;
+  fprintf(file, "proc_id,pc_table_overflow,slot_table_overflow\n");
+  for (uns proc_id = 0; proc_id < MAX_NUM_PROCS; proc_id++) {
+    if (h2p_chain_load_pc_profile_table[proc_id] ||
+        h2p_chain_load_slot_profile_table[proc_id] ||
+        h2p_chain_load_pc_profile_overflow[proc_id] ||
+        h2p_chain_load_slot_profile_overflow[proc_id]) {
+      fprintf(file, "%u,%llu,%llu\n", (unsigned)proc_id,
+              (unsigned long long)h2p_chain_load_pc_profile_overflow[proc_id],
+              (unsigned long long)h2p_chain_load_slot_profile_overflow[proc_id]);
+    }
+  }
+  fclose(file);
 }
 
 static inline void dcache_hit_wp_collect_stats(Dcache_Data* line, Op* op) {
@@ -800,6 +2087,7 @@ static inline void dcache_cacheline_miss(Op* op, Addr line_addr) {
         op->done_cycle = cycle_count + DCACHE_CYCLES + op->inst_info->extra_ld_latency;
         op->wake_cycle = cycle_count + DCACHE_CYCLES + op->inst_info->extra_ld_latency;
         wake_up_ops(op, REG_DATA_DEP, model->wake_hook);
+        dcache_stage_record_main_chain_load_profile_store_fwd(op);
         /* TEA load via normal dcache (store fwd hit on miss): mark completed */
         if (TEA_ENABLE && op->thread_id == 1) {
           /* [EXPERIMENT: TEA_PERFECT_LOAD] main store-scan forward-on-miss stats.
@@ -1062,6 +2350,8 @@ static inline void dcache_fill_process_cacheline(Mem_Req* req, Dcache_Data* data
       op->wake_cycle = op->done_cycle;
       wake_up_ops(op, REG_DATA_DEP, model->wake_hook);
     }
+
+    dcache_stage_record_main_chain_load_profile_fill(op, req);
 
     /* TEA load via normal dcache (cache miss fill): mark completed */
     if (TEA_ENABLE && op->thread_id == 1) {

@@ -372,9 +372,13 @@ void Decoupled_FE::reset_main_chain_block_tracking() {
 
 void Decoupled_FE::apply_main_chain_block_tag(Op* op) {
   op->chain_bit = FALSE;
+  op->h2p_chain_block_start_pc = 0;
+  op->h2p_chain_block_op_idx = 0;
+  op->h2p_chain_profile_access_recorded = FALSE;
 
-  if (!TEA_MAIN_CHAIN_PERFECT_LOAD || op->thread_id != 0 || op->off_path ||
-      !op->inst_info || !op->table_info) {
+  if ((!H2P_CHAIN_PERFECT_LOAD && !H2P_CHAIN_LOAD_PROFILE) ||
+      op->thread_id != 0 || op->off_path || !op->inst_info ||
+      !op->table_info) {
     reset_main_chain_block_tracking();
     return;
   }
@@ -387,16 +391,16 @@ void Decoupled_FE::apply_main_chain_block_tag(Op* op) {
     main_chain_block_dependency_mask = 0;
     main_chain_block_total_ops = 0;
 
-    STAT_EVENT(proc_id, TEA_MAIN_CHAIN_TAG_BLOCK_LOOKUPS);
+    STAT_EVENT(proc_id, H2P_CHAIN_TAG_BLOCK_LOOKUPS);
     Dependency_Chain_Cache_Entry* block =
       get_dependency_chain_block(proc_id, main_chain_block_start_pc);
     if (block && block->dependency_mask) {
       main_chain_block_hit = true;
       main_chain_block_dependency_mask = block->dependency_mask;
       main_chain_block_total_ops = block->total_ops_in_block;
-      STAT_EVENT(proc_id, TEA_MAIN_CHAIN_TAG_BLOCK_HITS);
+      STAT_EVENT(proc_id, H2P_CHAIN_TAG_BLOCK_HITS);
     } else {
-      STAT_EVENT(proc_id, TEA_MAIN_CHAIN_TAG_BLOCK_MISSES);
+      STAT_EVENT(proc_id, H2P_CHAIN_TAG_BLOCK_MISSES);
     }
   }
 
@@ -405,12 +409,14 @@ void Decoupled_FE::apply_main_chain_block_tag(Op* op) {
         main_chain_block_op_idx < main_chain_block_total_ops) {
       if ((main_chain_block_dependency_mask >> main_chain_block_op_idx) & 1ULL) {
         op->chain_bit = TRUE;
-        STAT_EVENT(proc_id, TEA_MAIN_CHAIN_TAG_OPS);
+        op->h2p_chain_block_start_pc = main_chain_block_start_pc;
+        op->h2p_chain_block_op_idx = main_chain_block_op_idx;
+        STAT_EVENT(proc_id, H2P_CHAIN_TAG_OPS);
         if (op->table_info->mem_type == MEM_LD)
-          STAT_EVENT(proc_id, TEA_MAIN_CHAIN_TAG_LOADS);
+          STAT_EVENT(proc_id, H2P_CHAIN_TAG_LOADS);
       }
     } else {
-      STAT_EVENT(proc_id, TEA_MAIN_CHAIN_TAG_MASK_INDEX_OUT_OF_RANGE);
+      STAT_EVENT(proc_id, H2P_CHAIN_TAG_MASK_INDEX_OUT_OF_RANGE);
     }
   }
 

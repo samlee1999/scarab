@@ -810,15 +810,15 @@ static inline void tea_record_main_h2p_fetch_to_exec(Op* op) {
 
   if (!op->off_path && op->oracle_info.hbt_pred_is_hard) {
     tea_record_cycle_delta_stat(op->proc_id, op->fetch_cycle, op->exec_cycle,
-                                TEA_MAIN_H2P_FETCH_TO_EXEC_SAMPLES,
-                                TEA_MAIN_H2P_FETCH_TO_EXEC_TOTAL,
-                                TEA_MAIN_H2P_FETCH_TO_EXEC_AVG);
+                                H2P_MAIN_FETCH_TO_EXEC_SAMPLES,
+                                H2P_MAIN_FETCH_TO_EXEC_TOTAL,
+                                H2P_MAIN_FETCH_TO_EXEC_AVG);
 
     if (op->oracle_info.mispred || op->oracle_info.misfetch) {
       tea_record_cycle_delta_stat(op->proc_id, op->fetch_cycle, op->exec_cycle,
-                                  TEA_MAIN_H2P_MISPRED_FETCH_TO_EXEC_SAMPLES,
-                                  TEA_MAIN_H2P_MISPRED_FETCH_TO_EXEC_TOTAL,
-                                  TEA_MAIN_H2P_MISPRED_FETCH_TO_EXEC_AVG);
+                                  H2P_MAIN_MISPRED_FETCH_TO_EXEC_SAMPLES,
+                                  H2P_MAIN_MISPRED_FETCH_TO_EXEC_TOTAL,
+                                  H2P_MAIN_MISPRED_FETCH_TO_EXEC_AVG);
     }
   }
 

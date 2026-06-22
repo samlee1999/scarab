@@ -37,6 +37,7 @@ working on this (ob).
 #include "globals/global_types.h"
 #include "globals/global_vars.h"
 #include "globals/utils.h"
+#include "dcache_stage.h"
 
 #include "core.param.h"
 #include "general.param.h"
@@ -478,6 +479,8 @@ void reset_stats(Flag keep_total) {
       }
     }
   }
+
+  reset_h2p_chain_load_profile_tables();
 }
 
 /**************************************************************************************/
