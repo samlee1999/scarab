@@ -376,7 +376,8 @@ void Decoupled_FE::apply_main_chain_block_tag(Op* op) {
   op->h2p_chain_block_op_idx = 0;
   op->h2p_chain_profile_access_recorded = FALSE;
 
-  if ((!H2P_CHAIN_PERFECT_LOAD && !H2P_CHAIN_LOAD_PROFILE) ||
+  if ((!H2P_CHAIN_PERFECT_LOAD && !H2P_CHAIN_LOAD_PROFILE &&
+       !H2P_CHAIN_LOAD_RAW_STREAM_DUMP) ||
       op->thread_id != 0 || op->off_path || !op->inst_info ||
       !op->table_info) {
     reset_main_chain_block_tracking();

@@ -163,6 +163,8 @@ static H2P_Chain_Load_Profile_Summary_Entry*
 static Counter h2p_chain_load_pc_profile_overflow[MAX_NUM_PROCS];
 static Counter h2p_chain_load_slot_profile_overflow[MAX_NUM_PROCS];
 static Flag h2p_chain_load_profile_dump_registered = FALSE;
+static FILE* h2p_chain_load_raw_stream_file = NULL;
+static Counter h2p_chain_load_raw_stream_seq = 0;
 
 static Hash_Table h2p_chain_load_unique_vaddr_table[MAX_NUM_PROCS];
 static Hash_Table h2p_chain_load_unique_line_table[MAX_NUM_PROCS];
@@ -180,8 +182,11 @@ static inline Flag dcache_stage_addr_unready(Op* op);
 static inline Flag dcache_stage_check_mem_type(Op* op);
 static inline Flag dcache_stage_try_main_chain_load_oracle(Op* op);
 static inline Flag dcache_stage_main_onpath_load(Op* op);
+static inline Flag dcache_stage_main_chain_load_target_op(Op* op);
 static inline Flag dcache_stage_main_chain_load_profile_op(Op* op);
 static inline void dcache_stage_record_main_onpath_load_access(Op* op);
+static inline void dcache_stage_record_main_chain_load_raw_stream_access(
+  Op* op, Addr line_addr, Flag first_access);
 static inline void dcache_stage_record_main_chain_load_profile_access(Op* op, Addr line_addr, Flag first_access);
 static inline void dcache_stage_record_main_chain_load_profile_dcache_hit(Op* op);
 static inline void dcache_stage_record_main_chain_load_profile_store_fwd(Op* op);
@@ -489,6 +494,8 @@ tea_load_dcache_access:
     op->dcache_cycle = cycle_count;
     if (first_dcache_access)
       dcache_stage_record_main_onpath_load_access(op);
+    dcache_stage_record_main_chain_load_raw_stream_access(
+      op, line_addr, first_dcache_access);
     dcache_stage_record_main_chain_load_profile_access(op, line_addr,
                                                        first_dcache_access);
     dc->idle_cycle = MAX2(dc->idle_cycle, cycle_count + DCACHE_CYCLES);
@@ -734,9 +741,12 @@ static inline Flag dcache_stage_main_onpath_load(Op* op) {
          op->table_info->mem_type == MEM_LD && !op->off_path;
 }
 
+static inline Flag dcache_stage_main_chain_load_target_op(Op* op) {
+  return dcache_stage_main_onpath_load(op) && op->chain_bit && op->inst_info;
+}
+
 static inline Flag dcache_stage_main_chain_load_profile_op(Op* op) {
-  return H2P_CHAIN_LOAD_PROFILE && dcache_stage_main_onpath_load(op) &&
-         op->chain_bit && op->inst_info;
+  return H2P_CHAIN_LOAD_PROFILE && dcache_stage_main_chain_load_target_op(op);
 }
 
 static inline void dcache_stage_record_main_onpath_load_access(Op* op) {
@@ -891,6 +901,31 @@ static inline void h2p_chain_load_profile_register_dump(void) {
     atexit(dump_h2p_chain_load_profile_tables);
     h2p_chain_load_profile_dump_registered = TRUE;
   }
+}
+
+static FILE* h2p_chain_load_raw_stream_open(void) {
+  if (h2p_chain_load_raw_stream_file)
+    return h2p_chain_load_raw_stream_file;
+
+  h2p_chain_load_profile_register_dump();
+  h2p_chain_load_raw_stream_file =
+    file_tag_fopen(OUTPUT_DIR, "h2p_chain_load_raw_stream", "w");
+  if (!h2p_chain_load_raw_stream_file)
+    return NULL;
+
+  fprintf(h2p_chain_load_raw_stream_file,
+          "seq,cycle,op_num,unique_num,proc_id,thread_id,off_path,"
+          "is_target_h2p_chain_load,load_pc,vaddr,line_addr,line_index,"
+          "mem_size,block_start_pc,block_op_idx,pred_global_hist\n");
+  return h2p_chain_load_raw_stream_file;
+}
+
+static void h2p_chain_load_raw_stream_close(void) {
+  if (!h2p_chain_load_raw_stream_file)
+    return;
+
+  fclose(h2p_chain_load_raw_stream_file);
+  h2p_chain_load_raw_stream_file = NULL;
 }
 
 static H2P_Chain_Load_Profile_Summary_Entry*
@@ -1173,6 +1208,37 @@ static inline void dcache_stage_record_main_chain_load_profile_access(
 
   STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_DCACHE_ACCESS);
   h2p_chain_load_profile_record_access(op, line_addr);
+}
+
+static inline void dcache_stage_record_main_chain_load_raw_stream_access(
+  Op* op, Addr line_addr, Flag first_access) {
+  if (!H2P_CHAIN_LOAD_RAW_STREAM_DUMP || !first_access ||
+      !dcache_stage_main_chain_load_target_op(op))
+    return;
+
+  FILE* file = h2p_chain_load_raw_stream_open();
+  if (!file)
+    return;
+
+  fprintf(file,
+          "%llu,%llu,%llu,%llu,%u,%u,%u,%u,"
+          "0x%llx,0x%llx,0x%llx,%llu,%u,0x%llx,%u,0x%x\n",
+          (unsigned long long)h2p_chain_load_raw_stream_seq++,
+          (unsigned long long)cycle_count,
+          (unsigned long long)op->op_num,
+          (unsigned long long)op->unique_num,
+          (unsigned)op->proc_id,
+          (unsigned)op->thread_id,
+          (unsigned)op->off_path,
+          1u,
+          (unsigned long long)op->inst_info->addr,
+          (unsigned long long)op->oracle_info.va,
+          (unsigned long long)line_addr,
+          (unsigned long long)(line_addr >> LOG2(DCACHE_LINE_SIZE)),
+          (unsigned)op->oracle_info.mem_size,
+          (unsigned long long)op->h2p_chain_block_start_pc,
+          (unsigned)op->h2p_chain_block_op_idx,
+          (unsigned)op->oracle_info.pred_global_hist);
 }
 
 static inline void dcache_stage_record_main_chain_load_profile_latency(Op* op) {
@@ -1862,6 +1928,8 @@ static void h2p_chain_load_pattern_dump_meta(void) {
 }
 
 static void dump_h2p_chain_load_profile_tables(void) {
+  h2p_chain_load_raw_stream_close();
+
   if (!H2P_CHAIN_LOAD_PROFILE)
     return;
 

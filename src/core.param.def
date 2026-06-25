@@ -397,3 +397,4 @@ DEF_PARAM(h2p_chain_perfect_load_latency, H2P_CHAIN_PERFECT_LOAD_LATENCY, uns, u
 DEF_PARAM(h2p_chain_load_profile, H2P_CHAIN_LOAD_PROFILE, Flag, Flag, FALSE, )
 DEF_PARAM(h2p_chain_load_pattern_profile, H2P_CHAIN_LOAD_PATTERN_PROFILE, Flag, Flag, TRUE, )
 DEF_PARAM(h2p_chain_load_pattern_hash_buckets, H2P_CHAIN_LOAD_PATTERN_HASH_BUCKETS, uns, uns, 1048576, )
+DEF_PARAM(h2p_chain_load_raw_stream_dump, H2P_CHAIN_LOAD_RAW_STREAM_DUMP, Flag, Flag, FALSE, )
