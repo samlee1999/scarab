@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -214,16 +216,35 @@ def discover_inputs(paths: Iterable[str]) -> List[Path]:
 
 
 def make_predictors(args: argparse.Namespace) -> List[Predictor]:
-    return [
-        LastValuePredictor("last_vaddr", "vaddr"),
-        LastValuePredictor("last_line", "line"),
-        StridePredictor("pc_stride_vaddr", "vaddr", args.stride_confidence),
-        StridePredictor("pc_stride_line", "line", args.stride_confidence),
-        TopDeltaPredictor("pc_top_delta_vaddr", "vaddr", args.min_count),
-        TopDeltaPredictor("pc_top_delta_line", "line", args.min_count),
-        MarkovPredictor("pc_markov_vaddr", "vaddr", args.min_count),
-        MarkovPredictor("pc_markov_line", "line", args.min_count),
-    ]
+    available = {
+        "last_vaddr":
+            lambda: LastValuePredictor("last_vaddr", "vaddr"),
+        "last_line":
+            lambda: LastValuePredictor("last_line", "line"),
+        "pc_stride_vaddr":
+            lambda: StridePredictor("pc_stride_vaddr", "vaddr",
+                                    args.stride_confidence),
+        "pc_stride_line":
+            lambda: StridePredictor("pc_stride_line", "line",
+                                    args.stride_confidence),
+        "pc_top_delta_vaddr":
+            lambda: TopDeltaPredictor("pc_top_delta_vaddr", "vaddr",
+                                      args.min_count),
+        "pc_top_delta_line":
+            lambda: TopDeltaPredictor("pc_top_delta_line", "line",
+                                      args.min_count),
+        "pc_markov_vaddr":
+            lambda: MarkovPredictor("pc_markov_vaddr", "vaddr",
+                                    args.min_count),
+        "pc_markov_line":
+            lambda: MarkovPredictor("pc_markov_line", "line",
+                                    args.min_count),
+    }
+    selected = args.predictors or list(available.keys())
+    unknown = [name for name in selected if name not in available]
+    if unknown:
+        raise SystemExit(f"Unknown predictor(s): {', '.join(unknown)}")
+    return [available[name]() for name in selected]
 
 
 def should_eval(row: Row, include_off_path: bool) -> bool:
@@ -256,12 +277,18 @@ def run(
     granularity = {predictor.name: predictor.granularity for predictor in predictors}
     stats = {predictor.name: Stats() for predictor in predictors}
     per_pc: Dict[Tuple[str, int], Stats] = defaultdict(Stats)
+    rows_seen = 0
+    start_time = time.monotonic()
 
     for path in discover_inputs(args.inputs):
+        file_rows = 0
+        file_start = time.monotonic()
         with path.open(newline="") as handle:
             reader = csv.DictReader(handle)
             for fields in reader:
                 row = Row(path, fields)
+                rows_seen += 1
+                file_rows += 1
                 eval_row = should_eval(row, args.eval_off_path)
                 train_row = should_train(row, args)
                 for predictor in predictors:
@@ -272,6 +299,25 @@ def run(
                     if train_row:
                         predictor.update(row)
                         stats[predictor.name].train_rows += 1
+                if args.progress_rows and rows_seen % args.progress_rows == 0:
+                    elapsed = time.monotonic() - start_time
+                    rate = rows_seen / elapsed if elapsed else 0.0
+                    print(
+                        f"[replay] rows={rows_seen} "
+                        f"elapsed={elapsed:.1f}s rate={rate:.0f} rows/s "
+                        f"file={path}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+        if args.progress_files:
+            elapsed = time.monotonic() - file_start
+            rate = file_rows / elapsed if elapsed else 0.0
+            print(
+                f"[replay] finished file rows={file_rows} "
+                f"elapsed={elapsed:.1f}s rate={rate:.0f} rows/s file={path}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     return stats, per_pc, granularity
 
@@ -366,6 +412,12 @@ def parse_args() -> argparse.Namespace:
                         help="matching deltas required before stride prediction")
     parser.add_argument("--min-count", type=int, default=2,
                         help="minimum observed count for top-delta/Markov prediction")
+    parser.add_argument("--predictors", nargs="+",
+                        help="predictors to run; default runs all predictors")
+    parser.add_argument("--progress-rows", type=int, default=0,
+                        help="print progress every N input rows to stderr")
+    parser.add_argument("--progress-files", action="store_true",
+                        help="print a progress line after each raw stream file")
     parser.add_argument("--train-off-path", action="store_true",
                         help="include off-path rows in predictor training")
     parser.add_argument("--eval-off-path", action="store_true",
