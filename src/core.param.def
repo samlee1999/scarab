@@ -398,3 +398,19 @@ DEF_PARAM(h2p_chain_load_profile, H2P_CHAIN_LOAD_PROFILE, Flag, Flag, FALSE, )
 DEF_PARAM(h2p_chain_load_pattern_profile, H2P_CHAIN_LOAD_PATTERN_PROFILE, Flag, Flag, TRUE, )
 DEF_PARAM(h2p_chain_load_pattern_hash_buckets, H2P_CHAIN_LOAD_PATTERN_HASH_BUCKETS, uns, uns, 1048576, )
 DEF_PARAM(h2p_chain_load_raw_stream_dump, H2P_CHAIN_LOAD_RAW_STREAM_DUMP, Flag, Flag, FALSE, )
+/* [EXPERIMENT: H2P_CHAIN_ORACLE_PREDICTOR] Gate the H2P-chain load oracle on an
+   online per-PC address predictor (requires h2p_chain_perfect_load 1).
+   0 = none (idealize every chain load, original oracle behavior),
+   1 = stride, 2 = top-delta. When enabled a load is idealized only if the
+   predictor would have produced its address. */
+DEF_PARAM(h2p_chain_oracle_predictor, H2P_CHAIN_ORACLE_PREDICTOR, uns, uns, 0, )
+/* Prediction match granularity: 0 = vaddr (RF-prefetch style), 1 = cache line
+   (L1-prefetch style). */
+DEF_PARAM(h2p_chain_oracle_granularity, H2P_CHAIN_ORACLE_GRANULARITY, uns, uns, 0, )
+/* Latency (cycles) applied to a correctly-predicted chain load. Set 1 for the
+   vaddr/RF oracle; set the L1-hit latency for the line/L1 oracle. */
+DEF_PARAM(h2p_chain_oracle_hit_latency, H2P_CHAIN_ORACLE_HIT_LATENCY, uns, uns, 1, )
+/* Stride predictor: min matching-delta confidence before a prediction fires. */
+DEF_PARAM(h2p_chain_oracle_stride_confidence, H2P_CHAIN_ORACLE_STRIDE_CONFIDENCE, uns, uns, 2, )
+/* Top-delta predictor: min observation count for the dominant delta. */
+DEF_PARAM(h2p_chain_oracle_min_count, H2P_CHAIN_ORACLE_MIN_COUNT, uns, uns, 2, )

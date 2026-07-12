@@ -175,6 +175,27 @@ static Flag h2p_chain_load_unique_line_table_valid[MAX_NUM_PROCS];
 static Flag h2p_chain_load_byte_delta_table_valid[MAX_NUM_PROCS];
 static Flag h2p_chain_load_line_delta_table_valid[MAX_NUM_PROCS];
 
+/* Online per-PC address predictor that gates the H2P-chain load oracle
+   (H2P_CHAIN_ORACLE_PREDICTOR: 1=stride, 2=top-delta). A chain load is
+   idealized only when the predictor would have produced its address, so the
+   IPC gain measures the fraction of the perfect-load upper bound that a real
+   address predictor can recover. Mirrors src/tools/h2p_chain_load_predictor_
+   replay.py so sim coverage can be cross-checked against the offline replay. */
+#define H2P_ORACLE_TOP_DELTA_SLOTS 16
+typedef struct H2P_Oracle_Pred_Entry_struct {
+  Flag    has_last;
+  int64   last;
+  Flag    has_stride;
+  int64   stride;
+  uns     conf;
+  uns     n_deltas;
+  int64   delta_val[H2P_ORACLE_TOP_DELTA_SLOTS];
+  Counter delta_cnt[H2P_ORACLE_TOP_DELTA_SLOTS];
+} H2P_Oracle_Pred_Entry;
+
+static Hash_Table h2p_oracle_pred_table[MAX_NUM_PROCS];
+static Flag       h2p_oracle_pred_table_valid[MAX_NUM_PROCS];
+
 /**************************************************************************************/
 /* Prototypes for Inline Methods */
 
@@ -1304,19 +1325,140 @@ static inline void dcache_stage_record_main_chain_load_profile_fill(Op* op,
   dcache_stage_record_main_chain_load_profile_latency(op);
 }
 
+static inline H2P_Oracle_Pred_Entry* h2p_oracle_pred_get_entry(uns proc_id,
+                                                              Addr load_pc) {
+  if (!h2p_oracle_pred_table_valid[proc_id]) {
+    init_hash_table(&h2p_oracle_pred_table[proc_id], "H2P chain oracle predictor",
+                    16384, sizeof(H2P_Oracle_Pred_Entry));
+    h2p_oracle_pred_table_valid[proc_id] = TRUE;
+  }
+  Flag new_entry = FALSE;
+  H2P_Oracle_Pred_Entry* entry = (H2P_Oracle_Pred_Entry*)hash_table_access_create(
+    &h2p_oracle_pred_table[proc_id], (int64)load_pc, &new_entry);
+  if (new_entry)
+    memset(entry, 0, sizeof(*entry));
+  return entry;
+}
+
+/* Value the predictor learns/matches on: exact vaddr (RF-style) or cache line
+   (L1-style), selected by H2P_CHAIN_ORACLE_GRANULARITY. */
+static inline int64 h2p_oracle_pred_value(Op* op) {
+  if (H2P_CHAIN_ORACLE_GRANULARITY == 1)
+    return (int64)(op->oracle_info.va >> LOG2(DCACHE_LINE_SIZE));
+  return (int64)op->oracle_info.va;
+}
+
+static inline Flag h2p_oracle_pred_predict(H2P_Oracle_Pred_Entry* entry,
+                                           int64* pred) {
+  if (!entry->has_last)
+    return FALSE;
+  if (H2P_CHAIN_ORACLE_PREDICTOR == 1) { /* stride */
+    if (!entry->has_stride || entry->conf < H2P_CHAIN_ORACLE_STRIDE_CONFIDENCE)
+      return FALSE;
+    *pred = entry->last + entry->stride;
+    return TRUE;
+  }
+  /* top-delta (2): predict last + most-frequent observed delta */
+  if (entry->n_deltas == 0)
+    return FALSE;
+  uns best = 0;
+  for (uns ii = 1; ii < entry->n_deltas; ii++)
+    if (entry->delta_cnt[ii] > entry->delta_cnt[best])
+      best = ii;
+  if (entry->delta_cnt[best] < H2P_CHAIN_ORACLE_MIN_COUNT)
+    return FALSE;
+  *pred = entry->last + entry->delta_val[best];
+  return TRUE;
+}
+
+static inline void h2p_oracle_pred_update(H2P_Oracle_Pred_Entry* entry,
+                                          int64 value) {
+  if (entry->has_last) {
+    int64 delta = value - entry->last;
+    if (H2P_CHAIN_ORACLE_PREDICTOR == 1) { /* stride */
+      if (entry->has_stride && entry->stride == delta) {
+        entry->conf++;
+      } else {
+        entry->stride = delta;
+        entry->has_stride = TRUE;
+        entry->conf = 1;
+      }
+    } else { /* top-delta: bounded histogram of deltas */
+      uns ii;
+      for (ii = 0; ii < entry->n_deltas; ii++)
+        if (entry->delta_val[ii] == delta) {
+          entry->delta_cnt[ii]++;
+          break;
+        }
+      if (ii == entry->n_deltas) {
+        if (entry->n_deltas < H2P_ORACLE_TOP_DELTA_SLOTS) {
+          entry->delta_val[entry->n_deltas] = delta;
+          entry->delta_cnt[entry->n_deltas] = 1;
+          entry->n_deltas++;
+        } else {
+          uns least = 0;
+          for (uns jj = 1; jj < entry->n_deltas; jj++)
+            if (entry->delta_cnt[jj] < entry->delta_cnt[least])
+              least = jj;
+          entry->delta_val[least] = delta;
+          entry->delta_cnt[least] = 1;
+        }
+      }
+    }
+  }
+  entry->last = value;
+  entry->has_last = TRUE;
+}
+
 static inline Flag dcache_stage_try_main_chain_load_oracle(Op* op) {
   if (!H2P_CHAIN_PERFECT_LOAD || op->thread_id != 0 ||
       op->table_info->mem_type != MEM_LD || !op->chain_bit || op->off_path)
     return FALSE;
 
+  Flag predictor_on = (H2P_CHAIN_ORACLE_PREDICTOR != 0);
+  /* A predictor-missed load falls through to the normal cache path and re-enters
+     this loop each cycle until its miss returns; only train/decide on the first
+     dcache visit so the per-PC stream stays in program order (matches the
+     first_dcache_access guard used for the raw-stream dump). */
+  Flag first_visit = (op->dcache_cycle == MAX_CTR);
+  if (predictor_on && !first_visit)
+    return FALSE;
+
   STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_ORACLE_CANDIDATES);
+
+  Counter latency = H2P_CHAIN_PERFECT_LOAD_LATENCY;
+
+  if (predictor_on) {
+    H2P_Oracle_Pred_Entry* entry =
+      h2p_oracle_pred_get_entry(op->proc_id, op->inst_info->addr);
+    int64 pred = 0;
+    Flag have_pred = h2p_oracle_pred_predict(entry, &pred);
+    int64 actual = h2p_oracle_pred_value(op);
+    h2p_oracle_pred_update(entry, actual); /* predict-then-update, program order */
+
+    if (have_pred)
+      STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_ORACLE_PRED_MADE);
+    if (!have_pred || pred != actual) {
+      if (have_pred)
+        STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_ORACLE_PRED_WRONG);
+      return FALSE; /* not covered by the predictor → normal cache path */
+    }
+    STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_ORACLE_PRED_CORRECT);
+    if (H2P_CHAIN_ORACLE_GRANULARITY == 1)
+      /* L1-prefetch oracle: only the line was predicted, so the load still pays
+         a normal L1-hit load-use latency (the value is in L1, not the RF). */
+      latency = DCACHE_CYCLES + op->inst_info->extra_ld_latency;
+    else
+      /* RF-prefetch oracle: exact address predicted, value delivered to the
+         physical register — near register-read latency. */
+      latency = H2P_CHAIN_ORACLE_HIT_LATENCY;
+  }
 
   if (scan_stores(op->oracle_info.va, op->oracle_info.mem_size)) {
     STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_ORACLE_STORE_FWD_EXCLUDED);
     return FALSE;
   }
 
-  Counter latency = H2P_CHAIN_PERFECT_LOAD_LATENCY;
   op->state = OS_SCHEDULED;
   op->dcache_cycle = cycle_count;
   op->done_cycle = cycle_count + latency;
