@@ -73,18 +73,6 @@ store-forwardable load를 제외하는 이유는 address/value prefetch로 이�
 
 stream prefetcher를 켜도 oracle headroom이 크게 남는다. 이는 범용 hardware prefetcher가 이미 쉬운 strided access 일부를 흡수하더라도, H2P-chain target RF prefetch가 공략할 resolution-critical headroom이 남아 있음을 뜻한다.
 
-### 역사적 motivation: prefetcher-OFF oracle
-
-초기 설계 논의에서 사용한 prefetcher-OFF oracle 수치:
-
-| 비교 대상 | Oracle IPC 향상 |
-|-----------|----------------|
-| Baseline OoO 대비 | 약 **+29.5%** |
-| TEA 대비 | 약 **+12%** |
-| TEA 자체 | baseline 대비 약 **+16.5%** |
-
-일부 초기 figure 집계에서는 baseline 대비 약 +34%로도 정리되어 있었다. 이 값들은 현재 논문의 최종 수치로 쓰기보다, "load latency 단축만으로 TEA급 또는 그 이상의 잠재력이 있다"는 motivation으로만 취급한다.
-
 ### 중요한 해석: latency hiding보다 resolution acceleration
 
 워크로드별 target load hit-level breakdown에서 반직관적인 패턴이 보인다.
@@ -218,84 +206,45 @@ H2P-chain filtering 덕분에 target load PC 수가 작다. 이전 분석에서�
 
 ---
 
-## 6. 실험 결과
+## 6. 실험 결과와 산출물
 
-### 6.1 Access-pattern 특성화 (`260624`, top-5-weight simpoint, 가중 평균)
+이 절은 결과 수치를 중복해서 기록하지 않고, 각 실험의 목적과 해석에 필요한 원본 그래프 및 통계 파일을 연결한다.
 
-- H2P-chain target load는 전체 on-path load의 약 **52%**.
-- Dcache hit 약 **83%**, memory access 약 **12%**.
-- Store-forwarding은 약 **0.08%**로 매우 작아 LSCD blacklist가 주력 이슈는 아니다.
-- 평균 latency는 약 **23.7 cycles**이나 workload별 이중모드가 뚜렷하다.
-  - L1-hit 지배: `leela` 5.5 cycles, `sssp` 7.3 cycles.
-  - DRAM-bound: `pr` 117.7 cycles.
-- Per-PC top-4 delta predictability:
-  - byte 단위 약 **82%**
-  - cache-line 단위 약 **86%**
-- 주소 반복성은 이중모드다.
-  - 접근의 약 **61%**가 128회 이상 반복.
-  - 접근의 약 **22%**가 8회 미만 반복.
-- Top-5 load PC가 접근의 약 **43%**를 커버한다.
-  - GAP 계열은 높음: `pr` 91%, `sssp` 80%.
-  - SPEC/DC 계열은 상대적으로 낮음.
+### 6.1 H2P-chain target load 특성화 (`260624`)
 
-해석: "H2P-chain load는 본질적으로 예측 불가능하다"는 리스크는 강하지 않다. 다수 target load는 per-PC delta/stride 구조로 상당 부분 예측 가능하다.
+전체 simpoint profile 결과에서 벤치마크별 weight 상위 5개 simpoint를 사용해 target load의 동적 비중, cache/latency 특성, PC 집중도, 주소 반복성 및 per-PC delta 규칙성을 분석했다. 결과는 H2P-chain target load 중 상당 부분이 PC-local address history로 예측 가능하며, predictor가 처리해야 할 irregular tail은 workload에 따라 크게 달라짐을 보여준다.
 
-### 6.2 Online predictor replay (`260709_decoupling_RFP_L1P`)
+- 결과 디렉터리: `/home/lee/simulations/260624_h2p_chain_load_access_pattern_all_simpoints`
+- 주소 반복성 분포: `top5_h2p_chain_target_load_address_repeatability_distribution.png`
+- 특성 요약 및 predictor metric: `top5_h2p_chain_access_pattern_benchmark_summary.csv`, `top5_rf_prefetch_predictor_metric_heatmap.png`
+- Offline predictor replay: `top5_h2p_chain_load_predictor_replay_summary_no_markov.csv`, `top5_h2p_chain_load_predictor_replay_per_pc_no_markov.csv`
 
-Timing simulation 내부의 online per-PC predictor 통계다. 아래 coverage는 `correct / candidate chain load`, accuracy는 `correct / prediction made`이다.
+### 6.2 Baseline, TEA, perfect-load oracle 비교 (`260625`)
 
-| Predictor / granularity | Coverage | Accuracy | 해석 |
-|-------------------------|----------|----------|------|
-| `stride`, exact-vaddr(RF) | **65.6%** | **94.1%** | 좁지만 정확하다. Conservative RF path. |
-| `top-delta`, exact-vaddr(RF) | **74.8%** | **75.0%** | 넓지만 부정확하다. No-flush replay에서는 높은 coverage가 IPC에 유리하다. |
-| `stride`, cache-line(L1) | **62.5%** | **91.1%** | L1 line prediction의 conservative path. |
-| `top-delta`, cache-line(L1) | **76.0%** | **76.3%** | Line 단위 coverage는 높지만 RF delivery보다 이득은 작다. |
+Baseline OoO, TEA helper-thread 구조, main-thread H2P-chain target load의 latency를 최소화한 oracle을 동일한 벤치마크 집합에서 비교했다. 이 실험은 target load latency 단축만으로 얻을 수 있는 성능 상한과 TEA 대비 잠재력을 확인하기 위한 것이다.
 
-벤치마크별 패턴:
+이 디렉터리의 `PARAMS.out` 기준으로 prefetch framework와 stream prefetcher는 꺼져 있다. 따라서 이 결과는 prefetcher-OFF motivation으로 사용하고, prefetcher-ON 결론은 다음 `260709` 실험을 기준으로 한다. TEA 결과 중 미완료 simpoint가 있는 벤치마크는 completed-simpoint 집계 범위를 함께 확인해야 한다.
 
-- GAP workload(`bc`, `bfs`, `cc`, `pr`, `sssp`)와 `xgboost`는 매우 잘 예측된다.
-- SPEC-int/DC tail(`omnetpp`, `leela`, `gcc`, `mcf`)은 stride coverage가 낮다.
-- `top-delta`는 낮은 accuracy에도 make-rate가 거의 100%라 no-flush recovery 전제에서는 `stride`보다 높은 IPC를 만든다.
+- 결과 디렉터리: `/home/lee/simulations/260625_perf_comparison`
+- 벤치마크별 Periodic IPC: `periodic_ipc_by_benchmark.csv`
+- 절대 IPC 비교: `Periodic_IPC_ipc.png`
+- Baseline 대비 speedup: `Periodic_IPC_speedup_vs_baseline.png`
+- TEA completed-simpoint 집계: `tea_periodic_ipc_completed_simpoints.csv`
 
-Offline replay와 online predictor가 거의 일치한다.
+### 6.3 Predictor-gated RF/L1 가속 비교 (`260709`)
 
-- `stride` vaddr: online 약 65.6-65.8% coverage, 94.1-94.7% accuracy vs offline 66.3%, 94.7%.
-- `top-delta` vaddr: online 약 74.8-75.8% coverage, 75.0-76.0% accuracy.
+Prefetcher-ON baseline에서 stride와 top-delta predictor를 exact-vaddr(RF) 및 cache-line(L1) 단위로 비교했다. Online predictor의 coverage/accuracy와 실제 IPC를 함께 측정해, 주소 예측 가능성이 성능으로 얼마나 전환되는지와 RF delivery가 L1 line prefetch보다 제공하는 추가 이득을 분리했다.
 
-### 6.3 성능과 RF-vs-L1 분해 (`260709`, prefetcher-ON, geomean Periodic IPC)
+결과는 H2P-chain filtering과 PC-local predictor의 결합이 유효하며, 주된 성능 기회가 단순한 L1 line 공급보다 exact-vaddr 기반 RF delivery에 있음을 보여준다. 세부 수치와 벤치마크별 차이는 아래 산출물을 기준으로 한다.
 
-Baseline은 golden_cove + 기본 stream prefetcher ON이다. `clang/1305`는 predictor config 3개에서 "no forward progress" ASSERT가 발생해 제외했다.
+- 결과 디렉터리: `/home/lee/simulations/260709_decoupling_RFP_L1P`
+- Predictor coverage/accuracy: `online_predictor_coverage_accuracy.csv`, `online_predictor_coverage_accuracy.png`
+- RF 및 L1 세부 결과: `online_predictor_RF_vaddr.csv`, `online_predictor_L1_line.csv`
+- 절대 IPC 비교: `Periodic_IPC_ipc.png`
+- Baseline 대비 speedup: `Periodic_IPC_speedup_vs_baseline.png`
+- 전체 통계 원본: `collected_stats.csv`
 
-| Config | vs baseline | Oracle headroom 대비 |
-|--------|------------:|---------------------:|
-| `oracle` (all chain load latency = 1) | **+28.41%** | 100% |
-| `pred_top_delta_vaddr` (RF) | **+12.06%** | 42.5% |
-| `pred_stride_vaddr` (RF) | +10.01% | 35.2% |
-| `pred_top_delta_line` (L1) | +4.54% | 16.0% |
-| `pred_stride_line` (L1) | +1.16% | 4.1% |
-
-RF 추가분:
-
-- `stride`: RF - L1 = **+8.85pp**
-- `top-delta`: RF - L1 = **+7.52pp**
-
-결론:
-
-> 이득의 대부분은 L1 line prefetch가 아니라 exact-vaddr RF delivery에서 온다.
-
-Target load의 상당수가 이미 L1 hit이므로 L1에 라인을 가져오는 것만으로는 branch resolution을 크게 앞당길 수 없다. 병목은 dependent chain을 따라 누적되는 L1-hit-use latency이고, 이 구간은 값을 register file 쪽으로 직접 배달해야 줄어든다.
-
-### 6.4 과거 go/no-go gate의 현재 상태
-
-로컬 설계안에서는 먼저 `BASE_PF`, `TEA_PF`, `FULL_PF`를 prefetcher-ON으로 돌려 headroom이 유지되는지 확인하고, 유지되면 `RF_TIER`, `L1_TIER`로 진행하는 순서를 제안했다.
-
-현재 `260709_decoupling_RFP_L1P` 결과는 이 gate를 상당 부분 통과한 상태로 해석할 수 있다.
-
-- Prefetcher-ON에서도 full oracle headroom은 **+28.41%**로 유지된다.
-- RF predictor-gated path는 full oracle의 **35-42%**를 회수한다.
-- L1 predictor-gated path는 full oracle의 **4-16%**만 회수한다.
-
-따라서 연구 방향은 "L1 prefetch로 충분한가?"가 아니라 "RF prefetch를 현실적인 비용과 timeliness로 구현할 수 있는가?"로 좁혀진다.
+세 실험을 함께 보면 연구의 핵심 질문은 "H2P-chain load를 예측할 수 있는가"에서 "예측 가능한 target load를 충분히 일찍, 현실적인 비용으로 RF에 공급할 수 있는가"로 좁혀진다.
 
 ---
 
