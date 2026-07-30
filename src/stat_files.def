@@ -38,4 +38,5 @@
 #include "power/power.stat.def"
 #include "prefetcher/pref.stat.def"
 #include "tea/tea.stat.def"
+#include "zereco/zereco.stat.def"
 

@@ -283,6 +283,7 @@ struct Op_struct {
   Addr h2p_chain_block_start_pc;
   uns h2p_chain_block_op_idx;
   Flag h2p_chain_profile_access_recorded;
+  Flag h2p_oracle_pred_checked;
 };
 
 /**************************************************************************************/

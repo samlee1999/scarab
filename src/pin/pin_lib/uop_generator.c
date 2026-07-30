@@ -345,6 +345,7 @@ void uop_generator_get_uop(uns proc_id, Op* op, ctype_pin_inst* inst) {
   op->sched_cycle = MAX_CTR;
   op->exec_cycle = MAX_CTR;
   op->dcache_cycle = MAX_CTR;
+  op->h2p_oracle_pred_checked = FALSE;
   op->done_cycle = MAX_CTR;
   op->replay_cycle = MAX_CTR;
   op->retire_cycle = MAX_CTR;

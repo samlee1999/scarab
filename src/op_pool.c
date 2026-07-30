@@ -216,6 +216,7 @@ void op_pool_setup_op(uns proc_id, Op* op) {
   op->thread_id = 0;
   op->h2p_chain_id = 0;
   op->chain_bit = FALSE;
+  op->h2p_oracle_pred_checked = FALSE;
   op->off_path = FALSE;  // FIXME: check
   op->state = OS_FETCHED;
   op->fu_num = -1;

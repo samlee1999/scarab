@@ -1,24 +1,8 @@
 # ZERECO: H2P-Chain Load 가속을 통한 Branch 오예측 조기 해소
 
-> 연구 README. Last updated: 2026-07-20.
+> 연구 README. Last updated: 2026-07-30.
 > Simulator: Scarab / Scarab-infra. TEA(MICRO 2024)는 구현 완료된 비교 baseline으로 둔다.
-> 최신 정량 기준은 prefetcher-ON run `260709_decoupling_RFP_L1P`이다.
-
----
-
-## 0. 문서 기준과 수치 해석
-
-이 문서는 두 종류의 내용을 합친다.
-
-- `ZERECO_research_summary.md`: 서버에서 관리하던 최신 연구 요약, 실험 인프라, 실험 결과.
-- `research-progress.md`: 로컬에서 정리하던 연구 motivation, related-work 방어 논리, 구현 방향.
-
-정량 수치는 아래처럼 구분한다.
-
-- **현재 기준 수치**: `260709_decoupling_RFP_L1P`, golden_cove stream prefetcher ON, geomean Periodic IPC.
-- **역사적 motivation 수치**: prefetcher-OFF 환경에서 H2P-chain target load를 1-cycle로 강제한 oracle 결과. 논문/슬라이드에 쓰기 전 실제 로그로 재확인해야 한다.
-
-핵심 프레이밍은 **main-thread-only targeted acceleration of H2P-chain critical loads**이다. 일반 load prefetching도 아니고, TEA처럼 별도 helper/precomputation thread를 실행하는 것도 아니다.
+> 최신 정량 기준은 prefetcher-ON run `zereco_260729_misp_penalty_breakdown`이다.
 
 ---
 
@@ -26,78 +10,88 @@
 
 ### 문제 정의
 
-Branch misprediction penalty를 줄이려면 mispredicted branch를 가능한 빨리 resolve해야 한다. 특히 예측기 자체로 잡기 어려운 **H2P(Hard-to-Predict) branch**가 오래 unresolved 상태로 남으면 frontend와 backend의 낭비가 커진다.
+Branch misprediction penalty를 줄이려면 mispredicted branch를 가능한 빨리 resolve해야 한다.
+특히 Conventional TAGE 예측기 자체로 잡기 어려운 "H2P(Hard-to-Predict) branch"가 오래 unresolved 상태로 남으면 frontend와 backend의 낭비가 커진다. 왜냐면, Misprediction으로 인해 Wrong path (또는 Off path) 명령어들이 파이프라인으로 Fetch되기 때문이다.
 
 이 연구의 핵심 질문은 다음이다.
 
 > 왜 mispredicted H2P branch가 resolve되기까지 오래 걸리는가?
 
-관찰한 원인은 branch outcome이 dependence chain 안의 load 값에 의존하고, 그 load의 service latency가 branch resolution을 지연시킨다는 점이다. 따라서 H2P branch를 별도 thread로 precompute하지 않아도, **H2P dependence chain 안의 load latency만 줄이면** main thread의 branch execute 시점이 앞당겨진다.
+관찰한 원인은 branch outcome이 dependence chain 안의 load 값에 의존하고, 그 load의 service latency가 branch resolution을 지연시킨다는 점이다.
+따라서, Misprediction을 빨리 detect하기 위해 H2P branch를 별도 thread로 precompute하지 않아도, **H2P dependence chain 안의 load latency만 줄이면** main thread의 branch execute 시점이 자연스럽게 앞당겨진다.
 
 ### 한 줄 주장
 
 > H2P-chain membership을 criticality filter로 사용하고, 예측 가능한 chain load에는 RF prefetch를, 예측 불가능한 잔여 chain에는 backend priority를 적용하면 TEA보다 낮은 하드웨어 복잡도로 branch 오예측 해소를 앞당길 수 있다.
 
-### 이 연구의 고유 좌표
+---
 
-1. **Criticality filter**: 모든 load가 아니라 H2P-chain member load만 타깃으로 한다.
-2. **Resolution acceleration**: 단순 memory latency hiding이 아니라 branch outcome에 필요한 load-to-use latency를 줄인다.
-3. **RF-level delivery**: L1 prefetch만으로는 이미 L1에 있는 load의 hit-use latency를 제거할 수 없으므로, 정확 주소 예측 load는 register-file(RF) prefetch가 주력이다.
-4. **No helper thread**: TEA의 chain identification 일부는 재사용하되, 별도 precomputation frontend/backend는 제거한다.
-5. **Fallback priority**: 주소 예측이 어려운 chain op/load에는 PUBS-style IQ priority를 보조 축으로 둔다.
+## 2. Motivation
+
+### A. Baseline에서의 Motivation
+
+#### 왜 predictor accuracy가 아니라 misprediction penalty인가?
+
+현대 branch predictor는 긴 global history, 다수의 prediction component와 큰 storage를 사용하며 지속적으로 정확도를 높여 왔다. 그러나 남아 있는 오예측 중 상당수는 branch history보다 실행 중 계산되거나 memory에서 읽힌 값에 의해 outcome이 결정되는 H2P branch에서 발생한다. 이러한 branch는 predictor capacity나 history length를 늘리는 것만으로는 안정적으로 예측하기 어렵다.
+
+Branch Runahead와 TEA에서 지적한 것과 같이, 매우 큰 history-based predictor도 data-dependent H2P branch에 대해서는 제한적인 개선만 제공한다. 남은 오예측을 더 복잡한 predictor로 흡수하려는 접근은 hardware cost 대비 이득이 점차 작아진다. 따라서 ZERECO는 branch predictor를 다시 설계하는 대신, **예측에 실패하더라도 그 사실을 더 빨리 알아내어 misprediction penalty를 줄이는 방향**을 택한다.
+
+#### Fetch-to-resolution penalty
+
+Branch가 mispredict되면 processor는 해당 branch가 execute되어 실제 direction과 target이 확인될 때까지 wrong-path instruction을 계속 fetch하고 실행한다. 이때 branch fetch부터 resolution까지의 구간은 다음 단계로 구성된다.
+
+- Branch가 frontend를 통과해 issue queue에 도달하는 시간
+- Branch dependence chain의 source operand가 준비되기를 기다리는 시간
+- Ready instruction이 scheduler에서 선택되기를 기다리는 시간
+- Branch가 실행되어 misprediction이 확인되는 시간
+
+Fetch-to-resolution이 길어지는 가장 직접적인 이유는 branch가 dependence chain의 마지막 consumer이기 때문이다. Chain 안의 load가 cache hierarchy나 memory system에서 값을 늦게 받으면 그 load의 destination register가 ready 상태가 되지 않는다. 그러면 그 값을 사용하는 arithmetic/comparison instruction이 연쇄적으로 실행되지 못하고, 최종 branch도 operand-ready 상태가 되지 않아 issue와 resolution이 뒤로 밀린다. Load miss처럼 긴 access뿐 아니라 cache hit의 load-to-use latency와 queue/port contention도 serial dependency chain을 따라 branch resolution 지연으로 전파될 수 있다.
+
+실험에서도 fetch-to-resolution의 대부분이 branch source operand를 기다리는 dependency 구간에서 발생했다. 더 중요한 것은 Target Load latency를 줄였을 때 dependency wait와 branch resolution이 함께 짧아지고 IPC가 증가했다는 점이다. 모든 Target Load를 가속한 full oracle뿐 아니라, online address predictor가 올바르게 예측한 Target Load만 가속한 경우에도 같은 방향의 변화가 나타났다. 이는 load latency와 긴 resolution 사이에 단순한 상관관계만 있는 것이 아니라, **H2P-chain Target Load가 fetch-to-resolution을 늘리는 실제 bottleneck 중 하나**임을 보여준다.
+
+Resolution 이후에도 pipeline recovery와 correct-path fetch를 위한 고정적인 시간이 필요하지만, ZERECO가 직접 줄일 수 있는 구간은 resolution 이전이다. 따라서 핵심 질문은 **H2P branch의 dependence chain에서 무엇이 resolution을 늦추며, 그 latency를 main thread 안에서 어떻게 줄일 것인가**이다.
+
+### B. Prior Work의 Limitation
+
+#### TEA
+
+TEA는 H2P branch의 dependence chain을 별도의 precomputation thread로 실행하고, main-thread branch보다 먼저 계산된 결과로 early flush를 발생시킨다. 높은 coverage와 accuracy를 얻을 수 있지만 이를 위해 Block Cache와 Fill Buffer뿐 아니라 전용 fetch/rename path, shadow Fetch Queue와 RAT, store-data 구조, 별도 physical register 관리가 필요하다. Backend에서도 precomputation thread를 위해 reservation station과 physical register를 main thread와 share하고, issue 우선권을 부여한다.
+즉, TEA는 branch resolution을 앞당기기 위해 dependence chain 전체를 복제 실행한다. 이 방식은 효과적이지만 hardware 구조와 dynamic instruction 실행량이 증가하고, shared execution/cache resources에서 main thread와 경쟁할 수 있다. ZERECO는 TEA의 H2P-chain identification은 활용하되, 별도 thread와 전체 chain 재실행 없이 **main-thread chain의 실제 bottleneck만 가속**하는 것을 목표로 한다.
+
+- Reference: `/home/lee/scarab/reference/[2024, MICRO] Timely_Efficient_and_Accurate_Branch_Precomputation.pdf`
+
+#### PUBS
+
+PUBS는 branch prediction confidence가 낮은 branch의 backward slice를 식별하고, 해당 instruction을 IQ의 priority entry에 배치해 issue wait를 줄인다. Helper thread 없이 main-thread scheduling만 변경한다는 점에서 구조가 가볍지만, 직접 줄이는 것은 slice instruction들이 issue queue에서 기다리는 시간이다. Load를 더 일찍 issue할 수는 있어도, issue 이후의 cache/memory service latency 자체를 제거하지는 못한다.
+또한 PUBS의 slice identification은 branch confidence와 logical-register producer 관계에 기반한다. 따라서 많은 branch를 broadly unconfident로 분류하면 priority entry 부족으로 dispatch가 지연되거나 normal IQ capacity가 줄어들 수 있으며, store-to-load와 같은 memory producer 관계도 명시적으로 복원하지 않는다. ZERECO는 TEA-derived H2P-chain 정보를 사용해 target을 좁히고, latency를 유발하는 load에는 scheduling priority보다 직접적인 load 가속을 우선 적용한다.
+
+- Reference: `/home/lee/scarab/reference/[2018, MICRO] PUBS.pdf`
+
+#### Branch Runahead
+
+Branch Runahead는 runtime에 H2P branch dependence chain을 추출하고, Dependence Chain Engine(DCE)에서 반복 실행해 branch predictor보다 먼저 outcome을 공급한다. History-based predictor가 맞히기 어려운 data-dependent branch를 실제 computation으로 처리하여 Prediction Accuracy를 높이는 목적이 있다.
+그러나 fetch prediction을 override하려면 dependence-chain 결과가 branch fetch보다 먼저 준비되어야 하므로 timeliness 조건이 매우 강하다. Synchronization이 늦거나 chain에 long-latency operation이 포함되면 결과가 늦어 사용되지 못한다. 이를 위해 chain extraction, H2P tracking, live-in synchronization, prediction queue와 별도 DCE가 필요하며, 빠른 실행을 위해 chain length와 포함 가능한 operation도 제한한다. ZERECO는 branch outcome 전체를 미리 계산하는 대신, main-thread fetch 이후에도 가치가 있는 **early resolution**을 목표로 하고 chain의 critical load만 선택적으로 가속한다.
+
+- Reference: `/home/lee/scarab/reference/[2021, MICRO] Branch Runahead_Pruett,Y.Patt.pdf`
 
 ---
 
-## 2. Motivation과 Oracle Headroom
+## 3. Key Insights
 
-### Target load 정의
+### 1. Fetch-to-resolution이 핵심 penalty 구간이다
+H2P branch가 fetch된 뒤 resolution되기까지의 시간이 recovery 이후의 redirect 시간보다 훨씬 길다. 따라서 predictor가 틀린 뒤의 고정 recovery latency만 최적화하는 것보다, branch execute 자체를 앞당기는 것이 더 큰 기회다.
 
-Oracle과 predictor 실험에서 target load는 다음 조건을 만족하는 load이다.
+### 2. Resolution을 늦추는 중심 원인은 dependency wait이다
+Fetch-to-resolution을 분해하면 frontend 통과나 branch execution보다 source operand가 준비되기를 기다리는 구간이 지배적이다. 즉, H2P branch는 scheduler에서 단순히 선택되지 못해서라기보다 dependence chain의 결과가 늦게 도착해 오래 unresolved 상태로 남는다.
 
-- Block-Cache-hit 또는 Dependency-Chain-Cache-hit 구간에서 식별됨.
-- H2P dependence chain bit가 태깅됨.
-- main-thread on-path load임.
-- 앞선 store와 store-forwarding 가능한 case는 제외함.
+### 3. Target Load latency가 dependency wait의 주요 원인이다
+H2P-chain 안의 모든 operation을 동일하게 다루는 대신 Target Load만 가속해도 dependency wait와 branch resolution이 함께 감소한다. 이는 Target Load latency가 단순한 상관관계가 아니라 resolution latency를 만드는 causal bottleneck임을 보여준다.
 
-store-forwardable load를 제외하는 이유는 address/value prefetch로 이득을 만들 대상이 아니고, in-flight store conflict 문제를 불필요하게 키우지 않기 위해서다.
+### 4. Target Load는 제한적으로 예측 가능하며, 예측 가능성에 따라 메커니즘을 나눌 수 있다
+Target Load access는 일부 load PC에 집중되고, 상당수는 PC-local address history로 예측할 수 있다. 예측 가능한 load에는 RF prefetch를 적용하고, 주소 예측이 어려운 chain tail에는 PUBS-style backend priority를 적용하는 hybrid 구성이 적절하다.
 
-### 최신 oracle 결과: prefetcher-ON 기준
-
-`260709_decoupling_RFP_L1P`에서 모든 H2P-chain load를 1-cycle latency로 강제한 oracle 결과:
-
-| 기준 | 결과 |
-|------|------|
-| Baseline | golden_cove + 기본 stream prefetcher ON |
-| Oracle | 모든 H2P-chain target load latency = 1 |
-| Geomean Periodic IPC speedup | **+28.41% vs baseline** |
-
-stream prefetcher를 켜도 oracle headroom이 크게 남는다. 이는 범용 hardware prefetcher가 이미 쉬운 strided access 일부를 흡수하더라도, H2P-chain target RF prefetch가 공략할 resolution-critical headroom이 남아 있음을 뜻한다.
-
-### 중요한 해석: latency hiding보다 resolution acceleration
-
-워크로드별 target load hit-level breakdown에서 반직관적인 패턴이 보인다.
-
-| 워크로드 유형 | 예시 | 관찰 | 해석 |
-|---------------|------|------|------|
-| Cache-resident / resolution-gated | `xz`, `bfs`, `cc`, `clang` | 평균 load latency가 낮거나 L1 hit가 많아도 oracle 이득이 큼 | L1에 이미 있는 load의 hit-use latency가 branch resolution을 늦춘다. RF-level delivery가 필요하다. |
-| DRAM-bound | `pr`, `bc` | memory access 비율은 높지만 oracle 이득이 상대적으로 작거나 prefetcher-ON에서 흡수될 수 있음 | 순수 memory latency hiding은 이 문제의 본질이 아니다. |
-
-따라서 설계의 주력은 L1 miss prefetch가 아니라 **H2P-chain load value를 더 빨리 소비 가능하게 만드는 RF prefetch**이다.
-
----
-
-## 3. Related Work 포지셔닝
-
-| 논문 | 핵심 메커니즘 | 한계와 ZERECO의 차별점 |
-|------|---------------|------------------------|
-| **TEA** (MICRO 2024) | H2P branch를 별도 precomputation thread로 실행. Block Cache, Fill Buffer, H2P Table로 chain을 추적하고 branch outcome을 조기 계산/검증. | 빠르고 정확하지만 dedicated frontend/backend, shadow Fetch/Rename/RAT/Fetch Queue, backend partition, store data cache 등 오버헤드가 크다. ZERECO는 identification은 활용하되 precomputation engine은 두지 않는다. |
-| **RFP** (ISCA 2022) | Predictable load 주소를 L1에서 RF로 prefetch하고, demand load가 L1 access를 skip한다. Low-confidence 예측도 no-flush replay로 처리해 coverage를 늘린다. | 전체 load 대상 general mechanism이라 pollution이 있고 평균 이득이 제한적이다. ZERECO는 H2P-chain load만 타깃으로 좁혀 pollution을 줄이고 branch-resolution 이득에 집중한다. |
-| **PUBS** (MICRO 2018) | Unconfident branch slice를 추적해 IQ priority entry로 dispatch한다. | Frontend identification이 부정확하고 branch를 과잉 마킹할 수 있다. Register producer 중심이라 store-to-load memory dependence를 놓친다. ZERECO는 PUBS의 backend priority 아이디어만 fallback으로 사용하고, identification은 H2P-chain 기반으로 한다. |
-| **CRISP** (ASPLOS 2022) | PMU sampling + Intel PT + offline dataflow 분석으로 critical load/branch slice를 찾아 post-link prefix를 삽입하고 scheduler가 우선 처리한다. | Software profiling/tracing/post-link pipeline이 필요하고, issue 시점을 몇 cycle 앞당기는 수준이라 load-to-use latency 자체를 제거하지 못한다. ZERECO는 pure hardware, H2P-chain 한정, RF prefetch를 결합한다. |
-| **DLVP / Path-based Address Prediction** (MICRO 2017) | Load-path history로 load 주소를 예측하고 cache를 조기 read해 value를 사용한다. | Value/address misprediction 시 flush 또는 memory ordering violation 처리가 필요해 높은 정확도가 요구된다. ZERECO는 RFP-style no-flush replay와 H2P-chain filtering을 결합한다. |
-| **Prefetch survey / temporal prefetching** | Stride, spatial, temporal, Markov 류 prefetch taxonomy. | 일반 temporal prefetching은 MB급 metadata가 필요할 수 있다. H2P-chain load로 필터링하면 작은 on-chip temporal/Markov 구조 가능성을 검토할 수 있다. |
-
-추가 novelty 확인 대상: Focused Value Prediction(ISCA 2020), Hermes(MICRO 2022), Branch Runahead(MICRO 2021), SLB(HPCA 2013).
+### 5. 전체 chain precomputation은 필수가 아니다
+TEA와 Branch Runahead는 branch outcome을 얻기 위해 dependence chain을 별도로 재실행하지만, 실험 결과는 main thread의 resolution-critical load만 가속해도 의미 있는 효과가 있음을 보여준다. 따라서 H2P-chain identification은 유지하면서 helper thread와 duplicated execution pipeline을 제거할 수 있는 설계 공간이 존재한다.
 
 ---
 
@@ -114,7 +108,6 @@ ZERECO는 H2P-chain load를 세 단계로 처리한다.
 
 2. **Predictable load acceleration**
    - Exact virtual address를 높은 신뢰도로 예측할 수 있으면 **RFP-style RF prefetch**를 수행한다.
-   - Cache line만 예측 가능하면 **L1 line prefetch**를 수행한다.
    - 주소가 틀린 경우 wrong value를 commit하지 않고 기존 scheduler replay 또는 demand load path로 복구하는 no-flush 방향을 전제로 한다.
 
 3. **Unpredictable chain fallback**
@@ -129,7 +122,7 @@ TEA의 Block Cache를 identification 전용으로 축소하면, 사실상 **Chai
 |------|-----------|------|
 | `tag` | 약 40-bit | basic-block start PC 식별 |
 | `chain mask` | 32-bit | block 내 H2P-chain member slot 표시. Dispatch priority 및 Fill Buffer walk 시작점으로 사용 |
-| `load mask` | 32-bit | chain slot 중 load 표시. Fetch 시 RF/L1 predictor 조회 대상으로 사용 |
+| `load mask` | 32-bit | chain slot 중 load 표시. Fetch 시 RF predictor 조회 대상으로 사용 |
 
 제거 또는 축소 대상:
 
@@ -149,7 +142,7 @@ TEA의 Block Cache를 identification 전용으로 축소하면, 사실상 **Chai
 | Predictor | 특성 | 주 용도 |
 |-----------|------|---------|
 | `stride` / `pc_stride_vaddr` | 같은 delta가 confidence threshold 이상 반복될 때만 `last + stride`를 예측. Coverage는 낮지만 accuracy가 높음. | Exact-vaddr RF prefetch의 conservative path |
-| `top-delta` / `pc_top_delta` | per-PC delta histogram에서 최빈 delta를 예측. Make-rate와 coverage가 높지만 accuracy는 낮음. | No-flush recovery를 전제로 한 aggressive RF/L1 path |
+| `top-delta` / `pc_top_delta` | per-PC delta histogram에서 최빈 delta를 예측. Make-rate와 coverage가 높지만 accuracy는 낮음. | No-flush recovery를 전제로 한 aggressive RF path |
 | temporal / Markov 후보 | stride/delta가 놓치는 반복 주소 또는 pointer-chasing tail을 추적. | `xz`, `omnetpp`, `pr` 등 low-predictability gap 보완 |
 
 H2P-chain filtering 덕분에 target load PC 수가 작다. 이전 분석에서는 상위 수백 개 load PC가 target access의 큰 비중을 덮어, 작은 table 구조 주장을 뒷받침했다.
@@ -182,17 +175,24 @@ H2P-chain filtering 덕분에 target load PC 수가 작다. 이전 분석에서�
     - `h2p_chain_oracle_hit_latency`: vaddr/RF path latency, 기본 1
     - `h2p_chain_oracle_stride_confidence`: 기본 2
     - `h2p_chain_oracle_min_count`: 기본 2
-  - Predictor stats: `H2P_CHAIN_LOAD_ORACLE_PRED_MADE`, `H2P_CHAIN_LOAD_ORACLE_PRED_CORRECT`, `H2P_CHAIN_LOAD_ORACLE_PRED_WRONG`
+  - Predictor stats: `H2P_CHAIN_LOAD_ORACLE_CANDIDATES`, `H2P_CHAIN_LOAD_ORACLE_PRED_MADE`, `H2P_CHAIN_LOAD_ORACLE_PRED_CORRECT`, `H2P_CHAIN_LOAD_ORACLE_PRED_WRONG`, `H2P_CHAIN_LOAD_ORACLE_BYPASSED`
+
+- **H2P misprediction-latency profiler**
+  - Parameter: `zereco_h2p_mispred_latency_profile` (기본 OFF, experiment descriptor에서 ON)
+  - Main implementation: `src/zereco/h2p_mispred_latency.c`
+  - Branch fetch-to-resolution, post-resolution, first correct-path fetch와 frontend/dependency/scheduler/execution stage를 수집한다.
+  - Execute-resolved H2P misprediction과 misfetch를 모두 포함한다.
 
 ### 구현상 중요한 정합성 장치
 
-- `op->dcache_cycle == MAX_CTR` first-visit guard로 각 dynamic load를 program order에서 한 번만 학습시킨다.
-- Line granularity는 flat constant가 아니라 실제 L1-hit latency(`DCACHE_CYCLES + extra_ld_latency`)를 적용한다.
-- 이 때문에 `vaddr - line` 차이가 RF delivery와 L1 line prefetch의 이득 차이를 직접 보여준다.
+- `op->h2p_oracle_pred_checked` guard로 predictor는 각 dynamic load를 한 번만 통과시킨다. Prediction miss 이후 demand cache access가 재시도되더라도 같은 load가 실제 주소를 학습한 뒤 다시 예측되는 self-training은 허용하지 않는다.
+- Predictor는 predict-then-update 순서를 사용해 현재 instance의 실제 주소가 현재 prediction에 누설되지 않도록 한다.
+- Store-forwarding 가능 load는 RF bypass에서 제외하고 정상 memory path를 사용한다.
+- Line granularity 비교 코드는 남아 있지만 최신 `260729` 실험에서는 exact-vaddr/RF config만 사용했다.
 
 ### 외부 mask 방식은 별도 open item
 
-로컬 설계안에는 per-dynamic-instance mask 파일 방식도 포함되어 있었다.
+외부 mask 방식은 ZERECO의 실제 hardware mechanism이 아니라, **offline predictor 분석 결과를 timing simulation에서 그대로 재현하기 위한 실험용 주입 방식**이다. Offline replay는 raw trace를 읽으면서 각 dynamic Target Load instance에 대해 predictor가 성공했는지를 미리 판정할 수 있다. 이 결과를 bit mask로 저장하고, timing simulator가 해당 bit만 읽어 선택된 load의 latency를 줄이는 방식이다.
 
 예상 형식:
 
@@ -200,113 +200,121 @@ H2P-chain filtering 덕분에 target load PC 수가 작다. 이전 분석에서�
 <load_pc_hex> <n_instances> <bitstring>
 ```
 
-이 방식은 load PC별 program-order counter로 target dynamic instance를 골라야 한다. Replay trace의 instance 순서와 simulator 관측 순서가 일치해야 하고, wrong-path load는 counter를 증가시키면 안 된다.
+각 필드의 의미는 다음과 같다.
 
-현재 online predictor oracle은 이 외부 mask 인프라 없이도 predictor-gated IPC를 측정할 수 있다. 다만 특정 offline oracle subset을 강제로 주입하려면 mask 인프라가 여전히 필요하다.
+- `load_pc_hex`: 동일한 static load instruction을 식별하는 PC
+- `n_instances`: offline trace에서 관측한 해당 load PC의 dynamic 실행 횟수
+- `bitstring`: program order에 따른 각 dynamic instance의 선택 여부. `1`이면 predictor가 성공한 instance로 간주해 RF-style latency를 적용하고, `0`이면 정상 cache/memory path를 사용
+
+예를 들어 다음 mask가 있다고 가정한다.
+
+```text
+0x400abc 5 10110
+```
+
+PC `0x400abc`의 load가 다섯 번 실행될 때 첫 번째, 세 번째, 네 번째 dynamic instance만 offline predictor가 성공했다는 의미다. Timing simulator는 이 load PC를 만날 때마다 per-PC instance counter로 몇 번째 실행인지를 확인한다. 대응 bit가 `1`이면 oracle bypass를 적용하고, `0`이면 baseline과 동일하게 실행한다.
+
+이 방식이 올바르게 동작하려면 다음 조건이 필요하다.
+
+1. Offline replay와 timing simulation이 동일한 SimPoint, warmup 범위와 Target Load filter를 사용해야 한다.
+2. 같은 load PC의 dynamic instance가 두 환경에서 정확히 같은 program order로 관측되어야 한다.
+3. Wrong-path load, store-forwarding 제외 load와 동일 load의 cache-access retry가 mask counter를 잘못 소비하면 안 된다.
+4. Mask의 `n_instances`와 simulation에서 실제로 소비한 instance 수가 일치하는지 검증해야 한다.
+
+이 조건 중 하나라도 어긋나면 이후 mask bit가 모두 다른 dynamic instance에 적용되는 alignment error가 발생한다. 따라서 실제 구현에는 mask 파일 loader, load-PC별 instance counter, bit 범위 검사와 simulation 종료 시 instance-count validation이 필요하다.
+
+현재 online predictor oracle은 simulator 내부에서 각 dynamic load에 대해 직접 predict-then-update를 수행하고, prediction이 맞은 경우에만 latency를 줄인다. 따라서 현재 predictor-gated IPC 실험에는 외부 mask가 필요하지 않으며, offline trace와 dynamic-instance 순서를 맞추는 문제도 없다.
+
+외부 mask 방식은 향후 별도의 offline predictor가 선택한 고정 subset을 timing simulation에서 정확히 재생하거나, offline 결과와 timing 결과를 instance 단위로 교차검증할 때만 필요한 선택 사항이다. 정리하면 online predictor는 **simulation 중 predictor를 직접 실행하는 방식**이고, 외부 mask는 **simulation 전에 만든 정답지를 읽어 지정된 dynamic instance만 가속하는 방식**이다.
 
 ---
 
-## 6. 실험 결과와 산출물
+## 6. 실험 결과 요약
 
-이 절은 결과 수치를 중복해서 기록하지 않고, 각 실험의 목적과 해석에 필요한 원본 그래프 및 통계 파일을 연결한다.
+이 절에는 정량 결과를 다시 나열하지 않고, 각 실험의 결과 디렉터리와 해당 실험에서 새롭게 확인한 내용만 정리한다.
+세부 수치와 그래프는 각 디렉터리의 분석 산출물을 기준으로 한다.
 
 ### 6.1 H2P-chain target load 특성화 (`260624`)
 
-전체 simpoint profile 결과에서 벤치마크별 weight 상위 5개 simpoint를 사용해 target load의 동적 비중, cache/latency 특성, PC 집중도, 주소 반복성 및 per-PC delta 규칙성을 분석했다. 결과는 H2P-chain target load 중 상당 부분이 PC-local address history로 예측 가능하며, predictor가 처리해야 할 irregular tail은 workload에 따라 크게 달라짐을 보여준다.
+- 결과 디렉터리: `/home/lee/simulations/zereco/260624_h2p_chain_load_access_pattern_all_simpoints`
 
-- 결과 디렉터리: `/home/lee/simulations/260624_h2p_chain_load_access_pattern_all_simpoints`
-- 주소 반복성 분포: `top5_h2p_chain_target_load_address_repeatability_distribution.png`
-- 특성 요약 및 predictor metric: `top5_h2p_chain_access_pattern_benchmark_summary.csv`, `top5_rf_prefetch_predictor_metric_heatmap.png`
-- Offline predictor replay: `top5_h2p_chain_load_predictor_replay_summary_no_markov.csv`, `top5_h2p_chain_load_predictor_replay_per_pc_no_markov.csv`
+이 실험을 통해 H2P-chain Target Load access가 비교적 적은 수의 load PC에 집중되며, 상당수의 address stream이 per-PC history로 예측 가능함을 확인했다. 동시에 predictor가 처리하기 어려운 irregular tail의 크기와 특성은 workload마다 다르므로, 하나의 predictor만으로 모든 Target Load를 cover하기는 어렵다.
 
 ### 6.2 Baseline, TEA, perfect-load oracle 비교 (`260625`)
 
-Baseline OoO, TEA helper-thread 구조, main-thread H2P-chain target load의 latency를 최소화한 oracle을 동일한 벤치마크 집합에서 비교했다. 이 실험은 target load latency 단축만으로 얻을 수 있는 성능 상한과 TEA 대비 잠재력을 확인하기 위한 것이다.
+- 결과 디렉터리: `/home/lee/simulations/zereco/260625_perf_comparison`
 
-이 디렉터리의 `PARAMS.out` 기준으로 prefetch framework와 stream prefetcher는 꺼져 있다. 따라서 이 결과는 prefetcher-OFF motivation으로 사용하고, prefetcher-ON 결론은 다음 `260709` 실험을 기준으로 한다. TEA 결과 중 미완료 simpoint가 있는 벤치마크는 completed-simpoint 집계 범위를 함께 확인해야 한다.
+이 실험을 통해 main-thread H2P-chain Target Load latency를 줄이는 것만으로도 큰 성능 headroom이 존재하며, 전체 dependence chain을 helper thread에서 재실행하지 않아도 TEA와 경쟁할 수 있는 설계 가능성이 있음을 확인했다. 이 결과는 prefetcher-OFF 환경의 full-oracle motivation이며, realizable predictor 효과는 다음 실험에서 별도로 검증한다.
 
-- 결과 디렉터리: `/home/lee/simulations/260625_perf_comparison`
-- 벤치마크별 Periodic IPC: `periodic_ipc_by_benchmark.csv`
-- 절대 IPC 비교: `Periodic_IPC_ipc.png`
-- Baseline 대비 speedup: `Periodic_IPC_speedup_vs_baseline.png`
-- TEA completed-simpoint 집계: `tea_periodic_ipc_completed_simpoints.csv`
+### 6.3 Misprediction penalty breakdown과 predictor-gated RF 가속 (`260729`)
 
-### 6.3 Predictor-gated RF/L1 가속 비교 (`260709`)
+- 결과 디렉터리: `/home/lee/simulations/zereco/zereco_260729_misp_penalty_breakdown`
 
-Prefetcher-ON baseline에서 stride와 top-delta predictor를 exact-vaddr(RF) 및 cache-line(L1) 단위로 비교했다. Online predictor의 coverage/accuracy와 실제 IPC를 함께 측정해, 주소 예측 가능성이 성능으로 얼마나 전환되는지와 RF delivery가 L1 line prefetch보다 제공하는 추가 이득을 분리했다.
+이 실험을 통해 fetch-to-resolution이 H2P misprediction penalty의 핵심 구간이며, 그 안에서는 dependence chain의 operand-ready wait가 가장 큰 원인임을 확인했다. 또한 online predictor가 실제로 cover하는 Target Load만 가속해도 dependency wait와 branch resolution이 줄고 IPC가 개선되므로, Target Load latency가 resolution을 늦추는 causal bottleneck임을 확인했다.
 
-결과는 H2P-chain filtering과 PC-local predictor의 결합이 유효하며, 주된 성능 기회가 단순한 L1 line 공급보다 exact-vaddr 기반 RF delivery에 있음을 보여준다. 세부 수치와 벤치마크별 차이는 아래 산출물을 기준으로 한다.
-
-- 결과 디렉터리: `/home/lee/simulations/260709_decoupling_RFP_L1P`
-- Predictor coverage/accuracy: `online_predictor_coverage_accuracy.csv`, `online_predictor_coverage_accuracy.png`
-- RF 및 L1 세부 결과: `online_predictor_RF_vaddr.csv`, `online_predictor_L1_line.csv`
-- 절대 IPC 비교: `Periodic_IPC_ipc.png`
-- Baseline 대비 speedup: `Periodic_IPC_speedup_vs_baseline.png`
-- 전체 통계 원본: `collected_stats.csv`
-
-세 실험을 함께 보면 연구의 핵심 질문은 "H2P-chain load를 예측할 수 있는가"에서 "예측 가능한 target load를 충분히 일찍, 현실적인 비용으로 RF에 공급할 수 있는가"로 좁혀진다.
+세 실험을 함께 보면 논리는 다음과 같이 연결된다. `260624`는 Target Load의 주소 예측 가능성을, `260625`는 load-latency 제거의 full-oracle headroom을, `260729`는 fetch-to-resolution의 중요성과 predictor가 cover하는 Target Load만 가속해도 resolution 및 IPC가 개선된다는 causal evidence를 제공한다.
 
 ---
 
-## 7. 실험 설정 원칙
+## 7. 최신 실험 설정과 집계 원칙
 
-### SET vs CLAMP
+### Target Load 정의
 
-Latency idealization에는 두 모드가 필요하다.
+Oracle과 predictor 실험에서 Target Load는 Block Cache 또는 Dependency Chain Cache를 통해 H2P dependence chain member로 식별된 main-thread on-path load이다. 앞선 store에서 forwarding되어야 하는 load는 address/value prefetch의 대상이 아니며 in-flight store conflict를 만들 수 있으므로 RF bypass에서 제외한다.
 
-| Mode | 의미 | 사용처 |
-|------|------|--------|
-| `SET` | target load latency를 지정 latency로 고정 | RF prefetch oracle. 이미 L1 hit인 load도 RF delivery로 load-to-use latency를 더 줄일 수 있으므로 허용. |
-| `CLAMP` | `min(baseline_latency, idealize_latency)` | L1 prefetch oracle. 이미 L1 hit인 load에 존재하지 않는 이득을 만들면 안 됨. |
+### Config semantics
 
-L1 tier는 반드시 CLAMP 또는 실제 L1-hit latency 기반이어야 한다. 그렇지 않으면 `xz`, `bfs`, `leela`처럼 이미 cache-resident인 workload에서 L1 prefetch가 가짜 이득을 얻게 된다.
+| Config | 의미 |
+|--------|------|
+| `baseline` | golden_cove, stream prefetcher ON, 정상 cache/memory latency |
+| `pred_stride_vaddr` | Online stride predictor가 exact vaddr를 맞힌 Target Load만 1-cycle RF service |
+| `pred_top_delta_vaddr` | Online top-delta predictor가 exact vaddr를 맞힌 Target Load만 1-cycle RF service |
 
-### Config mapping
+Prediction을 만들지 못했거나 주소가 틀린 load는 정상 demand path를 사용한다. Predictor가 correct한 경우라도 store-forwarding conflict가 있으면 bypass하지 않는다. Full perfect-load oracle과 L1-line predictor config는 최신 실험에서 의도적으로 제외했다.
 
-| 이름 | 의미 | 현재 대응 |
-|------|------|-----------|
-| `BASE_PF` | prefetcher-ON baseline | golden_cove stream prefetcher ON |
-| `TEA_PF` | prefetcher-ON TEA baseline | TEA 구현 baseline, 추가 정리 필요 |
-| `FULL_PF` | 모든 chain load latency = 1 | `oracle` |
-| `RF_TIER` | exact-vaddr predictor correct case latency = 1 | `pred_stride_vaddr`, `pred_top_delta_vaddr` |
-| `L1_TIER` | cache-line predictor correct case L1-hit latency | `pred_stride_line`, `pred_top_delta_line` |
+### Aggregation과 비교 집합
 
-보고 지표:
+- Baseline penalty breakdown은 완료된 baseline run을 사용한다.
+- Predictor 비교는 세 config에 공통으로 완료된 SimPoint 집합을 사용한다.
+- Workload 내부 latency는 SimPoint weight를 정규화한 뒤 `weighted total cycles / weighted event count`로 계산한다.
+- 전체 latency 대표값은 workload-equal mean이다. Event-weighted 값은 별도 CSV에 보존한다.
+- IPC speedup의 AVG는 workload별 IPC ratio의 geometric mean이다.
+- Coverage는 `correct predictions / candidate Target Loads`, accuracy는 `correct / predictions made`이다.
 
-- `BASE_PF` 대비 IPC speedup.
-- Realizable fraction = `RF_TIER / FULL_PF`.
-- RF-only fraction = `(RF_TIER - L1_TIER) / RF_TIER`.
+완료 run, 제외된 SimPoint, event-population sensitivity와 profiler integrity는 결과 디렉터리의 `analysis` 자료를 기준으로 한다.
 
 ---
 
 ## 8. 남은 설계 질문과 다음 단계
 
 ### Predictor / prefetch 구조
-
-- Low-predictability gap(`xz`, `omnetpp`, `pr` 등)을 줄이기 위해 temporal/Markov predictor를 추가할지 평가한다.
+- Stride predictor의 coverage가 낮고 top-delta predictor도 coverage/accuracy를 충분히 회복하지 못한 workload(`omnetpp`, `leela`, `gcc`, `mcf`, `deepsjeng` 등)에 대해 temporal/Markov predictor가 coverage-accuracy trade-off를 개선하는지 평가한다.
 - RFP의 Prefetch Table(confidence/stride)을 H2P-chain 특화로 축소할지, 별도 confidence 구조를 만들지 정해야 한다.
 - Top-delta처럼 accuracy가 낮은 predictor를 현실 하드웨어에서 사용할 때 scheduler replay 비용을 정량화해야 한다.
+- prefetch 처리할 지 IQ에서 priority 부여하는 방식으로 처리할지를 정하는 address predictability 기준을 정해야 한다.
 
 ### Timeliness
-
 - 현재 online oracle은 "예측이 맞으면 latency를 줄인다"는 회수 가능 상한에 가깝다.
 - 실제 RF prefetch는 fetch/rename 시점에서 demand load보다 충분히 빨라야 한다.
 - DRAM miss급 또는 long-chain load에는 N-instance-ahead prefetch, trigger distance, in-flight predictor update 정책이 필요할 수 있다.
 
-### PUBS-style priority fallback
+### 실험 모델 보강
+- Predictor table storage, lookup latency, port contention과 RF write bandwidth를 모델링한다.
+- Wrong prediction이 정상 demand path와 scheduler replay에 주는 비용을 측정한다.
+- Event-population 변화가 큰 workload의 원인을 확인하고, 동일 branch-instance 또는 안정 population 기준 sensitivity를 보강한다.
 
+### PUBS-style priority fallback
 - PUBS의 6 priority-entry 최적점은 4-wide, 64-entry IQ, 71% unconfident branch 마킹 기준이다.
+- 논문의 baseline과 실제 우리의 Baseline의 Structure size가 다르기에, 고려하여 적용해야 함.
 - ZERECO는 H2P-chain으로 훨씬 선별적으로 마킹하지만 chain span은 길 수 있다.
 - Prefetcher-ON 환경에서 priority entry 수, stall/non-stall dispatch, mode switch를 처음부터 sweep해야 한다.
 
 ### Cost story
-
 - 논문 방어에서 가장 중요한 질문은 "TEA에서 제일 비싼 구조를 그대로 둔 것 아닌가?"이다.
 - 따라서 Chain Mask Cache 슬림화, decoded-uop store 제거, shadow frontend/backend 제거를 정량 cost table로 올려야 한다.
 - TEA의 Block Cache 19KB, Fill Buffer 8KB, RS/PR reservation, dynamic instruction 증가 같은 기존 cost claim과 ZERECO cost를 직접 비교해야 한다.
 
 ### Related-work 방어
-
 - CRISP 대비: software profiling/post-link prefix가 아니라 pure hardware이고, issue priority만이 아니라 RF prefetch를 결합한다는 점을 강조한다.
 - RFP 대비: 전체 load가 아니라 H2P-chain critical load만 타깃으로 한다.
 - DLVP/PAP 대비: flush-requiring value prediction이 아니라 RFP-style no-flush replay 경로를 목표로 한다.
@@ -333,10 +341,19 @@ L1 tier는 반드시 CLAMP 또는 실제 L1-hit latency 기반이어야 한다. 
   - `h2p_chain_oracle_hit_latency`
   - `h2p_chain_oracle_stride_confidence`
   - `h2p_chain_oracle_min_count`
+  - `zereco_h2p_mispred_latency_profile`
+- `src/zereco/h2p_mispred_latency.c`
+  - H2P misprediction/misfetch timeline 및 resolution stage profiler
+- `src/zereco/zereco.stat.def`
+  - `ZERECO_H2P_FETCH_TO_RESOLUTION_*`
+  - `ZERECO_H2P_FETCH_TO_CORRECT_FETCH_*`
+  - `ZERECO_H2P_{FRONTEND,DEPENDENCY,SCHEDULER,EXECUTION}_*`
 - `src/tea/tea.stat.def`
+  - `H2P_CHAIN_LOAD_ORACLE_CANDIDATES`
   - `H2P_CHAIN_LOAD_ORACLE_PRED_MADE`
   - `H2P_CHAIN_LOAD_ORACLE_PRED_CORRECT`
   - `H2P_CHAIN_LOAD_ORACLE_PRED_WRONG`
+  - `H2P_CHAIN_LOAD_ORACLE_BYPASSED`
 - `src/tools/h2p_chain_load_predictor_replay.py`
   - raw stream offline replay
 
@@ -344,11 +361,11 @@ L1 tier는 반드시 CLAMP 또는 실제 L1-hit latency 기반이어야 한다. 
 
 - Descriptor:
   - `~/scarab-infra/json/zereco_dbg.json`
-  - configs: baseline, oracle, `pred_{stride,top_delta}_{vaddr,line}`
+  - configs: `baseline`, `pred_stride_vaddr`, `pred_top_delta_vaddr`
 - Runs:
-  - `~/simulations/260625_perf_comparison`: prefetcher-OFF oracle
-  - `~/simulations/260624_h2p_chain_load_access_pattern_all_simpoints`: access pattern + offline replay
-  - `~/simulations/260709_decoupling_RFP_L1P`: RF-vs-L1 분해, prefetcher-ON, graph 및 `collected_stats.csv`
+  - `~/simulations/zereco/260624_h2p_chain_load_access_pattern_all_simpoints`: access pattern + offline replay
+  - `~/simulations/zereco/260625_perf_comparison`: prefetcher-OFF full oracle motivation
+  - `~/simulations/zereco/zereco_260729_misp_penalty_breakdown`: prefetcher-ON penalty breakdown + predictor-gated RF 결과
 - Reference papers:
   - `/home/lee/scarab/reference/`
 
@@ -356,8 +373,9 @@ L1 tier는 반드시 CLAMP 또는 실제 L1-hit latency 기반이어야 한다. 
 
 ## 10. 현재 결론
 
-1. H2P-chain target load latency를 줄이는 oracle headroom은 prefetcher-ON에서도 크다.
-2. Chain load는 상당 부분 per-PC delta/stride로 예측 가능하다.
-3. Predictor-gated RF path는 full oracle headroom의 의미 있는 부분을 회수한다.
-4. L1 line prefetch만으로는 부족하다. 주요 이득은 RF-level exact-vaddr delivery에서 온다.
-5. ZERECO의 논문 포지션은 TEA의 expensive precomputation thread를 없애고, H2P-chain identification을 criticality filter로 사용해 RFP/PUBS의 비용 대비 효율을 높이는 방향이다.
+1. H2P branch의 fetch-to-resolution은 전체 fetch-to-correct-fetch penalty의 지배 구간이다.
+2. Fetch-to-resolution 안에서는 branch operand의 dependency wait가 가장 큰 비중을 차지한다.
+3. Predictor가 exact vaddr를 맞힌 H2P-chain Target Load만 가속해도 dependency wait, resolution latency, 전체 penalty와 IPC가 함께 개선된다.
+4. Stride는 높은 accuracy, top-delta는 높은 coverage라는 trade-off를 보이며, 두 방식 모두 평가 workload 전반에서 일관된 IPC 개선을 보였다.
+5. 현재 수치는 실제 RF prefetcher의 cost와 timeliness를 모두 반영한 최종 성능이 아니라 predictor-gated upper bound이다.
+6. ZERECO의 논문 포지션은 TEA의 expensive precomputation thread를 없애고, H2P-chain identification을 criticality filter로 사용해 RFP/PUBS의 비용 대비 효율을 높이는 방향이다.

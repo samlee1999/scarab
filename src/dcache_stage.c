@@ -1416,12 +1416,11 @@ static inline Flag dcache_stage_try_main_chain_load_oracle(Op* op) {
     return FALSE;
 
   Flag predictor_on = (H2P_CHAIN_ORACLE_PREDICTOR != 0);
-  /* A predictor-missed load falls through to the normal cache path and re-enters
-     this loop each cycle until its miss returns; only train/decide on the first
-     dcache visit so the per-PC stream stays in program order (matches the
-     first_dcache_access guard used for the raw-stream dump). */
-  Flag first_visit = (op->dcache_cycle == MAX_CTR);
-  if (predictor_on && !first_visit)
+  /* A predictor-missed load can remain in the dcache stage when a bank port is
+     unavailable.  Keep predictor evaluation separate from dcache access state:
+     the same dynamic load may retry its demand access, but it must not learn its
+     actual address and then re-predict itself on a later cycle. */
+  if (predictor_on && op->h2p_oracle_pred_checked)
     return FALSE;
 
   STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_ORACLE_CANDIDATES);
@@ -1429,6 +1428,7 @@ static inline Flag dcache_stage_try_main_chain_load_oracle(Op* op) {
   Counter latency = H2P_CHAIN_PERFECT_LOAD_LATENCY;
 
   if (predictor_on) {
+    op->h2p_oracle_pred_checked = TRUE;
     H2P_Oracle_Pred_Entry* entry =
       h2p_oracle_pred_get_entry(op->proc_id, op->inst_info->addr);
     int64 pred = 0;
