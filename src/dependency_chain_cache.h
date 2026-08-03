@@ -13,6 +13,7 @@
 #define BLOCK_CACHE_SIZE            1024 // 새로 추가된 블록 캐시 크기
 #define EMPTY_BLOCK_TAG_STORE_SIZE    256
 #define MAX_CHAIN_LENGTH            64   // 체인의 최대 길이
+#define MAX_CHAIN_BLOCK_FRAGMENTS   64   // 한 H2P slice가 걸칠 수 있는 block 수
 #define MAX_LIVE_INS                32   // Live-in 목록의 최대 크기
 // =================================================================
 // 자료구조 정의
@@ -27,6 +28,13 @@ typedef struct SourceList_struct {
     uns      addr_count;
 } SourceList;
 
+typedef struct Dependency_Chain_Block_Fragment_struct {
+  Addr      block_start_pc;
+  uint64_t  mask;                  // Full H2P branch backward-slice mask
+  uint64_t  priority_candidate_mask;
+  uns       total_ops_in_block;
+} Dependency_Chain_Block_Fragment;
+
 // An entry in the dependency chain cache
 typedef struct Dependency_Chain_Cache_Entry_struct {
   Flag          is_valid;
@@ -37,7 +45,15 @@ typedef struct Dependency_Chain_Cache_Entry_struct {
   uns           chain_length;
   Op            chain[MAX_CHAIN_LENGTH];
   uint64_t     dependency_mask;     // 기본 블록 내 의존성 비트마스크
+  uint64_t     iq_priority_candidate_mask; // 선택한 scope의 priority 후보
+  uint64_t     iq_priority_mask;    // RF-uncovered H2P slice의 IQ priority mask
   uns          total_ops_in_block;  // 마스크와 함께 사용할 블록의 총 명령어 수
+  uns          block_fragment_count;
+  Dependency_Chain_Block_Fragment
+                block_fragments[MAX_CHAIN_BLOCK_FRAGMENTS];
+  uns          rf_covered_streak;
+  uns          target_load_count;
+  Flag         iq_priority_enabled;
 } Dependency_Chain_Cache_Entry;
 
 typedef struct Block_Cache_Tag_Entry_struct {

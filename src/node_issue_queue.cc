@@ -40,6 +40,8 @@ extern "C" {
 #include "debug/debug_macros.h"
 #include "debug/debug_print.h"
 
+#include "core.param.h"
+
 #include "memory/memory.h"
 
 #include "exec_ports.h"
@@ -140,7 +142,19 @@ int64 node_dispatch_find_emptiest_rs(Op* op) {
  * OLDEST_FIRST_SCHED: will always select the oldest ready ops to schedule
  */
 void node_schedule_oldest_first_sched(Op* op) {
-  int32 youngest_slot_op_id = NODE_ISSUE_QUEUE_FU_SLOT_INVALID;
+  int32 replace_slot_op_id = NODE_ISSUE_QUEUE_FU_SLOT_INVALID;
+
+  auto precedes = [](const Op* lhs, const Op* rhs) -> bool {
+    bool lhs_priority = ZERECO_IQ_PRIORITY_SCHEDULE_ENABLE &&
+                        lhs->thread_id == 0 &&
+                        lhs->zereco_iq_priority_bit;
+    bool rhs_priority = ZERECO_IQ_PRIORITY_SCHEDULE_ENABLE &&
+                        rhs->thread_id == 0 &&
+                        rhs->zereco_iq_priority_bit;
+    if (lhs_priority != rhs_priority)
+      return lhs_priority;
+    return lhs->op_num < rhs->op_num;
+  };
 
   // Iterate through the FUs that this RS is connected to.
   Reservation_Station* rs = &node->rs[op->rs_id];
@@ -167,30 +181,30 @@ void node_schedule_oldest_first_sched(Op* op) {
       return;
     }
 
-    if (op->op_num >= s_op->op_num) {
+    if (!precedes(op, s_op)) {
       continue;
     }
 
-    // The slot is not empty, but we are older than the op that is in the slot
-    if (youngest_slot_op_id == NODE_ISSUE_QUEUE_FU_SLOT_INVALID) {
-      youngest_slot_op_id = fu_id;
+    // The slot is occupied by a lower-ranked candidate.
+    if (replace_slot_op_id == NODE_ISSUE_QUEUE_FU_SLOT_INVALID) {
+      replace_slot_op_id = fu_id;
       continue;
     }
 
-    // check if this slot is younger than the youngest known op
-    Op* youngest_op = node->sd.ops[youngest_slot_op_id];
-    if (s_op->op_num > youngest_op->op_num) {
-      youngest_slot_op_id = fu_id;
+    // Keep the worst replaceable candidate: normal before priority, then young.
+    Op* replace_op = node->sd.ops[replace_slot_op_id];
+    if (precedes(replace_op, s_op)) {
+      replace_slot_op_id = fu_id;
     }
   }
 
   /* Did not find an empty slot or a slot that is younger than me, do nothing */
-  if (youngest_slot_op_id == NODE_ISSUE_QUEUE_FU_SLOT_INVALID) {
+  if (replace_slot_op_id == NODE_ISSUE_QUEUE_FU_SLOT_INVALID) {
     return;
   }
 
-  /* Did not find an empty slot, but we did find a slot that is younger that us */
-  uns32 fu_id = youngest_slot_op_id;
+  /* Replace the lowest-ranked compatible candidate. */
+  uns32 fu_id = replace_slot_op_id;
   DEBUG(node->proc_id, "Scheduler selecting    op_num:%s  fu_id:%d op:%s l1:%d\n", unsstr64(op->op_num), fu_id,
         disasm_op(op, TRUE), op->engine_info.l1_miss);
   ASSERT(node->proc_id, fu_id < (uns32)node->sd.max_op_count);
@@ -358,6 +372,208 @@ static inline Flag node_issue_queue_op_can_schedule(Op* op) {
   return FALSE;
 }
 
+static inline Flag node_issue_queue_ops_share_fu(Op* lhs, Op* rhs) {
+  Reservation_Station* lhs_rs = &node->rs[lhs->rs_id];
+  Reservation_Station* rhs_rs = &node->rs[rhs->rs_id];
+  uns64 lhs_type = get_fu_type(lhs->table_info->op_type,
+                               lhs->table_info->is_simd);
+  uns64 rhs_type = get_fu_type(rhs->table_info->op_type,
+                               rhs->table_info->is_simd);
+  for (uns ii = 0; ii < lhs_rs->num_fus; ++ii) {
+    Func_Unit* lhs_fu = lhs_rs->connected_fus[ii];
+    if (!(lhs_type & lhs_fu->type))
+      continue;
+    for (uns jj = 0; jj < rhs_rs->num_fus; ++jj) {
+      Func_Unit* rhs_fu = rhs_rs->connected_fus[jj];
+      if (lhs_fu->fu_id == rhs_fu->fu_id && (rhs_type & rhs_fu->type))
+        return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+static inline Flag node_issue_queue_selection_contains(
+  Op* const* selected, uns selected_count, Op* target) {
+  for (uns i = 0; i < selected_count; ++i)
+    if (selected[i] == target)
+      return TRUE;
+  return FALSE;
+}
+
+static void node_issue_queue_shadow_consider_oldest(
+  Op* op, Op** selected, uns selected_count) {
+  int32 replace_fu_id = NODE_ISSUE_QUEUE_FU_SLOT_INVALID;
+  Reservation_Station* rs = &node->rs[op->rs_id];
+
+  for (uns32 i = 0; i < rs->num_fus; ++i) {
+    Func_Unit* fu = rs->connected_fus[i];
+    if (!(get_fu_type(op->table_info->op_type,
+                      op->table_info->is_simd) & fu->type))
+      continue;
+
+    uns32 fu_id = fu->fu_id;
+    ASSERT(node->proc_id, fu_id < selected_count);
+    Op* selected_op = selected[fu_id];
+    if (!selected_op) {
+      selected[fu_id] = op;
+      return;
+    }
+    if (op->op_num >= selected_op->op_num)
+      continue;
+
+    if (replace_fu_id == NODE_ISSUE_QUEUE_FU_SLOT_INVALID ||
+        selected[replace_fu_id]->op_num < selected_op->op_num)
+      replace_fu_id = fu_id;
+  }
+
+  if (replace_fu_id != NODE_ISSUE_QUEUE_FU_SLOT_INVALID)
+    selected[replace_fu_id] = op;
+}
+
+static void node_issue_queue_collect_zereco_shadow_stats(void) {
+  if (!ZERECO_IQ_PRIORITY_POLICY)
+    return;
+
+  ASSERTM(node->proc_id, node->sd.max_op_count <= 64,
+          "ZERECO shadow scheduler supports at most 64 FUs\n");
+  Op* shadow_selected[64] = {NULL};
+  uns selected_count = (uns)node->sd.max_op_count;
+  for (Op* op = node->rdy_head; op; op = op->next_rdy) {
+    if (op->thread_id != 0 || !node_issue_queue_op_can_schedule(op))
+      continue;
+    node_issue_queue_shadow_consider_oldest(op, shadow_selected,
+                                            selected_count);
+  }
+
+  if (!ZERECO_IQ_PRIORITY_SCHEDULE_ENABLE) {
+    Counter mismatches = 0;
+    for (uns i = 0; i < selected_count; ++i) {
+      Op* op = shadow_selected[i];
+      if (op && !node_issue_queue_selection_contains(
+                  node->sd.ops, selected_count, op))
+        mismatches++;
+    }
+    for (uns i = 0; i < selected_count; ++i) {
+      Op* op = node->sd.ops[i];
+      if (op && op->thread_id == 0 &&
+          !node_issue_queue_selection_contains(shadow_selected,
+                                                selected_count, op))
+        mismatches++;
+    }
+    INC_STAT_EVENT(node->proc_id, ZERECO_IQ_SHADOW_SELECTION_MISMATCHES,
+                   mismatches);
+    return;
+  }
+
+  Counter displaced_normal_ops = 0;
+  for (uns i = 0; i < selected_count; ++i) {
+    Op* shadow_op = shadow_selected[i];
+    if (!shadow_op || shadow_op->thread_id != 0 || shadow_op->off_path ||
+        shadow_op->zereco_iq_priority_bit ||
+        node_issue_queue_selection_contains(node->sd.ops, selected_count,
+                                            shadow_op))
+      continue;
+    displaced_normal_ops++;
+    shadow_op->zereco_iq_normal_displaced_cycles++;
+  }
+
+  Counter promoted_priority_ops = 0;
+  for (uns i = 0; i < selected_count; ++i) {
+    Op* actual_op = node->sd.ops[i];
+    if (!actual_op || actual_op->thread_id != 0 || actual_op->off_path ||
+        !actual_op->zereco_iq_priority_bit ||
+        node_issue_queue_selection_contains(shadow_selected, selected_count,
+                                            actual_op))
+      continue;
+    promoted_priority_ops++;
+  }
+
+  if (displaced_normal_ops)
+    STAT_EVENT(node->proc_id,
+               ZERECO_IQ_NORMAL_DISPLACED_BY_PRIORITY_CYCLES);
+  INC_STAT_EVENT(node->proc_id,
+                 ZERECO_IQ_NORMAL_DISPLACED_BY_PRIORITY_OP_CYCLES,
+                 displaced_normal_ops);
+  INC_STAT_EVENT(node->proc_id, ZERECO_IQ_PRIORITY_PROMOTED_OP_CYCLES,
+                 promoted_priority_ops);
+}
+
+static inline void node_issue_queue_collect_zereco_ready_stats(void) {
+  if (!ZERECO_IQ_PRIORITY_POLICY)
+    return;
+  Counter ready_priority = 0;
+  for (Op* op = node->rdy_head; op; op = op->next_rdy) {
+    if (op->thread_id == 0 && op->zereco_iq_priority_bit &&
+        node_issue_queue_op_can_schedule(op))
+      ready_priority++;
+  }
+  STAT_EVENT(node->proc_id, ZERECO_IQ_READY_CYCLES);
+  INC_STAT_EVENT(node->proc_id, ZERECO_IQ_READY_PRIORITY_TOTAL,
+                 ready_priority);
+  INC_STAT_EVENT(node->proc_id, ZERECO_IQ_READY_PRIORITY_AVG,
+                 ready_priority);
+}
+
+static inline void node_issue_queue_collect_zereco_contention_stats(void) {
+  if (!ZERECO_IQ_PRIORITY_POLICY ||
+      !ZERECO_IQ_PRIORITY_SCHEDULE_ENABLE)
+    return;
+
+  Counter blocked_priority_ops = 0;
+  for (Op* op = node->rdy_head; op; op = op->next_rdy) {
+    if (op->thread_id != 0 || !op->zereco_iq_priority_bit ||
+        !node_issue_queue_op_can_schedule(op))
+      continue;
+    bool selected = false;
+    for (uns fu_id = 0; fu_id < (uns)node->sd.max_op_count; ++fu_id)
+      selected |= node->sd.ops[fu_id] == op;
+    if (selected)
+      continue;
+
+    bool blocked_by_priority = false;
+    for (uns fu_id = 0; fu_id < (uns)node->sd.max_op_count; ++fu_id) {
+      Op* winner = node->sd.ops[fu_id];
+      if (winner && winner->thread_id == 0 &&
+          winner->zereco_iq_priority_bit &&
+          node_issue_queue_ops_share_fu(op, winner)) {
+        blocked_by_priority = true;
+        break;
+      }
+    }
+    blocked_priority_ops += blocked_by_priority;
+  }
+  if (blocked_priority_ops) {
+    STAT_EVENT(node->proc_id, ZERECO_IQ_PRIORITY_CONTENTION_CYCLES);
+    INC_STAT_EVENT(node->proc_id, ZERECO_IQ_PRIORITY_CONTENTION_PAIRS,
+                   blocked_priority_ops);
+  }
+
+  Counter overtakes = 0;
+  for (uns fu_id = 0; fu_id < (uns)node->sd.max_op_count; ++fu_id) {
+    Op* winner = node->sd.ops[fu_id];
+    if (!winner || winner->thread_id != 0 ||
+        !winner->zereco_iq_priority_bit)
+      continue;
+    for (Op* normal = node->rdy_head; normal; normal = normal->next_rdy) {
+      if (normal->thread_id != 0 || normal->zereco_iq_priority_bit ||
+          normal->op_num >= winner->op_num ||
+          !node_issue_queue_op_can_schedule(normal) ||
+          !node_issue_queue_ops_share_fu(winner, normal))
+        continue;
+      bool normal_selected = false;
+      for (uns normal_fu = 0; normal_fu < (uns)node->sd.max_op_count;
+           ++normal_fu)
+        normal_selected |= node->sd.ops[normal_fu] == normal;
+      if (!normal_selected) {
+        overtakes++;
+        break;
+      }
+    }
+  }
+  INC_STAT_EVENT(node->proc_id, ZERECO_IQ_PRIORITY_OVERTAKES_NORMAL,
+                 overtakes);
+}
+
 /*
  * Schedule ready ops (ops that are currently in the ready list).
  *
@@ -385,6 +601,7 @@ void node_issue_queue_schedule() {
   node_issue_queue_check_mem();
 
   Flag tea_active = TEA_ENABLE && tea_is_active(node->proc_id);
+  node_issue_queue_collect_zereco_ready_stats();
 
   /*
    * Pass 1: TEA ops first (when TEA is active)
@@ -434,6 +651,8 @@ void node_issue_queue_schedule() {
 
     schedule_func_table[NODE_ISSUE_QUEUE_SCHEDULE_SCHEME](op);
   }
+  node_issue_queue_collect_zereco_contention_stats();
+  node_issue_queue_collect_zereco_shadow_stats();
 }
 
 /**************************************************************************************/

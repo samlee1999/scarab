@@ -895,6 +895,34 @@ void node_retire() {
     ASSERT(node->proc_id, op->in_node_list);
     ASSERT(node->proc_id, !op->off_path);
     STAT_EVENT(op->proc_id, OP_WAIT_0 + MIN2(op->sched_cycle - real_rdy_cycle, 31));
+    if (ZERECO_IQ_PRIORITY_POLICY && op->thread_id == 0) {
+      Counter ready_to_issue = op->sched_cycle - real_rdy_cycle;
+      if (op->zereco_iq_priority_bit) {
+        STAT_EVENT(op->proc_id, ZERECO_IQ_PRIORITY_ISSUED);
+        INC_STAT_EVENT(op->proc_id, ZERECO_IQ_PRIORITY_READY_TO_ISSUE_TOTAL,
+                       ready_to_issue);
+        INC_STAT_EVENT(op->proc_id, ZERECO_IQ_PRIORITY_READY_TO_ISSUE_AVG,
+                       ready_to_issue);
+      } else {
+        STAT_EVENT(op->proc_id, ZERECO_IQ_NORMAL_ISSUED);
+        INC_STAT_EVENT(op->proc_id, ZERECO_IQ_NORMAL_READY_TO_ISSUE_TOTAL,
+                       ready_to_issue);
+        INC_STAT_EVENT(op->proc_id, ZERECO_IQ_NORMAL_READY_TO_ISSUE_AVG,
+                       ready_to_issue);
+        if (op->zereco_iq_normal_displaced_cycles) {
+          STAT_EVENT(op->proc_id,
+                     ZERECO_IQ_NORMAL_DISPLACED_RETIRED_OPS);
+          STAT_EVENT(op->proc_id,
+                     ZERECO_IQ_NORMAL_DISPLACED_RETIRED_PCT);
+          INC_STAT_EVENT(op->proc_id,
+                         ZERECO_IQ_NORMAL_DISPLACEMENT_DELAY_TOTAL,
+                         op->zereco_iq_normal_displaced_cycles);
+          INC_STAT_EVENT(op->proc_id,
+                         ZERECO_IQ_NORMAL_DISPLACEMENT_DELAY_AVG,
+                         op->zereco_iq_normal_displaced_cycles);
+        }
+      }
+    }
     STAT_EVENT(op->proc_id, OP_RETIRED);  // Counts all ops retired, not just those in primary thread
 
     DEBUG(node->proc_id, "Retiring op_num:%s\n", unsstr64(op->op_num));

@@ -217,6 +217,13 @@ void op_pool_setup_op(uns proc_id, Op* op) {
   op->h2p_chain_id = 0;
   op->chain_bit = FALSE;
   op->h2p_oracle_pred_checked = FALSE;
+  op->h2p_chain_block_start_pc = 0;
+  op->h2p_chain_block_op_idx = 0;
+  op->h2p_chain_profile_access_recorded = FALSE;
+  op->zereco_rf_covered = FALSE;
+  op->zereco_iq_priority_candidate_bit = FALSE;
+  op->zereco_iq_priority_bit = FALSE;
+  op->zereco_iq_normal_displaced_cycles = 0;
   op->off_path = FALSE;  // FIXME: check
   op->state = OS_FETCHED;
   op->fu_num = -1;

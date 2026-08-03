@@ -1429,12 +1429,16 @@ static inline Flag dcache_stage_try_main_chain_load_oracle(Op* op) {
 
   if (predictor_on) {
     op->h2p_oracle_pred_checked = TRUE;
+    op->zereco_rf_covered = FALSE;
     H2P_Oracle_Pred_Entry* entry =
       h2p_oracle_pred_get_entry(op->proc_id, op->inst_info->addr);
     int64 pred = 0;
     Flag have_pred = h2p_oracle_pred_predict(entry, &pred);
     int64 actual = h2p_oracle_pred_value(op);
-    h2p_oracle_pred_update(entry, actual); /* predict-then-update, program order */
+    /* The dcache-stage arrival stream is not necessarily program ordered.
+       What matters here is that this dynamic load predicts before its own
+       address updates the online predictor. */
+    h2p_oracle_pred_update(entry, actual);
 
     if (have_pred)
       STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_ORACLE_PRED_MADE);
@@ -1458,6 +1462,12 @@ static inline Flag dcache_stage_try_main_chain_load_oracle(Op* op) {
     STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_ORACLE_STORE_FWD_EXCLUDED);
     return FALSE;
   }
+
+  /* This outcome is consumed only after the op retires.  It therefore trains
+     the filtered IQ policy for a future occurrence of the H2P slice and never
+     changes the priority of older producers in the current occurrence. */
+  if (predictor_on)
+    op->zereco_rf_covered = TRUE;
 
   op->state = OS_SCHEDULED;
   op->dcache_cycle = cycle_count;

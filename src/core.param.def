@@ -414,6 +414,23 @@ DEF_PARAM(h2p_chain_oracle_hit_latency, H2P_CHAIN_ORACLE_HIT_LATENCY, uns, uns, 
 DEF_PARAM(h2p_chain_oracle_stride_confidence, H2P_CHAIN_ORACLE_STRIDE_CONFIDENCE, uns, uns, 2, )
 /* Top-delta predictor: min observation count for the dominant delta. */
 DEF_PARAM(h2p_chain_oracle_min_count, H2P_CHAIN_ORACLE_MIN_COUNT, uns, uns, 2, )
+/* [EXPERIMENT: ZERECO IQ PRIORITY]
+   0 = disabled, 1 = every H2P-chain op, 2 = online RF-filtered H2P slices. */
+DEF_PARAM(zereco_iq_priority_policy, ZERECO_IQ_PRIORITY_POLICY, uns, uns, 0, )
+/* Compute/attach priority eligibility but optionally leave oldest-first
+   scheduling unchanged.  Disable this in the matching shadow baseline to
+   measure the same op cohorts without priority reordering. */
+DEF_PARAM(zereco_iq_priority_schedule_enable,
+          ZERECO_IQ_PRIORITY_SCHEDULE_ENABLE, Flag, Flag, TRUE, )
+/* Priority-mask scope within each H2P branch backward slice:
+   0 = full branch backward slice,
+   1 = dependent-op prefix from the oldest slice op through the last Target
+       Load.  A slice with no Target Load contributes no priority candidates. */
+DEF_PARAM(zereco_iq_priority_scope, ZERECO_IQ_PRIORITY_SCOPE, uns, uns, 0, )
+/* Consecutive fully RF-covered observations required before a branch slice
+   stops receiving IQ priority.  Any uncovered observation resets the streak. */
+DEF_PARAM(zereco_iq_rf_covered_streak_threshold,
+          ZERECO_IQ_RF_COVERED_STREAK_THRESHOLD, uns, uns, 2, )
 /* [EXPERIMENT: ZERECO_H2P_MISPRED_LATENCY_PROFILE]
    Profile execute-resolved H2P mispred/misfetch latency without changing pipeline behavior. */
 DEF_PARAM(zereco_h2p_mispred_latency_profile, ZERECO_H2P_MISPRED_LATENCY_PROFILE, Flag, Flag, FALSE, )

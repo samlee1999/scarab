@@ -284,6 +284,10 @@ struct Op_struct {
   uns h2p_chain_block_op_idx;
   Flag h2p_chain_profile_access_recorded;
   Flag h2p_oracle_pred_checked;
+  Flag zereco_rf_covered;
+  Flag zereco_iq_priority_candidate_bit;
+  Flag zereco_iq_priority_bit;
+  Counter zereco_iq_normal_displaced_cycles;
 };
 
 /**************************************************************************************/

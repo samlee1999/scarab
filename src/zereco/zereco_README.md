@@ -1,6 +1,6 @@
 # ZERECO: H2P-Chain Load 가속을 통한 Branch 오예측 조기 해소
 
-> 연구 README. Last updated: 2026-07-30.
+> 연구 README. Last updated: 2026-08-02.
 > Simulator: Scarab / Scarab-infra. TEA(MICRO 2024)는 구현 완료된 비교 baseline으로 둔다.
 > 최신 정량 기준은 prefetcher-ON run `zereco_260729_misp_penalty_breakdown`이다.
 
@@ -104,14 +104,14 @@ ZERECO는 H2P-chain load를 세 단계로 처리한다.
 1. **Chain identification**
    - TEA의 Block Cache / Fill Buffer / backward dataflow walk를 활용한다.
    - 별도 precomputation thread는 실행하지 않는다.
-   - Fetch 시 Block Cache mask로 main-thread instruction에 chain bit와 load bit를 태깅한다.
+   - Fetch 시 Block Cache mask로 main-thread instruction에 chain bit를 태깅하고, 그중 load op를 Target Load로 판정한다.
 
 2. **Predictable load acceleration**
    - Exact virtual address를 높은 신뢰도로 예측할 수 있으면 **RFP-style RF prefetch**를 수행한다.
    - 주소가 틀린 경우 wrong value를 commit하지 않고 기존 scheduler replay 또는 demand load path로 복구하는 no-flush 방향을 전제로 한다.
 
 3. **Unpredictable chain fallback**
-   - 주소 예측이 어려운 chain op/load는 **PUBS-style IQ priority**로 issue 대기 시간을 줄인다.
+   - RF가 처리하지 못하는 Target Load가 하나라도 있는 H2P branch slice 전체에는 **PUBS-style IQ priority**를 적용해 issue 대기 시간을 줄인다.
    - 이 축은 RF prefetch를 대체하는 주력 메커니즘이 아니라, predictor tail을 줄이는 보조 메커니즘이다.
 
 ### TEA 구조의 슬림화 방향
@@ -123,6 +123,8 @@ TEA의 Block Cache를 identification 전용으로 축소하면, 사실상 **Chai
 | `tag` | 약 40-bit | basic-block start PC 식별 |
 | `chain mask` | 32-bit | block 내 H2P-chain member slot 표시. Dispatch priority 및 Fill Buffer walk 시작점으로 사용 |
 | `load mask` | 32-bit | chain slot 중 load 표시. Fetch 시 RF predictor 조회 대상으로 사용 |
+
+위 표는 최종 Chain Mask Cache의 설계 방향이다. 현재 simulator는 64-bit `dependency_mask`, `iq_priority_candidate_mask`, `iq_priority_mask`를 사용하며, 별도 `load mask` 대신 tagged op의 `mem_type == MEM_LD`를 확인해 Target Load를 구분한다.
 
 제거 또는 축소 대상:
 
@@ -151,81 +153,21 @@ H2P-chain filtering 덕분에 target load PC 수가 작다. 이전 분석에서�
 
 ## 5. Scarab 구현 상태
 
-### 구현된 기능
+현재 구현은 helper thread 없이 main thread의 H2P-chain Target Load와 backward slice만 가속하는 single-pass 모델이다.
 
-- **Perfect-load oracle**
-  - Parameter: `h2p_chain_perfect_load`, `h2p_chain_perfect_load_latency`
-  - Main hook: `src/dcache_stage.c:dcache_stage_try_main_chain_load_oracle`
-  - 모든 on-path H2P-chain target load의 latency를 고정 또는 predictor-gated 방식으로 낮춘다.
+| 기능 | 주요 코드 | 현재 동작 |
+|------|----------|----------|
+| Target Load 특성화 | `dcache_stage.c`, `h2p_chain_load_predictor_replay.py` | Access pattern 수집과 offline predictor replay |
+| Predictor-gated RF | `dcache_stage.c` | Per-PC stride/top-delta가 exact vaddr를 맞히고 store conflict가 없을 때 1-cycle RF service |
+| Penalty profiler | `zereco/h2p_mispred_latency.c` | H2P misprediction/misfetch의 fetch-to-resolution과 frontend/dependency/scheduler/execution 분해 |
+| Chain mask와 RF filtering | `dependency_chain_cache.c`, `decoupled_frontend.cc` | Full branch slice 또는 Target-Load prefix mask를 저장하고, RF-covered streak를 다음 occurrence의 priority 결정에 반영 |
+| IQ Priority와 interference | `node_issue_queue.cc` | Priority-first/oldest-first scheduling, shadow baseline, counterfactual normal-op displacement 계측 |
 
-- **Access-pattern profiling**
-  - Parameter: `h2p_chain_load_pattern_profile`
-  - Per-PC reuse, stride, delta, latency, hit-level 특성을 수집한다.
+`dependency`는 branch가 Node Table에 들어간 뒤 마지막 source operand가 ready될 때까지이며, producer execution과 load latency를 포함한다. `scheduler`는 operand-ready 이후 실제 FU 선택까지다.
 
-- **Raw stream dump와 offline replay**
-  - Parameter: `h2p_chain_load_raw_stream_dump`
-  - Tool: `src/tools/h2p_chain_load_predictor_replay.py`
-  - Last-value, stride, top-delta, Markov 계열을 vaddr/cache-line 단위로 replay한다.
+Predictor는 각 dynamic load에서 한 번만 predict-then-update하며, 잘못된 예측과 store-forwarding 가능 load는 정상 memory path를 사용한다. Online RF 결과는 같은 occurrence의 older producer에 소급하지 않고 다음 H2P slice occurrence부터 priority mask에 반영한다.
 
-- **Online predictor oracle**
-  - Offline replay와 같은 알고리즘을 timing simulation 내부에서 수행하고 oracle을 gating한다.
-  - Parameter:
-    - `h2p_chain_oracle_predictor`: `0=none/all`, `1=stride`, `2=top-delta`
-    - `h2p_chain_oracle_granularity`: `0=vaddr/RF`, `1=line/L1`
-    - `h2p_chain_oracle_hit_latency`: vaddr/RF path latency, 기본 1
-    - `h2p_chain_oracle_stride_confidence`: 기본 2
-    - `h2p_chain_oracle_min_count`: 기본 2
-  - Predictor stats: `H2P_CHAIN_LOAD_ORACLE_CANDIDATES`, `H2P_CHAIN_LOAD_ORACLE_PRED_MADE`, `H2P_CHAIN_LOAD_ORACLE_PRED_CORRECT`, `H2P_CHAIN_LOAD_ORACLE_PRED_WRONG`, `H2P_CHAIN_LOAD_ORACLE_BYPASSED`
-
-- **H2P misprediction-latency profiler**
-  - Parameter: `zereco_h2p_mispred_latency_profile` (기본 OFF, experiment descriptor에서 ON)
-  - Main implementation: `src/zereco/h2p_mispred_latency.c`
-  - Branch fetch-to-resolution, post-resolution, first correct-path fetch와 frontend/dependency/scheduler/execution stage를 수집한다.
-  - Execute-resolved H2P misprediction과 misfetch를 모두 포함한다.
-
-### 구현상 중요한 정합성 장치
-
-- `op->h2p_oracle_pred_checked` guard로 predictor는 각 dynamic load를 한 번만 통과시킨다. Prediction miss 이후 demand cache access가 재시도되더라도 같은 load가 실제 주소를 학습한 뒤 다시 예측되는 self-training은 허용하지 않는다.
-- Predictor는 predict-then-update 순서를 사용해 현재 instance의 실제 주소가 현재 prediction에 누설되지 않도록 한다.
-- Store-forwarding 가능 load는 RF bypass에서 제외하고 정상 memory path를 사용한다.
-- Line granularity 비교 코드는 남아 있지만 최신 `260729` 실험에서는 exact-vaddr/RF config만 사용했다.
-
-### 외부 mask 방식은 별도 open item
-
-외부 mask 방식은 ZERECO의 실제 hardware mechanism이 아니라, **offline predictor 분석 결과를 timing simulation에서 그대로 재현하기 위한 실험용 주입 방식**이다. Offline replay는 raw trace를 읽으면서 각 dynamic Target Load instance에 대해 predictor가 성공했는지를 미리 판정할 수 있다. 이 결과를 bit mask로 저장하고, timing simulator가 해당 bit만 읽어 선택된 load의 latency를 줄이는 방식이다.
-
-예상 형식:
-
-```text
-<load_pc_hex> <n_instances> <bitstring>
-```
-
-각 필드의 의미는 다음과 같다.
-
-- `load_pc_hex`: 동일한 static load instruction을 식별하는 PC
-- `n_instances`: offline trace에서 관측한 해당 load PC의 dynamic 실행 횟수
-- `bitstring`: program order에 따른 각 dynamic instance의 선택 여부. `1`이면 predictor가 성공한 instance로 간주해 RF-style latency를 적용하고, `0`이면 정상 cache/memory path를 사용
-
-예를 들어 다음 mask가 있다고 가정한다.
-
-```text
-0x400abc 5 10110
-```
-
-PC `0x400abc`의 load가 다섯 번 실행될 때 첫 번째, 세 번째, 네 번째 dynamic instance만 offline predictor가 성공했다는 의미다. Timing simulator는 이 load PC를 만날 때마다 per-PC instance counter로 몇 번째 실행인지를 확인한다. 대응 bit가 `1`이면 oracle bypass를 적용하고, `0`이면 baseline과 동일하게 실행한다.
-
-이 방식이 올바르게 동작하려면 다음 조건이 필요하다.
-
-1. Offline replay와 timing simulation이 동일한 SimPoint, warmup 범위와 Target Load filter를 사용해야 한다.
-2. 같은 load PC의 dynamic instance가 두 환경에서 정확히 같은 program order로 관측되어야 한다.
-3. Wrong-path load, store-forwarding 제외 load와 동일 load의 cache-access retry가 mask counter를 잘못 소비하면 안 된다.
-4. Mask의 `n_instances`와 simulation에서 실제로 소비한 instance 수가 일치하는지 검증해야 한다.
-
-이 조건 중 하나라도 어긋나면 이후 mask bit가 모두 다른 dynamic instance에 적용되는 alignment error가 발생한다. 따라서 실제 구현에는 mask 파일 loader, load-PC별 instance counter, bit 범위 검사와 simulation 종료 시 instance-count validation이 필요하다.
-
-현재 online predictor oracle은 simulator 내부에서 각 dynamic load에 대해 직접 predict-then-update를 수행하고, prediction이 맞은 경우에만 latency를 줄인다. 따라서 현재 predictor-gated IPC 실험에는 외부 mask가 필요하지 않으며, offline trace와 dynamic-instance 순서를 맞추는 문제도 없다.
-
-외부 mask 방식은 향후 별도의 offline predictor가 선택한 고정 subset을 timing simulation에서 정확히 재생하거나, offline 결과와 timing 결과를 instance 단위로 교차검증할 때만 필요한 선택 사항이다. 정리하면 online predictor는 **simulation 중 predictor를 직접 실행하는 방식**이고, 외부 mask는 **simulation 전에 만든 정답지를 읽어 지정된 dynamic instance만 가속하는 방식**이다.
+현재 RF 1-cycle service와 unlimited select-only Priority는 headroom 모델이다. 실제 RF bandwidth/timeliness와 PUBS식 reserved priority entry 비용은 아직 반영하지 않는다.
 
 ---
 
@@ -266,9 +208,15 @@ Oracle과 predictor 실험에서 Target Load는 Block Cache 또는 Dependency Ch
 
 | Config | 의미 |
 |--------|------|
-| `baseline` | golden_cove, stream prefetcher ON, 정상 cache/memory latency |
-| `pred_stride_vaddr` | Online stride predictor가 exact vaddr를 맞힌 Target Load만 1-cycle RF service |
-| `pred_top_delta_vaddr` | Online top-delta predictor가 exact vaddr를 맞힌 Target Load만 1-cycle RF service |
+| `baseline` | 정상 cache/memory latency. Full-slice eligibility는 shadow로 계산하지만 oldest-first scheduling 유지 |
+| `iq_all_h2p` | RF OFF, 모든 H2P backward slice에 select-only IQ priority |
+| `iq_target_load_prefix` | RF OFF, oldest H2P-slice op부터 마지막 Target Load까지의 dependent-op prefix만 priority |
+| `rf_stride_only` | Stride RF, full-slice eligibility는 shadow로 계산하지만 oldest-first scheduling 유지 |
+| `rf_top_delta_only` | Top-delta RF, full-slice eligibility는 shadow로 계산하지만 oldest-first scheduling 유지 |
+| `hybrid_stride_filtered_iq` | Stride RF + online RF-uncovered H2P slice IQ priority |
+| `hybrid_top_delta_filtered_iq` | Top-delta RF + online RF-uncovered H2P slice IQ priority |
+| `hybrid_stride_filtered_iq_load_prefix` | Stride RF + RF-uncovered slice의 Target-Load prefix priority |
+| `hybrid_top_delta_filtered_iq_load_prefix` | Top-delta RF + RF-uncovered slice의 Target-Load prefix priority |
 
 Prediction을 만들지 못했거나 주소가 틀린 load는 정상 demand path를 사용한다. Predictor가 correct한 경우라도 store-forwarding conflict가 있으면 bypass하지 않는다. Full perfect-load oracle과 L1-line predictor config는 최신 실험에서 의도적으로 제외했다.
 
@@ -307,7 +255,10 @@ Prediction을 만들지 못했거나 주소가 틀린 load는 정상 demand path
 - PUBS의 6 priority-entry 최적점은 4-wide, 64-entry IQ, 71% unconfident branch 마킹 기준이다.
 - 논문의 baseline과 실제 우리의 Baseline의 Structure size가 다르기에, 고려하여 적용해야 함.
 - ZERECO는 H2P-chain으로 훨씬 선별적으로 마킹하지만 chain span은 길 수 있다.
-- Prefetcher-ON 환경에서 priority entry 수, stall/non-stall dispatch, mode switch를 처음부터 sweep해야 한다.
+- 첫 단계로 RS capacity를 바꾸지 않는 select-only upper bound와 online RF filtering을 구현했다.
+- Shadow oldest-first와 active Priority의 동일 eligibility cohort를 비교하고, normal displacement cycle, 누적 delay, ready-to-issue wait 및 IPC를 먼저 확인한다.
+- Full branch slice와 Target-Load prefix scope를 비교해 priority population과 normal-op 경합을 줄이면서 resolution 효과를 유지할 수 있는지 평가한다.
+- Normal-op bottleneck이 큰 경우에만 다음 단계에서 전체 RS의 priority-entry 비율과 stall/non-stall dispatch policy를 sweep한다.
 
 ### Cost story
 - 논문 방어에서 가장 중요한 질문은 "TEA에서 제일 비싼 구조를 그대로 둔 것 아닌가?"이다.
@@ -324,50 +275,24 @@ Prediction을 만들지 못했거나 주소가 틀린 load는 정상 demand path
 
 ## 9. 파일과 run 색인
 
-### 코드
+### 주요 코드
 
-- `src/dcache_stage.c`
-  - `dcache_stage_try_main_chain_load_oracle`
-  - perfect-load oracle
-  - online predictor oracle
-  - access-pattern profiling hooks
-- `src/core.param.def`
-  - `h2p_chain_perfect_load`
-  - `h2p_chain_perfect_load_latency`
-  - `h2p_chain_load_pattern_profile`
-  - `h2p_chain_load_raw_stream_dump`
-  - `h2p_chain_oracle_predictor`
-  - `h2p_chain_oracle_granularity`
-  - `h2p_chain_oracle_hit_latency`
-  - `h2p_chain_oracle_stride_confidence`
-  - `h2p_chain_oracle_min_count`
-  - `zereco_h2p_mispred_latency_profile`
-- `src/zereco/h2p_mispred_latency.c`
-  - H2P misprediction/misfetch timeline 및 resolution stage profiler
-- `src/zereco/zereco.stat.def`
-  - `ZERECO_H2P_FETCH_TO_RESOLUTION_*`
-  - `ZERECO_H2P_FETCH_TO_CORRECT_FETCH_*`
-  - `ZERECO_H2P_{FRONTEND,DEPENDENCY,SCHEDULER,EXECUTION}_*`
-- `src/tea/tea.stat.def`
-  - `H2P_CHAIN_LOAD_ORACLE_CANDIDATES`
-  - `H2P_CHAIN_LOAD_ORACLE_PRED_MADE`
-  - `H2P_CHAIN_LOAD_ORACLE_PRED_CORRECT`
-  - `H2P_CHAIN_LOAD_ORACLE_PRED_WRONG`
-  - `H2P_CHAIN_LOAD_ORACLE_BYPASSED`
-- `src/tools/h2p_chain_load_predictor_replay.py`
-  - raw stream offline replay
+| 경로 | 역할 |
+|------|------|
+| `src/dcache_stage.c` | Target Load profiling, online predictor, RF oracle |
+| `src/dependency_chain_cache.c` | H2P backward slice, priority scope와 online RF filtering |
+| `src/decoupled_frontend.cc` | Block Cache mask lookup과 op tagging |
+| `src/node_issue_queue.cc` | IQ Priority scheduling과 normal-op interference 계측 |
+| `src/zereco/h2p_mispred_latency.c` | H2P penalty 및 resolution-stage profiler |
+| `src/core.param.def`, `src/zereco/zereco.stat.def` | 실험 parameter와 통계 정의 |
 
 ### Descriptor / runs
 
-- Descriptor:
-  - `~/scarab-infra/json/zereco_dbg.json`
-  - configs: `baseline`, `pred_stride_vaddr`, `pred_top_delta_vaddr`
-- Runs:
-  - `~/simulations/zereco/260624_h2p_chain_load_access_pattern_all_simpoints`: access pattern + offline replay
-  - `~/simulations/zereco/260625_perf_comparison`: prefetcher-OFF full oracle motivation
-  - `~/simulations/zereco/zereco_260729_misp_penalty_breakdown`: prefetcher-ON penalty breakdown + predictor-gated RF 결과
-- Reference papers:
-  - `/home/lee/scarab/reference/`
+- 현재 descriptor: `~/scarab-infra/json/zereco_dbg.json`
+- 현재 experiment: `zereco_260803_iq_priority_interference`
+- 기존 IQ upper-bound 결과: `~/simulations/zereco_260802_iq_priority_online`
+- Motivation/characterization 결과와 해석은 §6의 결과 디렉터리와 각 `analysis/`를 기준으로 한다.
+- Reference papers: `/home/lee/scarab/reference/`
 
 ---
 

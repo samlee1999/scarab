@@ -82,6 +82,8 @@ class Decoupled_FE {
   Addr main_chain_block_start_pc;
   uns main_chain_block_op_idx;
   uint64_t main_chain_block_dependency_mask;
+  uint64_t main_chain_block_priority_candidate_mask;
+  uint64_t main_chain_block_priority_mask;
   uns main_chain_block_total_ops;
 };
 
@@ -367,17 +369,21 @@ void Decoupled_FE::reset_main_chain_block_tracking() {
   main_chain_block_start_pc = 0;
   main_chain_block_op_idx = 0;
   main_chain_block_dependency_mask = 0;
+  main_chain_block_priority_candidate_mask = 0;
+  main_chain_block_priority_mask = 0;
   main_chain_block_total_ops = 0;
 }
 
 void Decoupled_FE::apply_main_chain_block_tag(Op* op) {
   op->chain_bit = FALSE;
+  op->zereco_iq_priority_candidate_bit = FALSE;
+  op->zereco_iq_priority_bit = FALSE;
   op->h2p_chain_block_start_pc = 0;
   op->h2p_chain_block_op_idx = 0;
   op->h2p_chain_profile_access_recorded = FALSE;
 
   if ((!H2P_CHAIN_PERFECT_LOAD && !H2P_CHAIN_LOAD_PROFILE &&
-       !H2P_CHAIN_LOAD_RAW_STREAM_DUMP) ||
+       !H2P_CHAIN_LOAD_RAW_STREAM_DUMP && !ZERECO_IQ_PRIORITY_POLICY) ||
       op->thread_id != 0 || op->off_path || !op->inst_info ||
       !op->table_info) {
     reset_main_chain_block_tracking();
@@ -390,6 +396,8 @@ void Decoupled_FE::apply_main_chain_block_tag(Op* op) {
     main_chain_block_start_pc = op->inst_info->addr;
     main_chain_block_op_idx = 0;
     main_chain_block_dependency_mask = 0;
+    main_chain_block_priority_candidate_mask = 0;
+    main_chain_block_priority_mask = 0;
     main_chain_block_total_ops = 0;
 
     STAT_EVENT(proc_id, H2P_CHAIN_TAG_BLOCK_LOOKUPS);
@@ -398,6 +406,9 @@ void Decoupled_FE::apply_main_chain_block_tag(Op* op) {
     if (block && block->dependency_mask) {
       main_chain_block_hit = true;
       main_chain_block_dependency_mask = block->dependency_mask;
+      main_chain_block_priority_candidate_mask =
+        block->iq_priority_candidate_mask;
+      main_chain_block_priority_mask = block->iq_priority_mask;
       main_chain_block_total_ops = block->total_ops_in_block;
       STAT_EVENT(proc_id, H2P_CHAIN_TAG_BLOCK_HITS);
     } else {
@@ -405,20 +416,66 @@ void Decoupled_FE::apply_main_chain_block_tag(Op* op) {
     }
   }
 
+  /* Preserve the exact dynamic block coordinate even on a Block Cache miss.
+     The retire-time backward walk uses it to build masks whose bit positions
+     match the frontend's block-relative slot numbering. */
+  op->h2p_chain_block_start_pc = main_chain_block_start_pc;
+  op->h2p_chain_block_op_idx = main_chain_block_op_idx;
+  if (ZERECO_IQ_PRIORITY_POLICY)
+    STAT_EVENT(proc_id, ZERECO_IQ_MAIN_ONPATH_OPS);
+
   if (main_chain_block_hit) {
     if (main_chain_block_op_idx < 64 &&
         main_chain_block_op_idx < main_chain_block_total_ops) {
       if ((main_chain_block_dependency_mask >> main_chain_block_op_idx) & 1ULL) {
         op->chain_bit = TRUE;
-        op->h2p_chain_block_start_pc = main_chain_block_start_pc;
-        op->h2p_chain_block_op_idx = main_chain_block_op_idx;
         STAT_EVENT(proc_id, H2P_CHAIN_TAG_OPS);
+        if (ZERECO_IQ_PRIORITY_POLICY) {
+          STAT_EVENT(proc_id, ZERECO_IQ_CHAIN_BIT_OPS);
+          STAT_EVENT(proc_id, ZERECO_IQ_CHAIN_BIT_PORTION);
+        }
         if (op->table_info->mem_type == MEM_LD)
           STAT_EVENT(proc_id, H2P_CHAIN_TAG_LOADS);
       }
     } else {
       STAT_EVENT(proc_id, H2P_CHAIN_TAG_MASK_INDEX_OUT_OF_RANGE);
     }
+  }
+
+  if (ZERECO_IQ_PRIORITY_POLICY && main_chain_block_op_idx < 64) {
+    op->zereco_iq_priority_candidate_bit =
+      (main_chain_block_priority_candidate_mask >>
+       main_chain_block_op_idx) & 1ULL;
+  }
+  if (ZERECO_IQ_PRIORITY_POLICY == 1) {
+    op->zereco_iq_priority_bit = op->zereco_iq_priority_candidate_bit;
+  } else if (ZERECO_IQ_PRIORITY_POLICY == 2 &&
+             main_chain_block_op_idx < 64) {
+    op->zereco_iq_priority_bit =
+      (main_chain_block_priority_mask >> main_chain_block_op_idx) & 1ULL;
+  }
+  ASSERTM(proc_id, !op->zereco_iq_priority_candidate_bit || op->chain_bit,
+          "ZERECO IQ candidate mask must be a subset of the H2P chain mask\n");
+  ASSERTM(proc_id, !op->zereco_iq_priority_bit || op->chain_bit,
+          "ZERECO IQ priority mask must be a subset of the H2P chain mask\n");
+  if (op->zereco_iq_priority_candidate_bit) {
+    STAT_EVENT(proc_id, ZERECO_IQ_PRIORITY_CANDIDATE_OPS);
+    STAT_EVENT(proc_id, ZERECO_IQ_PRIORITY_CANDIDATE_PORTION);
+  }
+  if (ZERECO_IQ_PRIORITY_POLICY && op->chain_bit &&
+      !op->zereco_iq_priority_candidate_bit) {
+    STAT_EVENT(proc_id, ZERECO_IQ_SCOPE_FILTERED_OPS);
+    STAT_EVENT(proc_id, ZERECO_IQ_SCOPE_FILTERED_CHAIN_PORTION);
+  }
+  if (ZERECO_IQ_PRIORITY_POLICY == 2 &&
+      op->zereco_iq_priority_candidate_bit &&
+      !op->zereco_iq_priority_bit) {
+    STAT_EVENT(proc_id, ZERECO_IQ_RF_FILTERED_OPS);
+    STAT_EVENT(proc_id, ZERECO_IQ_RF_FILTERED_CHAIN_PORTION);
+  }
+  if (op->zereco_iq_priority_bit) {
+    STAT_EVENT(proc_id, ZERECO_IQ_PRIORITY_MARKED_OPS);
+    STAT_EVENT(proc_id, ZERECO_IQ_PRIORITY_MARKED_PORTION);
   }
 
   main_chain_block_op_idx++;
