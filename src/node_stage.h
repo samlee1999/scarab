@@ -49,6 +49,13 @@ typedef struct Reservation_Station_struct {
   uns32 tea_op_count;   // TEA thread ops in this RS
   uns32 main_rs_limit;  // Max main ops = size - TEA_RS_RESERVATION/NUM_RS
   uns32 tea_rs_limit;   // Max TEA ops = TEA_RS_RESERVATION/NUM_RS
+
+  /* ZERECO PUBS-style partition within main_rs_limit.  These counters track
+   * physical IQ occupancy, not priority marks after an op has issued. */
+  uns32 zereco_priority_op_count;
+  uns32 zereco_normal_op_count;
+  uns32 zereco_priority_rs_limit;
+  uns32 zereco_normal_rs_limit;
 } Reservation_Station;
 
 typedef struct Node_Stage_struct {

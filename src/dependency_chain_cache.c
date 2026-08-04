@@ -27,6 +27,21 @@ void init_dependency_chain_cache(uns proc_id) {
         ASSERTM(proc_id, !TEA_ENABLE,
                 "ZERECO IQ priority is a main-thread-only experiment; disable TEA\n");
     }
+    if (ZERECO_PIQ_ENABLE) {
+        ASSERTM(proc_id, ZERECO_IQ_PRIORITY_POLICY == 1 ||
+                         ZERECO_IQ_PRIORITY_POLICY == 2,
+                "ZERECO P-IQ requires all-H2P or online RF-filtered priority\n");
+        ASSERTM(proc_id, ZERECO_IQ_PRIORITY_SCHEDULE_ENABLE,
+                "ZERECO P-IQ requires priority-first scheduling\n");
+        ASSERTM(proc_id, ZERECO_IQ_PRIORITY_SCOPE == 0,
+                "The current P-IQ sweep is defined for the full H2P branch slice\n");
+        ASSERTM(proc_id, ZERECO_PIQ_ENTRY_PERCENT == 10 ||
+                         ZERECO_PIQ_ENTRY_PERCENT == 15 ||
+                         ZERECO_PIQ_ENTRY_PERCENT == 20 ||
+                         ZERECO_PIQ_ENTRY_PERCENT == 25 ||
+                         ZERECO_PIQ_ENTRY_PERCENT == 50,
+                "P-IQ sweep percentage must be 10, 15, 20, 25, or 50\n");
+    }
     if (ZERECO_IQ_PRIORITY_POLICY == 2) {
         ASSERTM(proc_id, H2P_CHAIN_PERFECT_LOAD,
                 "online RF-filtered IQ priority requires h2p_chain_perfect_load=1\n");

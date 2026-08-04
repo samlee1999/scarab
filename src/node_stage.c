@@ -158,10 +158,28 @@ Flag node_decrement_rs_counters_for_clear(Node_Stage* node_local, Op* op,
     if (rs->tea_op_count > 0)
       rs->tea_op_count--;
   } else {
+    Flag main_decremented = FALSE;
     if (strict)
       ASSERT(node_local->proc_id, rs->main_op_count > 0);
-    if (rs->main_op_count > 0)
+    if (rs->main_op_count > 0) {
       rs->main_op_count--;
+      main_decremented = TRUE;
+    }
+
+    if (ZERECO_PIQ_ENABLE && main_decremented) {
+      if (op->zereco_piq_entry) {
+        if (strict)
+          ASSERT(node_local->proc_id, rs->zereco_priority_op_count > 0);
+        if (rs->zereco_priority_op_count > 0)
+          rs->zereco_priority_op_count--;
+      } else {
+        if (strict)
+          ASSERT(node_local->proc_id, rs->zereco_normal_op_count > 0);
+        if (rs->zereco_normal_op_count > 0)
+          rs->zereco_normal_op_count--;
+      }
+      op->zereco_piq_entry = FALSE;
+    }
   }
 
   if (!strict && decremented)
@@ -173,6 +191,24 @@ Flag node_decrement_rs_counters_for_clear(Node_Stage* node_local, Op* op,
           (int)op->rs_id, rs->rs_op_count, rs->main_op_count,
           rs->tea_op_count, unsstr64(op->op_num), op->thread_id,
           op->state, cycle_count);
+
+  if (ZERECO_PIQ_ENABLE) {
+    Flag mismatch =
+      rs->main_op_count != rs->zereco_priority_op_count +
+                             rs->zereco_normal_op_count ||
+      rs->zereco_priority_op_count > rs->zereco_priority_rs_limit ||
+      rs->zereco_normal_op_count > rs->zereco_normal_rs_limit ||
+      rs->zereco_priority_rs_limit + rs->zereco_normal_rs_limit !=
+        rs->main_rs_limit;
+    INC_STAT_EVENT(node_local->proc_id,
+                   ZERECO_PIQ_PARTITION_INTEGRITY_MISMATCHES, mismatch);
+    ASSERTM(node_local->proc_id, !mismatch,
+            "P-IQ counter divergence: rs=%d main=%u piq=%u/%u normal=%u/%u op_num=%s C=%llu\n",
+            (int)op->rs_id, rs->main_op_count,
+            rs->zereco_priority_op_count, rs->zereco_priority_rs_limit,
+            rs->zereco_normal_op_count, rs->zereco_normal_rs_limit,
+            unsstr64(op->op_num), cycle_count);
+  }
 
   return decremented;
 }
@@ -342,25 +378,7 @@ void flush_window() {
       op->in_node_list = FALSE;
       *last = op->next_node;
       if (op->state == OS_IN_RS || op->state == OS_READY || op->state == OS_WAIT_FWD) {
-        ASSERT(op->proc_id, node->rs[op->rs_id].rs_op_count > 0);
-        node->rs[op->rs_id].rs_op_count--;
-
-        /* Phase 4: Update per-thread counter */
-        if (op->thread_id == 1) {
-          if (node->rs[op->rs_id].tea_op_count > 0)
-            node->rs[op->rs_id].tea_op_count--;
-        } else {
-          if (node->rs[op->rs_id].main_op_count > 0)
-            node->rs[op->rs_id].main_op_count--;
-        }
-
-        /* DEBUG: detect divergence */
-        ASSERTM(op->proc_id,
-                node->rs[op->rs_id].rs_op_count >= node->rs[op->rs_id].main_op_count + node->rs[op->rs_id].tea_op_count,
-                "flush_window() divergence: rs=%d rs_op=%d main=%d tea=%d op_num=%s tid=%d C=%llu\n",
-                (int)op->rs_id, node->rs[op->rs_id].rs_op_count,
-                node->rs[op->rs_id].main_op_count, node->rs[op->rs_id].tea_op_count,
-                unsstr64(op->op_num), op->thread_id, cycle_count);
+        node_decrement_rs_counters_for_clear(node, op, TRUE);
       }
       free_op(op);
     } else {

@@ -287,6 +287,8 @@ struct Op_struct {
   Flag zereco_rf_covered;
   Flag zereco_iq_priority_candidate_bit;
   Flag zereco_iq_priority_bit;
+  Flag zereco_piq_entry;
+  Counter zereco_piq_dispatch_wait_cycles;
   Counter zereco_iq_normal_displaced_cycles;
 };
 

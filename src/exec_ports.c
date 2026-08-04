@@ -241,6 +241,33 @@ void init_exec_ports_rs_list(uns proc_id, Reservation_Station* rs, Func_Unit* lo
     }
     rs[i].tea_rs_limit = TEA_ENABLE ? tea_per_rs : 0;
     rs[i].main_rs_limit = rs[i].size - tea_per_rs;
+
+    /* PUBS-style P-IQ is a strict partition of the main-thread capacity that
+     * the baseline already exposes.  Do not reclaim the legacy TEA-reserved
+     * portion here: doing so would silently enlarge only the P-IQ configs. */
+    rs[i].zereco_priority_op_count = 0;
+    rs[i].zereco_normal_op_count = 0;
+    rs[i].zereco_priority_rs_limit = 0;
+    rs[i].zereco_normal_rs_limit = rs[i].main_rs_limit;
+    if (ZERECO_PIQ_ENABLE) {
+      ASSERTM(proc_id, !TEA_ENABLE,
+              "ZERECO P-IQ is a main-thread-only experiment; disable TEA\n");
+      ASSERTM(proc_id, ZERECO_PIQ_ENTRY_PERCENT > 0 &&
+                         ZERECO_PIQ_ENTRY_PERCENT < 100,
+              "zereco_piq_entry_percent must be between 1 and 99\n");
+      ASSERTM(proc_id, rs[i].main_rs_limit >= 2,
+              "ZERECO P-IQ requires at least two main-thread RS entries\n");
+
+      uns32 priority_entries =
+        (uns32)(((uint64_t)rs[i].main_rs_limit *
+                 ZERECO_PIQ_ENTRY_PERCENT + 50) /
+                100);
+      priority_entries = MAX2(priority_entries, 1);
+      priority_entries = MIN2(priority_entries, rs[i].main_rs_limit - 1);
+      rs[i].zereco_priority_rs_limit = priority_entries;
+      rs[i].zereco_normal_rs_limit =
+        rs[i].main_rs_limit - priority_entries;
+    }
   }
   ASSERTM(proc_id, tmp == FALSE, "Found more RS_SIZES than expected\n");
   free(rs_sizes_copy);

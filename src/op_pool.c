@@ -223,6 +223,8 @@ void op_pool_setup_op(uns proc_id, Op* op) {
   op->zereco_rf_covered = FALSE;
   op->zereco_iq_priority_candidate_bit = FALSE;
   op->zereco_iq_priority_bit = FALSE;
+  op->zereco_piq_entry = FALSE;
+  op->zereco_piq_dispatch_wait_cycles = 0;
   op->zereco_iq_normal_displaced_cycles = 0;
   op->off_path = FALSE;  // FIXME: check
   op->state = OS_FETCHED;

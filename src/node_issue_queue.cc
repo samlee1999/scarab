@@ -61,6 +61,41 @@ extern "C" {
 int64 node_dispatch_find_emptiest_rs(Op*);
 void node_schedule_oldest_first_sched(Op*);
 
+static inline Flag node_issue_queue_rs_supports_op(
+  const Reservation_Station* rs, const Op* op) {
+  uns64 op_fu_type = get_fu_type(op->table_info->op_type,
+                                 op->table_info->is_simd);
+  for (uns32 i = 0; i < rs->num_fus; ++i)
+    if (op_fu_type & rs->connected_fus[i]->type)
+      return TRUE;
+  return FALSE;
+}
+
+static inline Flag node_issue_queue_piq_partition_mismatch(
+  const Reservation_Station* rs) {
+  return rs->main_op_count != rs->zereco_priority_op_count +
+                                rs->zereco_normal_op_count ||
+         rs->zereco_priority_op_count > rs->zereco_priority_rs_limit ||
+         rs->zereco_normal_op_count > rs->zereco_normal_rs_limit ||
+         rs->zereco_priority_rs_limit + rs->zereco_normal_rs_limit !=
+           rs->main_rs_limit;
+}
+
+static void node_issue_queue_check_piq_partition(
+  const Reservation_Station* rs, uns rs_id, const Op* op) {
+  if (!ZERECO_PIQ_ENABLE)
+    return;
+  Flag mismatch = node_issue_queue_piq_partition_mismatch(rs);
+  INC_STAT_EVENT(node->proc_id, ZERECO_PIQ_PARTITION_INTEGRITY_MISMATCHES,
+                 mismatch);
+  ASSERTM(node->proc_id, !mismatch,
+          "P-IQ counter divergence: rs=%u main=%u piq=%u/%u normal=%u/%u op_num=%s C=%llu\n",
+          rs_id, rs->main_op_count, rs->zereco_priority_op_count,
+          rs->zereco_priority_rs_limit, rs->zereco_normal_op_count,
+          rs->zereco_normal_rs_limit,
+          op ? unsstr64(op->op_num) : "none", cycle_count);
+}
+
 /**************************************************************************************/
 /* Issuers:
  *      The interface to the issue functions is that Scarab will pass the
@@ -91,38 +126,41 @@ int64 node_dispatch_find_emptiest_rs(Op* op) {
     /* TODO: support infinite RS for upper-bound expr */
     ASSERTM(node->proc_id, rs->size, "Infinite RS not suppoted by node_dispatch_find_emptiest_rs issuer.");
 
-    for (uns32 i = 0; i < rs->num_fus; ++i) {
-      // find the FU that can execute this op
-      Func_Unit* fu = rs->connected_fus[i];
-      if (!(get_fu_type(op->table_info->op_type, op->table_info->is_simd) & fu->type)) {
-        continue;
-      }
+    if (!node_issue_queue_rs_supports_op(rs, op))
+      continue;
 
-      /* Phase 4: Check per-thread partition limits */
-      uns num_empty_slots;
-      if (is_tea_op) {
-        /* TEA op: Check TEA partition availability */
-        if (rs->tea_op_count >= rs->tea_rs_limit) {
-          continue;  /* TEA partition full */
-        }
-        num_empty_slots = rs->tea_rs_limit - rs->tea_op_count;
+    /* Phase 4: Check per-thread and optional P-IQ partition limits. */
+    uns num_empty_slots;
+    if (is_tea_op) {
+      if (rs->tea_op_count >= rs->tea_rs_limit)
+        continue;
+      num_empty_slots = rs->tea_rs_limit - rs->tea_op_count;
+    } else if (ZERECO_PIQ_ENABLE) {
+      if (op->zereco_iq_priority_bit) {
+        if (rs->zereco_priority_op_count >=
+            rs->zereco_priority_rs_limit)
+          continue;
+        num_empty_slots = rs->zereco_priority_rs_limit -
+                          rs->zereco_priority_op_count;
       } else {
-        /* Main op: Check Main partition availability */
-        if (rs->main_op_count >= rs->main_rs_limit) {
-          continue;  /* Main partition full */
-        }
-        num_empty_slots = rs->main_rs_limit - rs->main_op_count;
+        if (rs->zereco_normal_op_count >= rs->zereco_normal_rs_limit)
+          continue;
+        num_empty_slots = rs->zereco_normal_rs_limit -
+                          rs->zereco_normal_op_count;
       }
-
-      if (num_empty_slots == 0) {
+    } else {
+      if (rs->main_op_count >= rs->main_rs_limit)
         continue;
-      }
+      num_empty_slots = rs->main_rs_limit - rs->main_op_count;
+    }
 
-      // find the emptiest RS
-      if (emptiest_rs_slots < num_empty_slots) {
-        emptiest_rs_id = rs_id;
-        emptiest_rs_slots = num_empty_slots;
-      }
+    if (num_empty_slots == 0)
+      continue;
+
+    // find the emptiest compatible partition
+    if (emptiest_rs_slots < num_empty_slots) {
+      emptiest_rs_id = rs_id;
+      emptiest_rs_slots = num_empty_slots;
     }
   }
 
@@ -303,8 +341,51 @@ void node_issue_queue_dispatch() {
       continue;
 
     int64 rs_id = dispatch_func_table[NODE_ISSUE_QUEUE_DISPATCH_SCHEME](op);
-    if (rs_id == NODE_ISSUE_QUEUE_RS_SLOT_INVALID)
+    if (rs_id == NODE_ISSUE_QUEUE_RS_SLOT_INVALID) {
+      if (ZERECO_PIQ_ENABLE) {
+        Counter unused_other_slots = 0;
+        for (uns candidate_rs_id = 0; candidate_rs_id < NUM_RS;
+             ++candidate_rs_id) {
+          Reservation_Station* candidate_rs = &node->rs[candidate_rs_id];
+          if (!node_issue_queue_rs_supports_op(candidate_rs, op))
+            continue;
+          node_issue_queue_check_piq_partition(candidate_rs,
+                                               candidate_rs_id, op);
+          if (op->zereco_iq_priority_bit)
+            unused_other_slots += candidate_rs->zereco_normal_rs_limit -
+                                  candidate_rs->zereco_normal_op_count;
+          else
+            unused_other_slots += candidate_rs->zereco_priority_rs_limit -
+                                  candidate_rs->zereco_priority_op_count;
+        }
+
+        op->zereco_piq_dispatch_wait_cycles++;
+        if (op->zereco_iq_priority_bit) {
+          STAT_EVENT(node->proc_id,
+                     ZERECO_PIQ_PRIORITY_DISPATCH_STALL_CYCLES);
+          if (unused_other_slots) {
+            STAT_EVENT(node->proc_id,
+                       ZERECO_PIQ_PRIORITY_STALL_WITH_UNUSED_NORMAL_CYCLES);
+            INC_STAT_EVENT(
+              node->proc_id,
+              ZERECO_PIQ_UNUSED_NORMAL_SLOTS_DURING_PRIORITY_STALL,
+              unused_other_slots);
+          }
+        } else {
+          STAT_EVENT(node->proc_id,
+                     ZERECO_PIQ_NORMAL_DISPATCH_STALL_CYCLES);
+          if (unused_other_slots) {
+            STAT_EVENT(node->proc_id,
+                       ZERECO_PIQ_NORMAL_STALL_WITH_UNUSED_PRIORITY_CYCLES);
+            INC_STAT_EVENT(
+              node->proc_id,
+              ZERECO_PIQ_UNUSED_PRIORITY_SLOTS_DURING_NORMAL_STALL,
+              unused_other_slots);
+          }
+        }
+      }
       break;
+    }
     ASSERT(node->proc_id, rs_id >= 0 && rs_id < NUM_RS);
 
     Reservation_Station* rs = &node->rs[rs_id];
@@ -316,6 +397,37 @@ void node_issue_queue_dispatch() {
     op->rs_id = (Counter)rs_id;
     rs->rs_op_count++;
     rs->main_op_count++;
+    if (ZERECO_PIQ_ENABLE) {
+      op->zereco_piq_entry = op->zereco_iq_priority_bit;
+      if (op->zereco_piq_entry) {
+        rs->zereco_priority_op_count++;
+        STAT_EVENT(node->proc_id, ZERECO_PIQ_PRIORITY_DISPATCHED_OPS);
+        if (op->zereco_piq_dispatch_wait_cycles) {
+          STAT_EVENT(node->proc_id,
+                     ZERECO_PIQ_PRIORITY_DISPATCH_WAITED_OPS);
+          INC_STAT_EVENT(node->proc_id,
+                         ZERECO_PIQ_PRIORITY_DISPATCH_WAIT_TOTAL,
+                         op->zereco_piq_dispatch_wait_cycles);
+          INC_STAT_EVENT(node->proc_id,
+                         ZERECO_PIQ_PRIORITY_DISPATCH_WAIT_AVG,
+                         op->zereco_piq_dispatch_wait_cycles);
+        }
+      } else {
+        rs->zereco_normal_op_count++;
+        STAT_EVENT(node->proc_id, ZERECO_PIQ_NORMAL_DISPATCHED_OPS);
+        if (op->zereco_piq_dispatch_wait_cycles) {
+          STAT_EVENT(node->proc_id, ZERECO_PIQ_NORMAL_DISPATCH_WAITED_OPS);
+          INC_STAT_EVENT(node->proc_id,
+                         ZERECO_PIQ_NORMAL_DISPATCH_WAIT_TOTAL,
+                         op->zereco_piq_dispatch_wait_cycles);
+          INC_STAT_EVENT(node->proc_id,
+                         ZERECO_PIQ_NORMAL_DISPATCH_WAIT_AVG,
+                         op->zereco_piq_dispatch_wait_cycles);
+        }
+      }
+      op->zereco_piq_dispatch_wait_cycles = 0;
+      node_issue_queue_check_piq_partition(rs, (uns)rs_id, op);
+    }
 
     num_fill_rs++;
 
@@ -340,6 +452,95 @@ void node_issue_queue_dispatch() {
 
   // mark the next node to continue filling in the next cycle.
   node->next_op_into_rs = op;
+}
+
+static inline void node_issue_queue_collect_piq_rs_stats(
+  uns rs_id, const Reservation_Station* rs) {
+  switch (rs_id) {
+    case 0:
+      INC_STAT_EVENT(node->proc_id,
+                     ZERECO_PIQ_RS0_PRIORITY_OCCUPANCY_TOTAL,
+                     rs->zereco_priority_op_count);
+      INC_STAT_EVENT(node->proc_id, ZERECO_PIQ_RS0_NORMAL_OCCUPANCY_TOTAL,
+                     rs->zereco_normal_op_count);
+      if (rs->zereco_priority_op_count == rs->zereco_priority_rs_limit)
+        STAT_EVENT(node->proc_id, ZERECO_PIQ_RS0_PRIORITY_FULL_CYCLES);
+      if (rs->zereco_normal_op_count == rs->zereco_normal_rs_limit)
+        STAT_EVENT(node->proc_id, ZERECO_PIQ_RS0_NORMAL_FULL_CYCLES);
+      break;
+    case 1:
+      INC_STAT_EVENT(node->proc_id,
+                     ZERECO_PIQ_RS1_PRIORITY_OCCUPANCY_TOTAL,
+                     rs->zereco_priority_op_count);
+      INC_STAT_EVENT(node->proc_id, ZERECO_PIQ_RS1_NORMAL_OCCUPANCY_TOTAL,
+                     rs->zereco_normal_op_count);
+      if (rs->zereco_priority_op_count == rs->zereco_priority_rs_limit)
+        STAT_EVENT(node->proc_id, ZERECO_PIQ_RS1_PRIORITY_FULL_CYCLES);
+      if (rs->zereco_normal_op_count == rs->zereco_normal_rs_limit)
+        STAT_EVENT(node->proc_id, ZERECO_PIQ_RS1_NORMAL_FULL_CYCLES);
+      break;
+    case 2:
+      INC_STAT_EVENT(node->proc_id,
+                     ZERECO_PIQ_RS2_PRIORITY_OCCUPANCY_TOTAL,
+                     rs->zereco_priority_op_count);
+      INC_STAT_EVENT(node->proc_id, ZERECO_PIQ_RS2_NORMAL_OCCUPANCY_TOTAL,
+                     rs->zereco_normal_op_count);
+      if (rs->zereco_priority_op_count == rs->zereco_priority_rs_limit)
+        STAT_EVENT(node->proc_id, ZERECO_PIQ_RS2_PRIORITY_FULL_CYCLES);
+      if (rs->zereco_normal_op_count == rs->zereco_normal_rs_limit)
+        STAT_EVENT(node->proc_id, ZERECO_PIQ_RS2_NORMAL_FULL_CYCLES);
+      break;
+    default:
+      break;
+  }
+}
+
+static void node_issue_queue_collect_zereco_piq_occupancy(void) {
+  if (!ZERECO_PIQ_ENABLE)
+    return;
+
+  Counter priority_capacity = 0;
+  Counter normal_capacity = 0;
+  Counter priority_occupancy = 0;
+  Counter normal_occupancy = 0;
+  Counter priority_full_rs = 0;
+  Counter normal_full_rs = 0;
+
+  for (uns rs_id = 0; rs_id < NUM_RS; ++rs_id) {
+    Reservation_Station* rs = &node->rs[rs_id];
+    node_issue_queue_check_piq_partition(rs, rs_id, NULL);
+    priority_capacity += rs->zereco_priority_rs_limit;
+    normal_capacity += rs->zereco_normal_rs_limit;
+    priority_occupancy += rs->zereco_priority_op_count;
+    normal_occupancy += rs->zereco_normal_op_count;
+    priority_full_rs +=
+      rs->zereco_priority_op_count == rs->zereco_priority_rs_limit;
+    normal_full_rs +=
+      rs->zereco_normal_op_count == rs->zereco_normal_rs_limit;
+    node_issue_queue_collect_piq_rs_stats(rs_id, rs);
+  }
+
+  STAT_EVENT(node->proc_id, ZERECO_PIQ_CYCLES);
+  INC_STAT_EVENT(node->proc_id, ZERECO_PIQ_PRIORITY_CAPACITY_SLOT_CYCLES,
+                 priority_capacity);
+  INC_STAT_EVENT(node->proc_id, ZERECO_PIQ_NORMAL_CAPACITY_SLOT_CYCLES,
+                 normal_capacity);
+  INC_STAT_EVENT(node->proc_id, ZERECO_PIQ_PRIORITY_OCCUPANCY_SLOT_CYCLES,
+                 priority_occupancy);
+  INC_STAT_EVENT(node->proc_id, ZERECO_PIQ_NORMAL_OCCUPANCY_SLOT_CYCLES,
+                 normal_occupancy);
+  INC_STAT_EVENT(node->proc_id, ZERECO_PIQ_PRIORITY_OCCUPANCY_PCT,
+                 priority_occupancy);
+  INC_STAT_EVENT(node->proc_id, ZERECO_PIQ_NORMAL_OCCUPANCY_PCT,
+                 normal_occupancy);
+  if (priority_full_rs)
+    STAT_EVENT(node->proc_id, ZERECO_PIQ_ANY_PRIORITY_FULL_CYCLES);
+  if (normal_full_rs)
+    STAT_EVENT(node->proc_id, ZERECO_PIQ_ANY_NORMAL_FULL_CYCLES);
+  INC_STAT_EVENT(node->proc_id, ZERECO_PIQ_PRIORITY_FULL_RS_CYCLES,
+                 priority_full_rs);
+  INC_STAT_EVENT(node->proc_id, ZERECO_PIQ_NORMAL_FULL_RS_CYCLES,
+                 normal_full_rs);
 }
 
 /*
@@ -390,6 +591,21 @@ static inline Flag node_issue_queue_ops_share_fu(Op* lhs, Op* rhs) {
     }
   }
   return FALSE;
+}
+
+static inline uns64 node_issue_queue_op_fu_mask(const Op* op) {
+  ASSERTM(node->proc_id, NUM_FUS <= 64,
+          "ZERECO FU competition mask supports at most 64 FUs\n");
+  Reservation_Station* rs = &node->rs[op->rs_id];
+  uns64 op_type = get_fu_type(op->table_info->op_type,
+                              op->table_info->is_simd);
+  uns64 mask = 0;
+  for (uns ii = 0; ii < rs->num_fus; ++ii) {
+    Func_Unit* fu = rs->connected_fus[ii];
+    if (op_type & fu->type)
+      mask |= 1ull << fu->fu_id;
+  }
+  return mask;
 }
 
 static inline Flag node_issue_queue_selection_contains(
@@ -518,6 +734,30 @@ static inline void node_issue_queue_collect_zereco_contention_stats(void) {
   if (!ZERECO_IQ_PRIORITY_POLICY ||
       !ZERECO_IQ_PRIORITY_SCHEDULE_ENABLE)
     return;
+
+  uns64 normal_fu_mask = 0;
+  for (Op* normal = node->rdy_head; normal; normal = normal->next_rdy) {
+    if (normal->thread_id != 0 || normal->zereco_iq_priority_bit ||
+        !node_issue_queue_op_can_schedule(normal))
+      continue;
+    normal_fu_mask |= node_issue_queue_op_fu_mask(normal);
+  }
+
+  Counter competing_priority_ops = 0;
+  for (Op* priority = node->rdy_head; priority;
+       priority = priority->next_rdy) {
+    if (priority->thread_id == 0 && priority->zereco_iq_priority_bit &&
+        node_issue_queue_op_can_schedule(priority) &&
+        (node_issue_queue_op_fu_mask(priority) & normal_fu_mask))
+      competing_priority_ops++;
+  }
+  if (competing_priority_ops) {
+    STAT_EVENT(node->proc_id,
+               ZERECO_IQ_PRIORITY_NORMAL_COMPETITION_CYCLES);
+    INC_STAT_EVENT(node->proc_id,
+                   ZERECO_IQ_PRIORITY_NORMAL_COMPETING_PRIORITY_OPS,
+                   competing_priority_ops);
+  }
 
   Counter blocked_priority_ops = 0;
   for (Op* op = node->rdy_head; op; op = op->next_rdy) {
@@ -664,6 +904,7 @@ void node_issue_queue_update() {
 
   /* fill RS with oldest ops waiting for it */
   node_issue_queue_dispatch();
+  node_issue_queue_collect_zereco_piq_occupancy();
 
   /* first schedule 1 ready op per NUM_FUS  */
   node_issue_queue_schedule();
