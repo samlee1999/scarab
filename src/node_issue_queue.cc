@@ -59,7 +59,7 @@ extern "C" {
 /* Prototypes */
 
 int64 node_dispatch_find_emptiest_rs(Op*);
-void node_schedule_oldest_first_sched(Op*);
+void node_schedule_policy_sched(Op*);
 
 static inline Flag node_issue_queue_rs_supports_op(
   const Reservation_Station* rs, const Op* op) {
@@ -96,6 +96,94 @@ static void node_issue_queue_check_piq_partition(
           op ? unsstr64(op->op_num) : "none", cycle_count);
 }
 
+static inline void node_issue_queue_check_physical_entry_accounting(
+  const Reservation_Station* rs, uns rs_id, const Op* op) {
+  Flag mismatch = !rs->size || !rs->entry_status || !rs->free_entry_ids ||
+                  rs->free_entry_count > rs->size ||
+                  rs->rs_op_count != rs->size - rs->free_entry_count;
+  INC_STAT_EVENT(node->proc_id,
+                 ZERECO_IQ_PHYSICAL_ENTRY_INTEGRITY_MISMATCHES, mismatch);
+  ASSERTM(node->proc_id, !mismatch,
+          "Physical IQ entry divergence: rs=%u occupied=%u free=%u/%u op_num=%s C=%llu\n",
+          rs_id, rs->rs_op_count, rs->free_entry_count, rs->size,
+          op ? unsstr64(op->op_num) : "none", cycle_count);
+}
+
+void node_issue_queue_allocate_rs_entry(Node_Stage* node_local, Op* op,
+                                        uns rs_id) {
+  ASSERT(0, node_local && op);
+  ASSERT(node_local->proc_id, rs_id < NUM_RS);
+  Reservation_Station* rs = &node_local->rs[rs_id];
+  Flag mismatch = !rs->size || !rs->entry_status || !rs->free_entry_ids ||
+                  !rs->free_entry_count || op->rs_entry_id != MAX_CTR;
+  INC_STAT_EVENT(node_local->proc_id,
+                 ZERECO_IQ_PHYSICAL_ENTRY_INTEGRITY_MISMATCHES, mismatch);
+  ASSERTM(node_local->proc_id, !mismatch,
+          "Cannot allocate physical IQ entry: rs=%u free=%u/%u old_entry=%s op_num=%s C=%llu\n",
+          rs_id, rs->free_entry_count, rs->size,
+          unsstr64(op->rs_entry_id), unsstr64(op->op_num), cycle_count);
+
+  uns32 entry_id = rs->free_entry_ids[rs->free_entry_head];
+  rs->free_entry_head = (rs->free_entry_head + 1) % rs->size;
+  rs->free_entry_count--;
+
+  mismatch = entry_id >= rs->size;
+  INC_STAT_EVENT(node_local->proc_id,
+                 ZERECO_IQ_PHYSICAL_ENTRY_INTEGRITY_MISMATCHES, mismatch);
+  ASSERTM(node_local->proc_id, !mismatch,
+          "Physical IQ free list returned invalid entry: rs=%u entry=%u size=%u op_num=%s C=%llu\n",
+          rs_id, entry_id, rs->size, unsstr64(op->op_num), cycle_count);
+  uns32 word = entry_id / 64;
+  uint64_t mask = 1ull << (entry_id % 64);
+  mismatch = rs->entry_status[word] & mask;
+  INC_STAT_EVENT(node_local->proc_id,
+                 ZERECO_IQ_PHYSICAL_ENTRY_INTEGRITY_MISMATCHES, mismatch);
+  ASSERTM(node_local->proc_id, !mismatch,
+          "Allocated occupied physical IQ entry: rs=%u entry=%u op_num=%s C=%llu\n",
+          rs_id, entry_id, unsstr64(op->op_num), cycle_count);
+  rs->entry_status[word] |= mask;
+  op->rs_entry_id = entry_id;
+}
+
+void node_issue_queue_release_rs_entry(Node_Stage* node_local, Op* op) {
+  ASSERT(0, node_local && op);
+  ASSERT(node_local->proc_id, op->rs_id < NUM_RS);
+  Reservation_Station* rs = &node_local->rs[op->rs_id];
+  Flag mismatch = !rs->size || !rs->entry_status || !rs->free_entry_ids ||
+                  op->rs_entry_id >= rs->size ||
+                  rs->free_entry_count >= rs->size;
+  INC_STAT_EVENT(node_local->proc_id,
+                 ZERECO_IQ_PHYSICAL_ENTRY_INTEGRITY_MISMATCHES, mismatch);
+  ASSERTM(node_local->proc_id, !mismatch,
+          "Cannot release physical IQ entry: rs=%s entry=%s free=%u/%u op_num=%s C=%llu\n",
+          unsstr64(op->rs_id), unsstr64(op->rs_entry_id),
+          rs->free_entry_count, rs->size, unsstr64(op->op_num), cycle_count);
+
+  uns32 entry_id = (uns32)op->rs_entry_id;
+  uns32 word = entry_id / 64;
+  uint64_t mask = 1ull << (entry_id % 64);
+  mismatch = !(rs->entry_status[word] & mask);
+  INC_STAT_EVENT(node_local->proc_id,
+                 ZERECO_IQ_PHYSICAL_ENTRY_INTEGRITY_MISMATCHES, mismatch);
+  ASSERTM(node_local->proc_id, !mismatch,
+          "Released free physical IQ entry: rs=%s entry=%u op_num=%s C=%llu\n",
+          unsstr64(op->rs_id), entry_id, unsstr64(op->op_num), cycle_count);
+
+  rs->entry_status[word] &= ~mask;
+  rs->free_entry_ids[rs->free_entry_tail] = entry_id;
+  rs->free_entry_tail = (rs->free_entry_tail + 1) % rs->size;
+  rs->free_entry_count++;
+  op->rs_entry_id = MAX_CTR;
+
+  mismatch = rs->rs_op_count != rs->size - rs->free_entry_count;
+  INC_STAT_EVENT(node_local->proc_id,
+                 ZERECO_IQ_PHYSICAL_ENTRY_INTEGRITY_MISMATCHES, mismatch);
+  ASSERTM(node_local->proc_id, !mismatch,
+          "Physical IQ count mismatch after release: rs=%s occupied=%u free=%u/%u op_num=%s C=%llu\n",
+          unsstr64(op->rs_id), rs->rs_op_count, rs->free_entry_count,
+          rs->size, unsstr64(op->op_num), cycle_count);
+}
+
 /**************************************************************************************/
 /* Issuers:
  *      The interface to the issue functions is that Scarab will pass the
@@ -109,7 +197,8 @@ static void node_issue_queue_check_piq_partition(
  *
  * Phase 4: Thread-aware dispatch - checks per-thread partition limits
  */
-int64 node_dispatch_find_emptiest_rs(Op* op) {
+static int64 node_dispatch_find_emptiest_rs_for_piq_class(
+  Op* op, Flag use_priority_partition) {
   int64 emptiest_rs_id = NODE_ISSUE_QUEUE_RS_SLOT_INVALID;
   uns emptiest_rs_slots = 0;
 
@@ -136,7 +225,7 @@ int64 node_dispatch_find_emptiest_rs(Op* op) {
         continue;
       num_empty_slots = rs->tea_rs_limit - rs->tea_op_count;
     } else if (ZERECO_PIQ_ENABLE) {
-      if (op->zereco_iq_priority_bit) {
+      if (use_priority_partition) {
         if (rs->zereco_priority_op_count >=
             rs->zereco_priority_rs_limit)
           continue;
@@ -167,6 +256,11 @@ int64 node_dispatch_find_emptiest_rs(Op* op) {
   return emptiest_rs_id;
 }
 
+int64 node_dispatch_find_emptiest_rs(Op* op) {
+  return node_dispatch_find_emptiest_rs_for_piq_class(
+    op, op->zereco_iq_priority_bit);
+}
+
 /**************************************************************************************/
 /* Schedulers:
  *      The interface to the schedule functions is that Scarab will pass the
@@ -176,23 +270,48 @@ int64 node_dispatch_find_emptiest_rs(Op* op) {
  * will be ignored and available to schedule again in the next stage.
  */
 
-/*
- * OLDEST_FIRST_SCHED: will always select the oldest ready ops to schedule
- */
-void node_schedule_oldest_first_sched(Op* op) {
-  int32 replace_slot_op_id = NODE_ISSUE_QUEUE_FU_SLOT_INVALID;
-
-  auto precedes = [](const Op* lhs, const Op* rhs) -> bool {
-    bool lhs_priority = ZERECO_IQ_PRIORITY_SCHEDULE_ENABLE &&
-                        lhs->thread_id == 0 &&
-                        lhs->zereco_iq_priority_bit;
-    bool rhs_priority = ZERECO_IQ_PRIORITY_SCHEDULE_ENABLE &&
-                        rhs->thread_id == 0 &&
-                        rhs->zereco_iq_priority_bit;
+static inline bool node_issue_queue_precedes(const Op* lhs, const Op* rhs,
+                                             Flag use_zereco_priority) {
+  if (use_zereco_priority && ZERECO_IQ_PRIORITY_SCHEDULE_ENABLE) {
+    bool lhs_priority = lhs->thread_id == 0 && lhs->zereco_iq_priority_bit;
+    bool rhs_priority = rhs->thread_id == 0 && rhs->zereco_iq_priority_bit;
     if (lhs_priority != rhs_priority)
       return lhs_priority;
-    return lhs->op_num < rhs->op_num;
-  };
+  }
+
+  switch (NODE_ISSUE_QUEUE_SCHEDULE_SCHEME) {
+    case NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_OLDEST_FIRST:
+      return lhs->op_num < rhs->op_num;
+
+    case NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_RANDOM_PHYSICAL:
+      ASSERT(node->proc_id, lhs->rs_id < NUM_RS && rhs->rs_id < NUM_RS);
+      ASSERT(node->proc_id, lhs->rs_entry_id < node->rs[lhs->rs_id].size);
+      ASSERT(node->proc_id, rhs->rs_entry_id < node->rs[rhs->rs_id].size);
+      /* Golden Cove connects each FU to one RS.  Keep an RS-ID tie-breaker
+       * for other legal configurations where compatible candidates from
+       * different RSs may reach the same FU. */
+      if (lhs->rs_id != rhs->rs_id)
+        return lhs->rs_id < rhs->rs_id;
+      if (lhs->rs_entry_id != rhs->rs_entry_id)
+        return lhs->rs_entry_id < rhs->rs_entry_id;
+      ASSERTM(node->proc_id, lhs == rhs,
+              "Two ops own the same physical IQ entry: rs=%s entry=%s lhs=%s rhs=%s C=%llu\n",
+              unsstr64(lhs->rs_id), unsstr64(lhs->rs_entry_id),
+              unsstr64(lhs->op_num), unsstr64(rhs->op_num), cycle_count);
+      return false;
+
+    default:
+      ASSERTM(node->proc_id, FALSE,
+              "Unknown node issue queue schedule scheme %u\n",
+              NODE_ISSUE_QUEUE_SCHEDULE_SCHEME);
+      return false;
+  }
+}
+
+/* Select according to the configured baseline policy.  ZERECO Priority ops
+ * form a higher class; within each class use either age or physical position. */
+void node_schedule_policy_sched(Op* op) {
+  int32 replace_slot_op_id = NODE_ISSUE_QUEUE_FU_SLOT_INVALID;
 
   // Iterate through the FUs that this RS is connected to.
   Reservation_Station* rs = &node->rs[op->rs_id];
@@ -219,7 +338,7 @@ void node_schedule_oldest_first_sched(Op* op) {
       return;
     }
 
-    if (!precedes(op, s_op)) {
+    if (!node_issue_queue_precedes(op, s_op, TRUE)) {
       continue;
     }
 
@@ -231,7 +350,7 @@ void node_schedule_oldest_first_sched(Op* op) {
 
     // Keep the worst replaceable candidate: normal before priority, then young.
     Op* replace_op = node->sd.ops[replace_slot_op_id];
-    if (precedes(replace_op, s_op)) {
+    if (node_issue_queue_precedes(replace_op, s_op, TRUE)) {
       replace_slot_op_id = fu_id;
     }
   }
@@ -263,7 +382,8 @@ Dispatch_Func dispatch_func_table[NODE_ISSUE_QUEUE_DISPATCH_SCHEME_NUM] = {
 
 using Schedule_Func = void (*)(Op*);
 Schedule_Func schedule_func_table[NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_NUM] = {
-    [NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_OLDEST_FIRST] = {node_schedule_oldest_first_sched},
+    [NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_OLDEST_FIRST] = {node_schedule_policy_sched},
+    [NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_RANDOM_PHYSICAL] = {node_schedule_policy_sched},
 };
 
 /**************************************************************************************/
@@ -340,7 +460,28 @@ void node_issue_queue_dispatch() {
     if (op->thread_id == 1)
       continue;
 
+    Flag priority_admission_candidate =
+      ZERECO_PIQ_ENABLE && op->zereco_iq_priority_bit;
     int64 rs_id = dispatch_func_table[NODE_ISSUE_QUEUE_DISPATCH_SCHEME](op);
+
+    /* PUBS non-stall policy: a Priority candidate that cannot enter any
+     * compatible Priority partition may use a compatible Normal entry.  The
+     * fallback op receives normal scheduling priority for the rest of its
+     * life; its original candidate membership remains recorded separately. */
+    if (rs_id == NODE_ISSUE_QUEUE_RS_SLOT_INVALID &&
+        priority_admission_candidate &&
+        ZERECO_PIQ_DISPATCH_POLICY == 1) {
+      rs_id = node_dispatch_find_emptiest_rs_for_piq_class(op, FALSE);
+      if (rs_id != NODE_ISSUE_QUEUE_RS_SLOT_INVALID) {
+        op->zereco_iq_priority_bit = FALSE;
+        op->zereco_piq_fallback = TRUE;
+        STAT_EVENT(node->proc_id,
+                   ZERECO_PIQ_PRIORITY_TO_NORMAL_FALLBACK_OPS);
+        STAT_EVENT(node->proc_id,
+                   ZERECO_PIQ_PRIORITY_TO_NORMAL_FALLBACK_PCT);
+      }
+    }
+
     if (rs_id == NODE_ISSUE_QUEUE_RS_SLOT_INVALID) {
       if (ZERECO_PIQ_ENABLE) {
         Counter unused_other_slots = 0;
@@ -358,6 +499,16 @@ void node_issue_queue_dispatch() {
             unused_other_slots += candidate_rs->zereco_priority_rs_limit -
                                   candidate_rs->zereco_priority_op_count;
         }
+
+        Flag nonstall_mismatch =
+          ZERECO_PIQ_DISPATCH_POLICY == 1 &&
+          op->zereco_iq_priority_bit && unused_other_slots;
+        INC_STAT_EVENT(node->proc_id,
+                       ZERECO_PIQ_NONSTALL_INTEGRITY_MISMATCHES,
+                       nonstall_mismatch);
+        ASSERTM(node->proc_id, !nonstall_mismatch,
+                "P-IQ non-stall missed compatible Normal capacity: op_num=%s unused_normal=%llu C=%llu\n",
+                unsstr64(op->op_num), unused_other_slots, cycle_count);
 
         op->zereco_piq_dispatch_wait_cycles++;
         if (op->zereco_iq_priority_bit) {
@@ -395,10 +546,26 @@ void node_issue_queue_dispatch() {
     ASSERT(node->proc_id, op->state == OS_IN_ROB);
     op->state = OS_IN_RS;
     op->rs_id = (Counter)rs_id;
+    node_issue_queue_allocate_rs_entry(node, op, (uns)rs_id);
     rs->rs_op_count++;
     rs->main_op_count++;
     if (ZERECO_PIQ_ENABLE) {
       op->zereco_piq_entry = op->zereco_iq_priority_bit;
+      Flag fallback_mismatch =
+        op->zereco_piq_fallback &&
+        (!priority_admission_candidate || op->zereco_piq_entry ||
+         op->zereco_iq_priority_bit);
+      INC_STAT_EVENT(node->proc_id,
+                     ZERECO_PIQ_NONSTALL_INTEGRITY_MISMATCHES,
+                     fallback_mismatch);
+      ASSERTM(node->proc_id, !fallback_mismatch,
+              "P-IQ fallback retained Priority state: op_num=%s candidate=%u entry=%u priority=%u C=%llu\n",
+              unsstr64(op->op_num), priority_admission_candidate,
+              op->zereco_piq_entry, op->zereco_iq_priority_bit,
+              cycle_count);
+      if (priority_admission_candidate)
+        STAT_EVENT(node->proc_id,
+                   ZERECO_PIQ_PRIORITY_ADMISSION_CANDIDATE_OPS);
       if (op->zereco_piq_entry) {
         rs->zereco_priority_op_count++;
         STAT_EVENT(node->proc_id, ZERECO_PIQ_PRIORITY_DISPATCHED_OPS);
@@ -428,6 +595,7 @@ void node_issue_queue_dispatch() {
       op->zereco_piq_dispatch_wait_cycles = 0;
       node_issue_queue_check_piq_partition(rs, (uns)rs_id, op);
     }
+    node_issue_queue_check_physical_entry_accounting(rs, (uns)rs_id, op);
 
     num_fill_rs++;
 
@@ -616,7 +784,7 @@ static inline Flag node_issue_queue_selection_contains(
   return FALSE;
 }
 
-static void node_issue_queue_shadow_consider_oldest(
+static void node_issue_queue_shadow_consider_baseline(
   Op* op, Op** selected, uns selected_count) {
   int32 replace_fu_id = NODE_ISSUE_QUEUE_FU_SLOT_INVALID;
   Reservation_Station* rs = &node->rs[op->rs_id];
@@ -634,11 +802,12 @@ static void node_issue_queue_shadow_consider_oldest(
       selected[fu_id] = op;
       return;
     }
-    if (op->op_num >= selected_op->op_num)
+    if (!node_issue_queue_precedes(op, selected_op, FALSE))
       continue;
 
     if (replace_fu_id == NODE_ISSUE_QUEUE_FU_SLOT_INVALID ||
-        selected[replace_fu_id]->op_num < selected_op->op_num)
+        node_issue_queue_precedes(selected[replace_fu_id], selected_op,
+                                  FALSE))
       replace_fu_id = fu_id;
   }
 
@@ -657,8 +826,8 @@ static void node_issue_queue_collect_zereco_shadow_stats(void) {
   for (Op* op = node->rdy_head; op; op = op->next_rdy) {
     if (op->thread_id != 0 || !node_issue_queue_op_can_schedule(op))
       continue;
-    node_issue_queue_shadow_consider_oldest(op, shadow_selected,
-                                            selected_count);
+    node_issue_queue_shadow_consider_baseline(op, shadow_selected,
+                                              selected_count);
   }
 
   if (!ZERECO_IQ_PRIORITY_SCHEDULE_ENABLE) {

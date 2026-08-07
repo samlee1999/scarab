@@ -1,214 +1,208 @@
 # ZERECO: H2P-Chain Load 가속을 통한 Branch 오예측 조기 해소
 
-> Last updated: 2026-08-04
->
+> Last updated: 2026-08-06
 > Simulator: Scarab / Scarab-infra
->
-> 범위: TEA helper thread 없이 main-thread H2P dependence chain만 가속한다.
+> 범위: 별도 helper thread 없이 main-thread H2P dependence chain만 가속한다.
 
-## 1. 연구 목표
+## 1. 연구 문제와 Thesis
 
-History-based branch predictor가 계속 복잡해져도 data-dependent H2P(Hard-to-Predict) branch는 안정적으로 예측하기 어렵다. ZERECO는 predictor accuracy를 더 높이는 대신, 오예측된 H2P branch가 실제 outcome을 확인하는 시점을 앞당겨 misprediction penalty를 줄인다.
+복잡한 history-based branch predictor도 data-dependent H2P(Hard-to-Predict) branch를 안정적으로 예측하기는 어렵다. Predictor complexity를 계속 높이는 방법은 저장 공간, 접근 latency와 설계 복잡도를 키우지만 H2P branch의 정확도 개선은 제한적일 수 있다.
 
-핵심 가설은 다음과 같다.
+ZERECO는 예측 정확도를 더 높이는 대신 다음 질문에서 출발한다.
 
-1. H2P misprediction penalty에서 branch fetch부터 resolution까지가 중요한 구간이다.
-2. 이 구간은 branch dependence chain의 operand가 늦게 준비되어 길어진다.
-3. 특히 chain 안의 Target Load latency가 dependency wait와 branch resolution을 늦춘다.
-4. 예측 가능한 Target Load는 RF-style load acceleration으로 처리하고, RF가 안정적으로 처리하지 못하는 H2P slice는 PUBS-style IQ priority로 보완할 수 있다.
+> H2P branch를 피하기 어렵다면, 오예측을 더 빨리 발견해 penalty를 줄일 수 있는가?
 
-> H2P-chain membership을 criticality filter로 사용해 predictable load에는 RF acceleration을, residual slice에는 finite P-IQ를 적용함으로써 별도 precomputation thread 없이 branch resolution을 앞당긴다.
+핵심 Thesis는 다음과 같다.
 
-## 2. Motivation과 Prior Work
+> H2P branch의 긴 fetch-to-resolution latency는 dependence chain의 operand 준비, 특히 chain 안의 Target Load latency에 크게 좌우된다. 예측 가능한 Target Load는 RF로 가속하고, RF로 처리하기 어려운 residual chain은 priority scheduling으로 가속해 branch resolution을 앞당긴다.
 
-### 2.1 Fetch-to-resolution을 줄여야 하는 이유
+이 문서에서 사용하는 핵심 용어는 다음과 같다.
 
-Branch predictor가 틀리면 branch가 execute되어 실제 direction과 target이 확인될 때까지 wrong path가 계속 유입된다. Fetch-to-resolution은 다음 단계로 구성된다.
+- **H2P branch**: 반복적으로 높은 misprediction을 보이며 history만으로 안정적으로 예측하기 어려운 branch
+- **Backward slice**: branch outcome 계산에 필요한 older producer 명령어의 data-dependence chain
+- **Target Load**: H2P branch의 on-path backward slice에 속해 branch operand 준비에 영향을 주는 load
+- **RF acceleration**: 예측한 load address의 데이터를 Register File에 미리 공급해 load service latency를 줄이는 방식
+- **P-IQ**: H2P slice op를 우선 scheduling하기 위한 논리적 Priority-IQ/RS 영역
 
-- frontend 통과
-- dependence chain의 source operand가 준비되기를 기다리는 dependency wait
-- operand-ready 이후 FU 선택까지의 scheduler wait
-- branch execution
+## 2. Motivation
 
-현재 profiler에서 `dependency`는 branch가 Node Table에 들어간 뒤 마지막 source operand가 ready될 때까지의 시간이다. 이 값에는 older producer의 실행과 load service latency가 포함된다. `scheduler`는 operand-ready 이후 issue되기까지의 시간이다.
+### 2.1 Accuracy가 아니라 penalty를 줄이는 이유
 
-ZERECO 실험에서는 fetch-to-resolution의 대부분이 dependency wait였고, Target Load latency를 줄였을 때 dependency wait, resolution latency와 IPC가 함께 개선되었다. 따라서 Target Load는 긴 resolution과 단순히 상관된 명령어가 아니라 직접 줄여볼 가치가 있는 bottleneck이다.
+TAGE-SC-L처럼 크고 복잡한 history-based predictor도 load가 만든 runtime value에 direction이 의존하는 branch를 안정적으로 맞히기 어렵다. 더 많은 history와 predictor table에 비용을 투자해도 load value 자체를 알 수 없으므로 H2P branch의 정확도 개선에는 한계가 있다.
 
-### 2.2 Prior Work의 한계
+ZERECO는 predictor complexity를 더 높이는 데 사용할 storage, lookup과 energy budget을 branch misprediction penalty를 줄이는 데 투자할 수 있는지 묻는다. Prediction 정확도를 높이는 대신, direction을 결정하는 dependence chain을 가속해 실제 outcome과 misprediction을 더 일찍 확인하는 것이 핵심이다. Misprediction을 일찍 detect하면 recovery와 redirect도 더 빨리 시작할 수 있으므로, off-path instruction의 fetch를 그만큼 일찍 중단하고 correct path로 복귀할 수 있다.
 
-#### TEA
+### 2.2 Fetch-to-resolution이 중요한 이유
 
-TEA는 H2P branch dependence chain을 helper thread에서 precompute하여 early flush를 만든다. 효과적인 대신 별도 fetch/rename 상태, register 관리, chain 실행과 shared backend resource가 필요하다. ZERECO는 TEA-derived H2P-chain identification은 사용하지만 helper thread와 duplicated chain execution은 사용하지 않는다.
-
-- Reference: `/home/lee/scarab/reference/[2024, MICRO] Timely_Efficient_and_Accurate_Branch_Precomputation.pdf`
-
-#### PUBS
-
-PUBS는 low-confidence branch의 backward slice를 priority IQ entry에 배치하여 issue wait를 줄인다. 그러나 broadly marked slice가 많으면 priority entry 자체의 contention과 normal-entry 감소가 발생할 수 있고, scheduling을 앞당겨도 issue 이후의 cache/memory latency는 제거하지 못한다. ZERECO는 H2P-chain으로 대상을 제한하고, RF가 처리할 수 있는 slice를 priority population에서 제외하는 방식을 평가한다.
-
-- Reference: `/home/lee/scarab/reference/[2018, MICRO] PUBS.pdf`
-
-#### Branch Runahead
-
-Branch Runahead는 dependence chain을 별도 엔진에서 미리 실행해 H2P branch outcome을 predictor보다 먼저 공급한다. 결과가 branch fetch 전에 준비되어야 하므로 timeliness 요구가 강하고 별도 chain extraction/execution 구조가 필요하다. ZERECO는 outcome 전체의 선행 계산이 아니라 main-thread branch의 fetch 이후 resolution을 앞당긴다.
-
-- Reference: `/home/lee/scarab/reference/[2021, MICRO] Branch Runahead_Pruett,Y.Patt.pdf`
-
-## 3. 검증된 Key Insights
-
-| 결과 디렉터리 | 새롭게 확인한 내용 |
-|---|---|
-| `/home/lee/simulations/zereco/260624_h2p_chain_load_access_pattern_all_simpoints` | Target Load access는 제한된 load PC에 집중되며, 일부 address stream은 PC-local history로 예측 가능하다. 동시에 irregular tail이 존재하므로 RF만으로 모든 slice를 처리할 수 없다. |
-| `/home/lee/simulations/zereco/260625_perf_comparison` | Target Load latency를 제거한 full oracle에서 큰 성능 headroom이 나타났다. 이는 prefetcher-OFF motivation 결과이며 realizable predictor 결과로 해석하지 않는다. |
-| `/home/lee/simulations/zereco/zereco_260729_misp_penalty_breakdown` | H2P misprediction/misfetch의 fetch-to-resolution과 dependency wait가 중요하며, predictor가 실제로 cover한 Target Load만 가속해도 resolution latency와 IPC가 개선된다. |
-
-이 결과들은 다음 인과관계를 지원한다.
+Branch가 잘못 예측되면 실제 direction과 target이 확인될 때까지 wrong-path instruction이 계속 유입된다. 전체 misprediction timeline은 크게 다음과 같이 볼 수 있다.
 
 ```text
-H2P branch를 predictor만으로 해결하기 어려움
-  -> 오예측 후 fetch-to-resolution을 줄일 필요
-  -> branch dependency wait가 긴 구간을 형성
-  -> Target Load latency 감소가 resolution과 IPC를 함께 개선
-  -> predictable load는 RF, residual slice는 IQ priority로 분리
+branch fetch
+  -> branch resolution / misprediction detection
+  -> recovery and redirect
+  -> first correct-path fetch
 ```
 
-## 4. 현재 Scarab 구현
+Fetch-to-resolution은 branch operand와 execution latency에 의해 결정되므로 chain 가속이 직접 줄일 수 있다. 다만 이 구간의 비중만으로 IPC bottleneck이 증명되지는 않으며, 실제 latency를 줄였을 때 resolution과 IPC가 함께 개선되어야 한다.
 
-현재 구현은 main-thread-only single-pass 모델이다. `tea_enable=0`을 사용하며 별도 TEA thread scheduling은 고려하지 않는다.
+### 2.3 왜 resolution이 늦어지는가
 
-### 4.1 H2P chain identification
+Scarab profiler는 fetch-to-resolution을 다음 단계로 나눈다.
 
-- Retired Fill Buffer snapshot에서 H2P branch별 backward dataflow walk를 수행한다.
-- Register producer와 동일-address store 관계를 추적해 branch backward slice를 만든다.
-- Block Cache에 `dependency_mask`, `iq_priority_candidate_mask`, `iq_priority_mask`를 저장한다.
-- Frontend lookup으로 main-thread on-path op에 `chain_bit`과 IQ priority bit를 붙인다.
-- 이번 finite P-IQ 실험은 H2P branch의 full backward slice만 사용한다.
+- `frontend`: branch fetch부터 Node Table 진입까지
+- `dependency`: Node Table 진입부터 마지막 source operand가 ready될 때까지
+- `scheduler`: operand-ready부터 FU 선택까지
+- `execution`: branch issue부터 실행 완료까지
 
-### 4.2 Predictor-gated RF model
+긴 H2P resolution에서는 `dependency`가 가장 크다. 이 시간에는 backward-slice producer의 실행, Target Load의 address generation과 cache/memory service가 포함되므로 scheduling과 load latency를 서로 다른 수단으로 줄여야 한다.
 
-- Target Load는 main-thread on-path H2P backward-slice load이다.
-- Per-PC Stride predictor가 exact virtual address를 예측한다.
-- 같은 dynamic load는 한 번만 `predict -> actual address 비교 -> update`를 수행한다.
-- Exact-address prediction이 맞고 store-forwarding conflict가 없을 때만 1-cycle RF service를 적용한다.
-- Abstain, wrong address, store conflict는 정상 demand path를 사용한다.
+## 3. Key Observations와 Root Cause
 
-이 모델은 dcache-stage에서 correct prediction의 load latency를 줄이는 predictor-gated upper bound다. 실제 RF prefetch의 early launch, bandwidth, timeliness와 wrong-prediction recovery 비용은 아직 모델링하지 않는다.
+### 3.1 Fetch-to-resolution에는 줄일 수 있는 headroom이 있다
 
-### 4.3 Online RF filtering
+H2P misprediction/misfetch의 전체 penalty에서 fetch-to-resolution이 큰 portion을 차지한다. 이는 branch outcome을 더 일찍 계산하는 접근이 의미 있는 구조적 headroom을 가짐을 보여준다.
 
-`zereco_iq_priority_policy=2`는 retired dynamic slice의 RF 결과로 같은 H2P branch의 다음 occurrence를 제어한다.
+### 3.2 Dependency wait이 긴 resolution의 중심이다
 
-- 모든 Target Load가 RF-covered인 occurrence가 2회 연속 관찰되면 다음 occurrence의 IQ priority를 억제한다.
-- Target Load가 하나라도 abstain, wrong-address 또는 store-conflict이면 streak을 reset하고 slice 전체에 priority를 유지한다.
-- Target Load가 없는 H2P slice도 priority를 유지한다.
-- 여러 H2P slice가 같은 block slot을 공유하면, 그 op가 uncovered slice 하나에라도 필요할 때 priority를 유지한다.
+Fetch-to-resolution 내부에서는 branch의 src operand가 준비되기를 기다리는 시간이 지배적이다. Branch 자체의 ready-to-issue 시간만 보는 것으로는 이 병목을 설명할 수 없으며, branch까지 이어지는 older producer chain을 함께 봐야 한다.
 
-현재 occurrence의 load 결과를 older producer에 소급하지 않으므로 two-pass oracle mask가 아니다.
+### 3.3 왜 Target Load에 RF prefetch를 적용하는가
 
-### 4.4 Finite P-IQ
+Exact address가 예측된 Target Load만 짧은 RF latency로 서비스해도 dependency wait, fetch-to-resolution과 IPC가 함께 개선된다. 이 sensitivity 결과는 Target Load latency가 현재 모델에서 성능에 영향을 주는 원인임을 보여준다.
 
-각 distributed RS의 기존 `main_rs_limit`을 Priority/Normal 전용 partition으로 나눈다.
+일반적인 cache prefetch는 data를 cache 가까이 가져오더라도 demand load가 address generation, scheduling과 cache access를 거쳐 destination register를 채울 때까지 dependent op를 깨울 수 없다. RF prefetch는 Target Load의 address를 미리 예측해 value fetch를 앞당기고 그 값을 destination register에서 직접 사용할 수 있게 한다. 따라서 branch backward slice의 consumer를 더 일찍 실행시켜 dependency wait을 줄이려는 ZERECO의 목적에 더 직접적이다.
+
+### 3.4 모든 Target Load를 RF prefetch할 수는 없다
+
+Target Load access는 일부 load PC에 집중되고, PC-local history로 높은 정확도에서 예측할 수 있는 address stream이 존재한다. 동시에 irregular한 access도 남으므로 모든 Target Load를 가속하는 oracle은 현실적인 설계가 아니다.
+
+잘못된 cache prefetch는 주로 bandwidth와 cache pollution을 낭비하지만, RF prefetch가 wrong address의 값이나 stale value를 register에 공급하면 dependent op와 branch가 잘못된 값으로 실행될 수 있다. 이를 검출하려면 address/value validation이 필요하고, 실패하면 replay 또는 pipeline recovery 비용이 발생한다. 따라서 높은 confidence로 exact address를 예측할 수 있고 memory-order/store conflict가 없는 Target Load만 RF 대상으로 선택해야 한다. 나머지 Target Load는 정상 demand path를 사용하고 그 residual slice는 IQ priority로 보완한다.
+
+현재 시뮬레이터는 exact-address prediction과 conflict 부재를 oracle로 확인한 경우에만 짧은 RF latency를 적용하며, wrong-value injection과 그 recovery cost는 아직 모델링하지 않는다. 따라서 현재 RF 결과는 선택 가능한 Target Load의 잠재력을 보는 predictor-gated upper bound다.
+
+### 3.5 IQ priority는 RF를 보완하는 secondary mechanism이다
+
+Oldest-first는 이미 older producer를 우대하므로 P-IQ가 바꿀 수 있는 winner가 적다. Random-physical sensitivity에서는 age advantage가 제거될 때 priority가 dependency wait과 IPC를 개선할 수 있음을 확인했다.
+
+Strict partition은 dispatch stall을 만들지만 non-stall fallback은 이를 줄인다. RF와 결합한 filtered P-IQ는 RF-only에 추가 이득을 만들 수 있으나, 효과는 RF보다 작고 priority population 감소가 항상 성능 증가로 이어지지는 않는다.
+
+## 4. Observation에서 ZERECO 구조가 도출되는 과정
+
+앞의 관찰은 다음 설계로 이어진다.
 
 ```text
-ready-op selection: Priority op > Normal op
-same class: oldest-first
-dispatch: matching partition이 full이면 in-order stall
-spill: Priority <-> Normal partition 간 entry 공유 없음
+1. H2P branch와 backward slice 식별
+2. slice 안의 Target Load address 예측
+3. RF-covered Target Load의 service latency 가속
+4. RF로 처리하기 어려운 residual slice에 IQ priority 부여
+5. finite P-IQ가 full이면 Normal entry로 fallback
+6. main-thread branch의 resolution을 앞당김
 ```
 
-현재 baseline의 distributed main-thread RS 용량은 `185/132/36`이다. P-IQ config만 총 RS 용량이 커지지 않도록 이 용량 안에서 비율을 적용한다.
+RF를 먼저 적용하는 이유는 긴 dependency wait의 큰 부분인 load latency를 직접 줄일 수 있기 때문이다. IQ priority는 load address를 만들기 위한 producer와 RF-uncovered residual chain의 scheduling을 앞당기는 보완 경로다.
 
-| P-IQ 비율 | RS0 / RS1 / RS2 Priority entries |
-|---:|---:|
-| 10% | 19 / 13 / 4 |
-| 15% | 28 / 20 / 5 |
-| 20% | 37 / 26 / 7 |
-| 25% | 46 / 33 / 9 |
-| 50% | 93 / 66 / 18 |
+RF filtering은 이미 RF로 처리 가능한 slice까지 모두 priority로 표시해 P-IQ가 사실상 normal IQ처럼 되는 것을 막기 위한 장치다. 다만 filtering은 priority population을 제어하는 수단이지, 그 자체가 성능 향상을 보장하지는 않는다.
 
-기존 `iq_all_h2p`는 capacity를 분할하지 않는 select-only scheduling reference다. 50% P-IQ도 strict finite partition이므로 select-only와 동일한 upper bound가 아니다.
+## 5. ZERECO Mechanism Overview
 
-## 5. 현재 P-IQ 실험
+### 5.1 H2P chain identification
 
-- Descriptor: `/home/lee/scarab-infra/json/zereco_dbg.json`
-- Output directory: `/home/lee/simulations/zereco_260804_piq_sweep`
-- Workload/SimPoint 집합은 descriptor에 명시된 기존 공통 집합을 사용한다.
-- `mispred`와 `misfetch`를 모두 H2P penalty profiler에 포함한다.
+- Retired Fill Buffer에서 register producer와 동일-address store를 따라 H2P backward slice를 만든다.
+- Block Cache mask와 frontend lookup으로 main-thread on-path op에 chain/priority 정보를 붙인다.
+- TEA의 identification 아이디어만 사용하며 helper thread는 두지 않는다.
 
-### 5.1 Configuration
+### 5.2 Predictor-gated RF acceleration
 
-Reference configuration은 세 개다.
+- Per-PC Stride predictor가 Target Load의 virtual address를 예측한다.
+- Dynamic load마다 한 번만 `predict -> actual address 비교 -> update`를 수행한다.
+- Exact prediction이고 store conflict가 없을 때만 RF service를 적용하며, 나머지는 정상 demand path를 사용한다.
 
-| Config | 의미 |
-|---|---|
-| `baseline` | RF OFF, P-IQ OFF, oldest-first |
-| `iq_all_h2p` | RF OFF, 모든 H2P full slice에 select-only priority |
-| `rf_stride_only` | Stride RF ON, IQ scheduling/P-IQ OFF |
+실제 RF prefetch의 early launch, value validation/recovery와 storage/bandwidth 동작은 후속 모델 범위다.
 
-Finite P-IQ는 `R={10,15,20,25,50}`에 대해 세 정책을 비교한다.
+### 5.3 Online RF filtering
 
-| Config family | RF | P-IQ 대상 |
+- Retired RF 결과로 같은 H2P branch의 다음 occurrence를 제어한다.
+- Target Load가 안정적으로 covered되면 priority를 억제하고, uncovered load가 있거나 Target Load가 없으면 유지한다.
+- 현재 occurrence에 결과를 소급하지 않는 single-pass 모델이다.
+
+### 5.4 Priority scheduling과 finite P-IQ
+
+Ready op의 선택 순서는 다음과 같다.
+
+```text
+ZERECO Priority op > Normal op
+same class: configured baseline scheduling policy
+```
+
+Scarab에서는 중앙 IQ 기능이 distributed RS, Node Table과 issue queue에 나뉜다. P-IQ는 각 RS의 기존 용량 안에서 Priority/Normal admission capacity를 나누는 논리적 partition이다.
+
+Non-stall policy에서는 Priority partition이 full이면 op를 Normal entry에 배치하고 이후 Normal op로 scheduling한다. Normal op는 Priority partition을 사용하지 않는다.
+
+Scheduler policy는 다음 두 가지를 지원한다.
+
+- **Oldest-first**: 낮은 `op_num` 우선; 현실적인 기본 baseline
+- **Random-physical**: 낮은 physical RS entry ID 우선; oldest-first가 감추는 priority headroom을 확인하는 sensitivity baseline
+
+## 6. Prior Work와 ZERECO의 차이
+
+| Prior Work | 가져오는 요소 | 그대로 사용하지 않는 부분과 ZERECO의 차이 |
 |---|---|---|
-| `piq_all_h2p_R` | OFF | 모든 H2P full slice |
-| `rf_stride_unfiltered_piq_R` | Stride | RF coverage와 관계없이 모든 H2P full slice |
-| `rf_stride_filtered_piq_R` | Stride | online RF filtering 후 남은 H2P full slice |
+| TEA | H2P branch와 backward-slice identification | Helper thread, duplicated chain execution과 별도 architectural state를 사용하지 않는다. |
+| RFP | Load address prediction과 RF prefetch | 모든 load가 아니라 H2P resolution에 영향을 주는 Target Load만 선택한다. 현재 early-launch hardware timing은 후속 과제다. |
+| PUBS | Branch backward-slice op의 IQ priority | Scheduling만으로 제거할 수 없는 cache/memory latency를 RF로 먼저 줄이고, residual slice에 non-stall P-IQ를 적용한다. |
+| Branch Runahead | Dependence-chain 기반 branch 가속 | 별도 엔진에서 outcome 전체를 선행 계산하지 않고 main-thread의 fetch 이후 resolution을 줄인다. |
 
-총 configuration 수는 reference 3개와 finite P-IQ 15개를 합친 18개다. 이번 단계에서는 Top-delta와 Target-Load-prefix policy를 실행하지 않는다.
+References:
 
-### 5.2 확인할 질문
+- `/home/lee/scarab/reference/[2024, MICRO] Timely_Efficient_and_Accurate_Branch_Precomputation.pdf`
+- `/home/lee/scarab/reference/[2022, ISCA] Reg File prefetching.pdf`
+- `/home/lee/scarab/reference/[2018, MICRO] PUBS.pdf`
+- `/home/lee/scarab/reference/[2021, MICRO] Branch Runahead_Pruett,Y.Patt.pdf`
 
-1. `iq_all_h2p / baseline`: select contention을 우선 처리하는 것만으로 성능과 H2P latency가 개선되는가?
-2. `piq_all_h2p_R / baseline`: Priority population이 finite P-IQ를 포화시키는가? Normal partition 축소가 성능 향상을 반납시키는가?
-3. 같은 `R`에서 `rf_stride_filtered_piq_R / rf_stride_unfiltered_piq_R`: RF filtering이 Priority population과 P-IQ contention을 줄이는가?
-4. `rf_stride_filtered_piq_R / rf_stride_only`: residual slice priority가 RF-only 대비 추가적인 IPC와 resolution 개선을 만드는가?
+## 7. 현재 구현
 
-### 5.3 핵심 통계
-
-| 통계 | 의미 |
-|---|---|
-| `Periodic_IPC`, `ZERECO_H2P_FETCH_TO_RESOLUTION_*`, `ZERECO_H2P_DEPENDENCY_*`, `ZERECO_H2P_SCHEDULER_*` | 성능과 H2P resolution 경로 |
-| `ZERECO_IQ_PRIORITY_MARKED_PORTION`, `ZERECO_IQ_READY_PRIORITY_AVG` | Priority population |
-| `ZERECO_IQ_PRIORITY_CONTENTION_CYCLES` | ready Priority op가 다른 Priority winner와 같은 FU를 경쟁한 cycle |
-| `ZERECO_IQ_PRIORITY_NORMAL_COMPETITION_CYCLES` | ready Priority와 Normal op가 같은 FU 선택 후보였던 cycle |
-| `ZERECO_IQ_NORMAL_DISPLACED_BY_PRIORITY_*` | Priority-first selection 때문에 oldest-first normal selection이 바뀐 효과 |
-| `ZERECO_PIQ_*_OCCUPANCY_PCT`, `ZERECO_PIQ_*_FULL_*` | Priority/Normal partition 사용률과 포화도 |
-| `ZERECO_PIQ_*_DISPATCH_STALL_CYCLES`, `ZERECO_PIQ_*_DISPATCH_WAIT_*` | matching partition 부족으로 발생한 dispatch 지연 |
-| `ZERECO_PIQ_*_STALL_WITH_UNUSED_*`, `ZERECO_PIQ_UNUSED_*_SLOTS_*` | 반대 partition이 비어 있는데도 strict partition 때문에 발생한 capacity loss |
-| `ZERECO_IQ_SHADOW_SELECTION_MISMATCHES` | scheduling OFF reference에서 실제 oldest-first와 shadow 결과의 일치성; 반드시 0 |
-| `ZERECO_PIQ_PARTITION_INTEGRITY_MISMATCHES` | RS main/Priority/Normal occupancy accounting 일치성; 반드시 0 |
-
-해석 기준은 다음과 같다.
-
-- Priority full/stall과 P-vs-P contention이 높으면 all-H2P priority population이 너무 크다는 가설을 지지한다.
-- Normal full/stall과 unused Priority slot이 증가하면서 IPC가 떨어지면 P-IQ 비율이 과도하게 크다는 뜻이다.
-- Filtered가 같은 비율의 unfiltered보다 Priority population/stall을 줄이고 IPC를 높이면 RF filtering의 당위성이 생긴다.
-- P-IQ와 select contention이 모두 낮다면 IQ priority가 작은 이유는 scheduler contention이 아니라 operand/cache/memory latency가 지배적이기 때문일 가능성이 크다.
-
-## 6. 결과 집계 원칙
-
-- 완료된 공통 SimPoint만 configuration 간 비교에 사용한다.
-- Workload 내부 latency는 SimPoint weight를 정규화한 뒤 `weighted total cycles / weighted event count`로 계산한다.
-- 전체 latency 대표값은 workload-equal mean을 사용한다.
-- IPC speedup의 AVG는 workload별 IPC ratio의 geometric mean을 사용한다.
-- Coverage는 `correct predictions / candidate Target Loads`, accuracy는 `correct predictions / predictions made`다.
-- 결과 인용 시 config의 `PARAMS.out`, 완료 상태와 integrity counter를 먼저 확인한다.
-
-## 7. 현재 한계와 다음 판단
-
-- RF 결과는 predictor-gated latency upper bound다. P-IQ headroom이 확인된 뒤 실제 launch point, RF capacity/bandwidth와 recovery를 모델링한다.
-- Finite P-IQ는 strict static partition이다. Sweep 결과에 따라 적절한 비율을 선택하고, 필요할 때만 dynamic borrowing 또는 overflow policy를 검토한다.
-- 현재 H2P identification 구조는 연구용 Fill Buffer와 backward walk를 유지한다. 최종 논문에서는 identification storage와 walk cost를 별도로 정량화해야 한다.
-
-## 8. 주요 코드와 자료
+현재 구현은 `tea_enable=0`인 main-thread-only single-pass 모델이며 `mispred`와 `misfetch`를 모두 H2P profiler에 포함한다.
 
 | 경로 | 역할 |
 |---|---|
-| `src/dcache_stage.c` | online address predictor와 predictor-gated RF service |
-| `src/fill_buffer.c`, `src/dependency_chain_cache.c` | H2P backward walk, full-slice mask와 online RF filtering |
-| `src/decoupled_frontend.cc` | Block Cache lookup과 main-thread op tagging |
-| `src/exec_ports.c`, `src/node_stage.c` | distributed RS partition과 recovery-safe occupancy 관리 |
-| `src/node_issue_queue.cc` | P-IQ dispatch, Priority-first scheduling과 interference 계측 |
-| `src/zereco/h2p_mispred_latency.c` | H2P misprediction/misfetch penalty profiler |
-| `src/core.param.def`, `src/zereco/zereco.stat.def` | ZERECO parameter와 통계 정의 |
-| `/home/lee/scarab-infra/json/zereco_dbg.json` | 현재 18-configuration P-IQ sweep descriptor |
-| `/home/lee/scarab/reference/` | TEA, PUBS, Branch Runahead reference papers |
+| `src/dcache_stage.c` | Online address predictor와 predictor-gated RF service |
+| `src/fill_buffer.c`, `src/dependency_chain_cache.c`, `src/decoupled_frontend.cc` | H2P backward walk, slice mask, RF filtering과 op tagging |
+| `src/exec_ports.c`, `src/node_stage.c` | Distributed RS, physical entry와 P-IQ occupancy 관리 |
+| `src/node_issue_queue.cc` | Oldest/random-physical scheduling과 Priority-first selection |
+| `src/zereco/h2p_mispred_latency.c` | H2P misprediction/misfetch latency profiler |
+| `src/core.param.def`, `src/zereco/zereco.stat.def` | Parameter와 통계 정의 |
+| `/home/lee/scarab-infra/json/zereco_dbg.json` | 현재 build/run descriptor |
+
+필수 무결성 조건은 physical-entry, shadow-selection, P-IQ partition과 non-stall 관련 mismatch counter가 모두 0인 것이다.
+
+## 8. 실험 근거와 검증 범위
+
+세부 그래프와 수치는 아래 결과 디렉터리의 `analysis/`를 기준으로 확인한다.
+
+| 결과 디렉터리 | 이 실험에서 확인한 내용 |
+|---|---|
+| `/home/lee/simulations/zereco/260624_h2p_chain_load_access_pattern_all_simpoints` | Target Load가 일부 PC에 집중되며 predictable stream과 irregular tail이 함께 존재한다. |
+| `/home/lee/simulations/zereco/260625_perf_comparison` | Target Load latency를 제거할 때의 큰 성능 headroom을 확인한 full-oracle motivation 실험이다. |
+| `/home/lee/simulations/zereco/zereco_260729_misp_penalty_breakdown` | Penalty portion, dependency-stage dominance와 predictor-gated RF의 resolution/IPC 효과를 확인했다. |
+| `/home/lee/simulations/zereco_260802_iq_priority_online` | Online RF filtering이 priority population을 줄이지만 oldest-first에서 P-IQ의 추가 효과는 작음을 확인했다. |
+| `/home/lee/simulations/zereco_260803_iq_priority_interference` | Priority scheduling이 normal-op selection에 미치는 영향과 shared-RS select-only 효과를 계측했다. |
+| `/home/lee/simulations/zereco_260804_piq_sweep` | Strict finite partition의 stall 비용과 RF filtering의 population/stall 감소를 확인했다. |
+| `/home/lee/simulations/zereco_260805_piq_nonstall_sweep` | Non-stall fallback이 partition blocking을 줄이며, oldest-first에서 남는 P-IQ headroom이 작음을 확인했다. |
+| `/home/lee/simulations/zereco_260805_random_iq_comparison` | Oldest-first와 random-physical의 scheduling headroom 차이를 비교하고 논문용 분석 자료를 정리했다. |
+| `/home/lee/simulations/zereco_260806_random_piq_policy_sweep (random_iq 적용)` | Random-physical에서 P-IQ 효과, stall/non-stall 차이와 finite P-IQ ratio sensitivity를 확인했다. |
+
+집계 원칙:
+
+- 완료된 공통 SimPoint만 configuration 간 비교한다.
+- Workload 내부 latency는 SimPoint-weighted total cycles / weighted event count로 계산한다.
+- 전체 latency는 workload-equal mean, IPC speedup은 workload별 IPC ratio의 geometric mean을 사용한다.
+- Coverage는 correct predictions / candidate Target Loads, accuracy는 correct predictions / predictions made다.
+- 결과 인용 전 `PARAMS.out`, 완료 상태와 integrity counter를 확인한다.
+
+## 9. 현재 모델의 한계와 Open Items
+
+- Predictor-gated RF는 latency upper bound다. 실제 prediction/launch timing, RF capacity/bandwidth와 recovery를 모델링해야 한다.
+- H2P identification은 연구용 Fill Buffer와 backward walk를 사용한다. 최종 storage, lookup과 walk cost가 필요하다.
+- Random-physical은 P-IQ scheduling headroom을 분리하는 sensitivity 도구이며, 현실적인 oldest-first baseline을 대체하는 최종 성능 기준은 아니다.
+- P-IQ가 줄일 수 있는 것은 ready-op selection과 producer scheduling 지연이다. Operand-not-ready와 cache/memory wait까지 모두 제거할 수는 없다.
+- RF filtering threshold와 P-IQ ratio는 priority population, fallback과 normal-op pressure를 함께 고려해 결정해야 한다.

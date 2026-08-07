@@ -155,6 +155,7 @@ DEF_PARAM(node_issue_queue_dispatch_scheme, NODE_ISSUE_QUEUE_DISPATCH_SCHEME, un
 
 /*
  * OLDEST_FIRST : 0 (default)
+ * RANDOM_PHYSICAL : 1 (fixed physical-entry priority; no age matrix)
  */
 DEF_PARAM(node_issue_queue_schedule_scheme, NODE_ISSUE_QUEUE_SCHEDULE_SCHEME, uns, uns, 0, )
 
@@ -431,12 +432,16 @@ DEF_PARAM(zereco_iq_priority_scope, ZERECO_IQ_PRIORITY_SCOPE, uns, uns, 0, )
    stops receiving IQ priority.  Any uncovered observation resets the streak. */
 DEF_PARAM(zereco_iq_rf_covered_streak_threshold,
           ZERECO_IQ_RF_COVERED_STREAK_THRESHOLD, uns, uns, 2, )
-/* PUBS-style strict priority-IQ partitioning for the main thread.  Each
-   distributed RS reserves this percentage of its current main-thread
-   capacity for ZERECO priority ops; the remaining entries accept only normal
-   ops.  A dispatch whose matching partition is full stalls, as in PUBS. */
+/* PUBS-style priority-IQ partitioning for the main thread.  Each distributed
+   RS reserves this percentage of its current main-thread capacity for ZERECO
+   priority ops; the remaining entries are normal entries. */
 DEF_PARAM(zereco_piq_enable, ZERECO_PIQ_ENABLE, Flag, Flag, FALSE, )
 DEF_PARAM(zereco_piq_entry_percent, ZERECO_PIQ_ENTRY_PERCENT, uns, uns, 10, )
+/* Priority-entry admission policy:
+   0 = stall when no compatible Priority entry is available,
+   1 = non-stall fallback to a compatible Normal entry; a fallback op loses
+       effective scheduling priority and remains in the Normal partition. */
+DEF_PARAM(zereco_piq_dispatch_policy, ZERECO_PIQ_DISPATCH_POLICY, uns, uns, 0, )
 /* [EXPERIMENT: ZERECO_H2P_MISPRED_LATENCY_PROFILE]
    Profile execute-resolved H2P mispred/misfetch latency without changing pipeline behavior. */
 DEF_PARAM(zereco_h2p_mispred_latency_profile, ZERECO_H2P_MISPRED_LATENCY_PROFILE, Flag, Flag, FALSE, )

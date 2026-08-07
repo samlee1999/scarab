@@ -46,6 +46,10 @@ typedef enum NODE_ISSUE_QUEUE_DISPATCH_SCHEME_enum {
 
 typedef enum NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_enum {
   NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_OLDEST_FIRST,
+  /* Fixed physical-entry priority in a random-organization IQ.  This is
+   * deterministic: holes are recycled through a FIFO free list and the
+   * lower physical entry wins, matching scarab_bak's RandomSchedulePolicy. */
+  NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_RANDOM_PHYSICAL,
   NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_NUM
 } Node_Issue_Queue_Schedule_Scheme;
 
@@ -57,6 +61,11 @@ const static int32 NODE_ISSUE_QUEUE_FU_SLOT_INVALID = -1;
 
 void node_issue_queue_update();
 int64 node_dispatch_find_emptiest_rs(Op* op);
+struct Node_Stage_struct;
+void node_issue_queue_allocate_rs_entry(struct Node_Stage_struct* node_local,
+                                        Op* op, uns rs_id);
+void node_issue_queue_release_rs_entry(struct Node_Stage_struct* node_local,
+                                       Op* op);
 
 #ifdef __cplusplus
 }

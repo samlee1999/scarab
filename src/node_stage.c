@@ -150,6 +150,7 @@ Flag node_decrement_rs_counters_for_clear(Node_Stage* node_local, Op* op,
   if (rs->rs_op_count > 0) {
     rs->rs_op_count--;
     decremented = TRUE;
+    node_issue_queue_release_rs_entry(node_local, op);
   }
 
   if (op->thread_id == 1) {
@@ -234,6 +235,16 @@ static Flag node_remove_op_from_ready_list(Node_Stage* node_local, Op* target) {
 
 void init_node_stage(uns8 proc_id, const char* name) {
   ASSERT(proc_id, node);
+  ASSERTM(proc_id,
+          NODE_ISSUE_QUEUE_DISPATCH_SCHEME <
+            NODE_ISSUE_QUEUE_DISPATCH_SCHEME_NUM,
+          "Unknown node issue queue dispatch scheme %u\n",
+          NODE_ISSUE_QUEUE_DISPATCH_SCHEME);
+  ASSERTM(proc_id,
+          NODE_ISSUE_QUEUE_SCHEDULE_SCHEME <
+            NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_NUM,
+          "Unknown node issue queue schedule scheme %u\n",
+          NODE_ISSUE_QUEUE_SCHEDULE_SCHEME);
   DEBUG(proc_id, "Initializing %s stage\n", name);
 
   node->proc_id = proc_id;
@@ -563,6 +574,7 @@ static void tea_dispatch_to_rs(Stage_Data* tea_sd) {
       Reservation_Station* rs = &node->rs[rs_id];
       op->state = OS_IN_RS;
       op->rs_id = (Counter)rs_id;
+      node_issue_queue_allocate_rs_entry(node, op, (uns)rs_id);
       rs->rs_op_count++;
       rs->tea_op_count++;
 
@@ -605,6 +617,7 @@ static void tea_dispatch_retry() {
     Reservation_Station* rs = &node->rs[rs_id];
     op->state = OS_IN_RS;
     op->rs_id = (Counter)rs_id;
+    node_issue_queue_allocate_rs_entry(node, op, (uns)rs_id);
     rs->rs_op_count++;
     rs->tea_op_count++;
 
@@ -927,6 +940,15 @@ void node_retire() {
                        ready_to_issue);
         INC_STAT_EVENT(op->proc_id, ZERECO_IQ_NORMAL_READY_TO_ISSUE_AVG,
                        ready_to_issue);
+        if (op->zereco_piq_fallback) {
+          STAT_EVENT(op->proc_id, ZERECO_PIQ_FALLBACK_ISSUED_OPS);
+          INC_STAT_EVENT(op->proc_id,
+                         ZERECO_PIQ_FALLBACK_READY_TO_ISSUE_TOTAL,
+                         ready_to_issue);
+          INC_STAT_EVENT(op->proc_id,
+                         ZERECO_PIQ_FALLBACK_READY_TO_ISSUE_AVG,
+                         ready_to_issue);
+        }
         if (op->zereco_iq_normal_displaced_cycles) {
           STAT_EVENT(op->proc_id,
                      ZERECO_IQ_NORMAL_DISPLACED_RETIRED_OPS);
@@ -1358,6 +1380,7 @@ void flush_tea_ops_from_node_stage(uns proc_id) {
           op->state == OS_LOW_PRIORITY || op->state == OS_TENTATIVE) {
         if (node_local->rs[op->rs_id].rs_op_count > 0) {
           node_local->rs[op->rs_id].rs_op_count--;
+          node_issue_queue_release_rs_entry(node_local, op);
         }
         if (node_local->rs[op->rs_id].tea_op_count > 0) {
           node_local->rs[op->rs_id].tea_op_count--;
@@ -1463,8 +1486,10 @@ void flush_tea_ops_by_chain_id(uns proc_id, uns8 chain_id) {
       if (op->state == OS_IN_RS || op->state == OS_READY ||
           op->state == OS_WAIT_FWD || op->state == OS_SLEEP ||
           op->state == OS_LOW_PRIORITY || op->state == OS_TENTATIVE) {
-        if (node_local->rs[op->rs_id].rs_op_count > 0)
+        if (node_local->rs[op->rs_id].rs_op_count > 0) {
           node_local->rs[op->rs_id].rs_op_count--;
+          node_issue_queue_release_rs_entry(node_local, op);
+        }
         if (node_local->rs[op->rs_id].tea_op_count > 0)
           node_local->rs[op->rs_id].tea_op_count--;
       }

@@ -224,6 +224,7 @@ void op_pool_setup_op(uns proc_id, Op* op) {
   op->zereco_iq_priority_candidate_bit = FALSE;
   op->zereco_iq_priority_bit = FALSE;
   op->zereco_piq_entry = FALSE;
+  op->zereco_piq_fallback = FALSE;
   op->zereco_piq_dispatch_wait_cycles = 0;
   op->zereco_iq_normal_displaced_cycles = 0;
   op->off_path = FALSE;  // FIXME: check
@@ -262,6 +263,7 @@ void op_pool_setup_op(uns proc_id, Op* op) {
   op->chkpt_num = MAX_CTR;
   op->node_id = MAX_CTR;
   op->rs_id = MAX_CTR;
+  op->rs_entry_id = MAX_CTR;
   op->same_src_last_op = 0;
 
   op->oracle_info.num_srcs = 0;

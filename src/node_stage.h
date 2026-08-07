@@ -43,6 +43,10 @@ typedef struct Reservation_Station_struct {
   uns32 num_fus;                       // number of fus that this rs is connected to.
   uns32 rs_op_count;                   // number of ops in this reservation station
   uint64_t* entry_status;              // bitmask for entry status (0: empty, 1: occupied)
+  uns32* free_entry_ids;               // FIFO free list for physical IQ entry IDs
+  uns32 free_entry_head;
+  uns32 free_entry_tail;
+  uns32 free_entry_count;
 
   /* Phase 4: Per-thread RS partitioning */
   uns32 main_op_count;  // Main thread ops in this RS
