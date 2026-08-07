@@ -215,6 +215,11 @@ void init_node_stage(uns8 proc_id, const char* name) {
   node->proc_id = proc_id;
   node->sd.name = (char*)strdup(name);
 
+  /* init_exec_ports() allocates the reservation stations after this stage is
+   * initialized.  cmp_model.node_stage is malloc-allocated, so make the
+   * pre-allocation state explicit before reset_node_stage() checks it. */
+  node->rs = NULL;
+
   // allocate wires to functional units
   node->sd.max_op_count = NUM_FUS;  // Bandwidth between schedule and FUS
   node->sd.ops = (Op**)malloc(sizeof(Op*) * node->sd.max_op_count);
