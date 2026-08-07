@@ -149,6 +149,10 @@ void free_op(Op* op) {
   ASSERT(0, op);
   ASSERT(0, op->op_pool_valid);
   ASSERT(0, !op->marked);
+  ASSERTM(op->proc_id, op->rs_entry_id == MAX_CTR,
+          "Freeing op that still owns physical RS entry: op_num=%s rs=%s entry=%s state=%s\n",
+          unsstr64(op->op_num), unsstr64(op->rs_id),
+          unsstr64(op->rs_entry_id), Op_State_str(op->state));
 
   if (PIPEVIEW)
     pipeview_print_op(op);
@@ -251,6 +255,7 @@ void op_pool_setup_op(uns proc_id, Op* op) {
   op->chkpt_num = MAX_CTR;
   op->node_id = MAX_CTR;
   op->rs_id = MAX_CTR;
+  op->rs_entry_id = MAX_CTR;
   op->same_src_last_op = 0;
 
   op->oracle_info.num_srcs = 0;

@@ -145,22 +145,24 @@ Flag node_decrement_rs_counters_for_clear(Node_Stage* node_local, Op* op,
   Reservation_Station* rs = &node_local->rs[op->rs_id];
   Flag decremented = FALSE;
 
-  if (strict)
+  if (strict) {
     ASSERT(node_local->proc_id, rs->rs_op_count > 0);
-  if (rs->rs_op_count > 0) {
-    rs->rs_op_count--;
+    ASSERT(node_local->proc_id, op->rs_entry_id != MAX_CTR);
+  }
+  if (op->rs_entry_id != MAX_CTR) {
+    node_issue_queue_release_rs_entry(node_local, op);
     decremented = TRUE;
   }
 
   if (op->thread_id == 1) {
     if (strict)
       ASSERT(node_local->proc_id, rs->tea_op_count > 0);
-    if (rs->tea_op_count > 0)
+    if (decremented && rs->tea_op_count > 0)
       rs->tea_op_count--;
   } else {
     if (strict)
       ASSERT(node_local->proc_id, rs->main_op_count > 0);
-    if (rs->main_op_count > 0)
+    if (decremented && rs->main_op_count > 0)
       rs->main_op_count--;
   }
 
@@ -198,6 +200,16 @@ static Flag node_remove_op_from_ready_list(Node_Stage* node_local, Op* target) {
 
 void init_node_stage(uns8 proc_id, const char* name) {
   ASSERT(proc_id, node);
+  ASSERTM(proc_id,
+          NODE_ISSUE_QUEUE_DISPATCH_SCHEME <
+            NODE_ISSUE_QUEUE_DISPATCH_SCHEME_NUM,
+          "Unknown node issue queue dispatch scheme %u\n",
+          NODE_ISSUE_QUEUE_DISPATCH_SCHEME);
+  ASSERTM(proc_id,
+          NODE_ISSUE_QUEUE_SCHEDULE_SCHEME <
+            NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_NUM,
+          "Unknown node issue queue schedule scheme %u\n",
+          NODE_ISSUE_QUEUE_SCHEDULE_SCHEME);
   DEBUG(proc_id, "Initializing %s stage\n", name);
 
   node->proc_id = proc_id;
@@ -233,6 +245,10 @@ void reset_node_stage() {
 
   node->node_precommit = NULL;
   node->prev_op_fusable = FALSE;
+
+  /* init_node_stage() runs before RS allocation; later resets also restore
+   * the physical-entry free list and occupancy accounting. */
+  node_issue_queue_reset_rs_entries(node);
 }
 
 /**************************************************************************************/
@@ -342,17 +358,7 @@ void flush_window() {
       op->in_node_list = FALSE;
       *last = op->next_node;
       if (op->state == OS_IN_RS || op->state == OS_READY || op->state == OS_WAIT_FWD) {
-        ASSERT(op->proc_id, node->rs[op->rs_id].rs_op_count > 0);
-        node->rs[op->rs_id].rs_op_count--;
-
-        /* Phase 4: Update per-thread counter */
-        if (op->thread_id == 1) {
-          if (node->rs[op->rs_id].tea_op_count > 0)
-            node->rs[op->rs_id].tea_op_count--;
-        } else {
-          if (node->rs[op->rs_id].main_op_count > 0)
-            node->rs[op->rs_id].main_op_count--;
-        }
+        node_decrement_rs_counters_for_clear(node, op, TRUE);
 
         /* DEBUG: detect divergence */
         ASSERTM(op->proc_id,
@@ -545,7 +551,7 @@ static void tea_dispatch_to_rs(Stage_Data* tea_sd) {
       Reservation_Station* rs = &node->rs[rs_id];
       op->state = OS_IN_RS;
       op->rs_id = (Counter)rs_id;
-      rs->rs_op_count++;
+      node_issue_queue_allocate_rs_entry(node, op, (uns)rs_id);
       rs->tea_op_count++;
 
       /* Register in ready list if all sources are ready */
@@ -587,7 +593,7 @@ static void tea_dispatch_retry() {
     Reservation_Station* rs = &node->rs[rs_id];
     op->state = OS_IN_RS;
     op->rs_id = (Counter)rs_id;
-    rs->rs_op_count++;
+    node_issue_queue_allocate_rs_entry(node, op, (uns)rs_id);
     rs->tea_op_count++;
 
     if (op->srcs_not_rdy_vector == 0) {
@@ -1310,12 +1316,7 @@ void flush_tea_ops_from_node_stage(uns proc_id) {
       if (op->state == OS_IN_RS || op->state == OS_READY ||
           op->state == OS_WAIT_FWD || op->state == OS_SLEEP ||
           op->state == OS_LOW_PRIORITY || op->state == OS_TENTATIVE) {
-        if (node_local->rs[op->rs_id].rs_op_count > 0) {
-          node_local->rs[op->rs_id].rs_op_count--;
-        }
-        if (node_local->rs[op->rs_id].tea_op_count > 0) {
-          node_local->rs[op->rs_id].tea_op_count--;
-        }
+        node_decrement_rs_counters_for_clear(node_local, op, FALSE);
 
         /* DEBUG: detect divergence */
         ASSERTM(0,
@@ -1417,10 +1418,7 @@ void flush_tea_ops_by_chain_id(uns proc_id, uns8 chain_id) {
       if (op->state == OS_IN_RS || op->state == OS_READY ||
           op->state == OS_WAIT_FWD || op->state == OS_SLEEP ||
           op->state == OS_LOW_PRIORITY || op->state == OS_TENTATIVE) {
-        if (node_local->rs[op->rs_id].rs_op_count > 0)
-          node_local->rs[op->rs_id].rs_op_count--;
-        if (node_local->rs[op->rs_id].tea_op_count > 0)
-          node_local->rs[op->rs_id].tea_op_count--;
+        node_decrement_rs_counters_for_clear(node_local, op, FALSE);
       }
 
       /* Wake-up propagation: clear not-rdy bits in ops that were waiting

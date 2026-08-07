@@ -228,6 +228,28 @@ void init_exec_ports_rs_list(uns proc_id, Reservation_Station* rs, Func_Unit* lo
     ASSERTM(proc_id, tmp, "Found less RS_SIZES than expected\n");
     rs[i].size = next;
 
+    /* Physical-entry organization shared by oldest-first and
+     * RANDOM_PHYSICAL. Keeping allocation identical makes the two runs differ
+     * only in the ready-op comparator. */
+    rs[i].rs_op_count = 0;
+    rs[i].entry_status = NULL;
+    rs[i].free_entry_ids = NULL;
+    rs[i].free_entry_head = 0;
+    rs[i].free_entry_tail = 0;
+    rs[i].free_entry_count = 0;
+    if (rs[i].size) {
+      uns32 entry_status_words = (rs[i].size + 63) / 64;
+      rs[i].entry_status =
+        (uint64_t*)calloc(entry_status_words, sizeof(uint64_t));
+      rs[i].free_entry_ids =
+        (uns32*)malloc(rs[i].size * sizeof(uns32));
+      ASSERTM(proc_id, rs[i].entry_status && rs[i].free_entry_ids,
+              "Failed to allocate physical entries for RS%u\n", i);
+      for (uns32 entry_id = 0; entry_id < rs[i].size; ++entry_id)
+        rs[i].free_entry_ids[entry_id] = entry_id;
+      rs[i].free_entry_count = rs[i].size;
+    }
+
     /* TEA RS partitioning: allocate proportional to each RS's share of total.
      * Main keeps the same partition limit even when TEA is disabled, so a
      * TEA-off run does not get to use the enlarged TEA-reserved RS capacity. */

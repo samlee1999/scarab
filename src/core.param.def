@@ -155,6 +155,7 @@ DEF_PARAM(node_issue_queue_dispatch_scheme, NODE_ISSUE_QUEUE_DISPATCH_SCHEME, un
 
 /*
  * OLDEST_FIRST : 0 (default)
+ * RANDOM_PHYSICAL : 1 (fixed physical-entry priority; no age matrix)
  */
 DEF_PARAM(node_issue_queue_schedule_scheme, NODE_ISSUE_QUEUE_SCHEDULE_SCHEME, uns, uns, 0, )
 

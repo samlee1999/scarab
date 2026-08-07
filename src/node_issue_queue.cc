@@ -29,6 +29,8 @@
 
 #include "node_issue_queue.h"
 
+#include <cstring>
+
 extern "C" {
 #include "globals/assert.h"
 #include "globals/global_defs.h"
@@ -57,7 +59,125 @@ extern "C" {
 /* Prototypes */
 
 int64 node_dispatch_find_emptiest_rs(Op*);
-void node_schedule_oldest_first_sched(Op*);
+void node_schedule_policy_sched(Op*);
+
+/**************************************************************************************/
+/* Physical RS-entry lifecycle */
+
+static inline void node_issue_queue_assert_physical_accounting(
+  Node_Stage* node_local, Reservation_Station* rs, uns rs_id,
+  const Op* op) {
+  Flag mismatch = !rs->size || !rs->entry_status || !rs->free_entry_ids ||
+                  rs->free_entry_count > rs->size ||
+                  rs->rs_op_count != rs->size - rs->free_entry_count;
+  INC_STAT_EVENT(node_local->proc_id,
+                 TEA_IQ_PHYSICAL_ENTRY_INTEGRITY_MISMATCHES, mismatch);
+  ASSERTM(node_local->proc_id, !mismatch,
+          "Physical IQ entry divergence: rs=%u occupied=%u free=%u/%u op_num=%s C=%llu\n",
+          rs_id, rs->rs_op_count, rs->free_entry_count, rs->size,
+          op ? unsstr64(op->op_num) : "none", cycle_count);
+}
+
+void node_issue_queue_allocate_rs_entry(Node_Stage* node_local, Op* op,
+                                        uns rs_id) {
+  ASSERT(0, node_local && op);
+  ASSERT(node_local->proc_id, rs_id < NUM_RS);
+  Reservation_Station* rs = &node_local->rs[rs_id];
+  node_issue_queue_assert_physical_accounting(node_local, rs, rs_id, op);
+
+  Flag mismatch = !rs->free_entry_count || op->rs_entry_id != MAX_CTR;
+  INC_STAT_EVENT(node_local->proc_id,
+                 TEA_IQ_PHYSICAL_ENTRY_INTEGRITY_MISMATCHES, mismatch);
+  ASSERTM(node_local->proc_id, !mismatch,
+          "Cannot allocate physical IQ entry: rs=%u free=%u/%u old_entry=%s op_num=%s C=%llu\n",
+          rs_id, rs->free_entry_count, rs->size,
+          unsstr64(op->rs_entry_id), unsstr64(op->op_num), cycle_count);
+
+  uns32 entry_id = rs->free_entry_ids[rs->free_entry_head];
+  rs->free_entry_head = (rs->free_entry_head + 1) % rs->size;
+  rs->free_entry_count--;
+
+  mismatch = entry_id >= rs->size;
+  INC_STAT_EVENT(node_local->proc_id,
+                 TEA_IQ_PHYSICAL_ENTRY_INTEGRITY_MISMATCHES, mismatch);
+  ASSERTM(node_local->proc_id, !mismatch,
+          "Physical IQ free list returned invalid entry: rs=%u entry=%u size=%u op_num=%s C=%llu\n",
+          rs_id, entry_id, rs->size, unsstr64(op->op_num), cycle_count);
+
+  uns32 word = entry_id / 64;
+  uint64_t mask = 1ull << (entry_id % 64);
+  mismatch = rs->entry_status[word] & mask;
+  INC_STAT_EVENT(node_local->proc_id,
+                 TEA_IQ_PHYSICAL_ENTRY_INTEGRITY_MISMATCHES, mismatch);
+  ASSERTM(node_local->proc_id, !mismatch,
+          "Allocated occupied physical IQ entry: rs=%u entry=%u op_num=%s C=%llu\n",
+          rs_id, entry_id, unsstr64(op->op_num), cycle_count);
+
+  rs->entry_status[word] |= mask;
+  rs->rs_op_count++;
+  op->rs_entry_id = entry_id;
+  node_issue_queue_assert_physical_accounting(node_local, rs, rs_id, op);
+}
+
+void node_issue_queue_release_rs_entry(Node_Stage* node_local, Op* op) {
+  ASSERT(0, node_local && op);
+  ASSERT(node_local->proc_id, op->rs_id < NUM_RS);
+  Reservation_Station* rs = &node_local->rs[op->rs_id];
+  node_issue_queue_assert_physical_accounting(
+    node_local, rs, (uns)op->rs_id, op);
+
+  Flag mismatch = op->rs_entry_id >= rs->size ||
+                  !rs->rs_op_count || rs->free_entry_count >= rs->size;
+  INC_STAT_EVENT(node_local->proc_id,
+                 TEA_IQ_PHYSICAL_ENTRY_INTEGRITY_MISMATCHES, mismatch);
+  ASSERTM(node_local->proc_id, !mismatch,
+          "Cannot release physical IQ entry: rs=%s entry=%s free=%u/%u op_num=%s C=%llu\n",
+          unsstr64(op->rs_id), unsstr64(op->rs_entry_id),
+          rs->free_entry_count, rs->size, unsstr64(op->op_num), cycle_count);
+
+  uns32 entry_id = (uns32)op->rs_entry_id;
+  uns32 word = entry_id / 64;
+  uint64_t mask = 1ull << (entry_id % 64);
+  mismatch = !(rs->entry_status[word] & mask);
+  INC_STAT_EVENT(node_local->proc_id,
+                 TEA_IQ_PHYSICAL_ENTRY_INTEGRITY_MISMATCHES, mismatch);
+  ASSERTM(node_local->proc_id, !mismatch,
+          "Released free physical IQ entry: rs=%s entry=%u op_num=%s C=%llu\n",
+          unsstr64(op->rs_id), entry_id, unsstr64(op->op_num), cycle_count);
+
+  rs->entry_status[word] &= ~mask;
+  rs->free_entry_ids[rs->free_entry_tail] = entry_id;
+  rs->free_entry_tail = (rs->free_entry_tail + 1) % rs->size;
+  rs->free_entry_count++;
+  rs->rs_op_count--;
+  op->rs_entry_id = MAX_CTR;
+  node_issue_queue_assert_physical_accounting(
+    node_local, rs, (uns)op->rs_id, op);
+}
+
+void node_issue_queue_reset_rs_entries(Node_Stage* node_local) {
+  if (!node_local || !node_local->rs)
+    return;
+
+  for (uns rs_id = 0; rs_id < NUM_RS; ++rs_id) {
+    Reservation_Station* rs = &node_local->rs[rs_id];
+    if (!rs->size || !rs->entry_status || !rs->free_entry_ids)
+      continue;
+
+    std::memset(rs->entry_status, 0,
+                ((rs->size + 63) / 64) * sizeof(uint64_t));
+    for (uns32 entry_id = 0; entry_id < rs->size; ++entry_id)
+      rs->free_entry_ids[entry_id] = entry_id;
+    rs->free_entry_head = 0;
+    rs->free_entry_tail = 0;
+    rs->free_entry_count = rs->size;
+    rs->rs_op_count = 0;
+    rs->main_op_count = 0;
+    rs->tea_op_count = 0;
+    node_issue_queue_assert_physical_accounting(
+      node_local, rs, rs_id, NULL);
+  }
+}
 
 /**************************************************************************************/
 /* Issuers:
@@ -136,11 +256,43 @@ int64 node_dispatch_find_emptiest_rs(Op* op) {
  * will be ignored and available to schedule again in the next stage.
  */
 
-/*
- * OLDEST_FIRST_SCHED: will always select the oldest ready ops to schedule
- */
-void node_schedule_oldest_first_sched(Op* op) {
-  int32 youngest_slot_op_id = NODE_ISSUE_QUEUE_FU_SLOT_INVALID;
+static inline bool node_issue_queue_precedes(const Op* lhs, const Op* rhs) {
+  /* Preserve the existing TEA-first two-pass contract. A Main op examined in
+   * pass 2 must not evict a TEA op already selected in pass 1. */
+  if (lhs->thread_id != rhs->thread_id)
+    return lhs->thread_id == 1;
+
+  switch (NODE_ISSUE_QUEUE_SCHEDULE_SCHEME) {
+    case NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_OLDEST_FIRST:
+      return lhs->op_num < rhs->op_num;
+
+    case NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_RANDOM_PHYSICAL:
+      ASSERT(node->proc_id, lhs->rs_id < NUM_RS && rhs->rs_id < NUM_RS);
+      ASSERT(node->proc_id,
+             lhs->rs_entry_id < node->rs[lhs->rs_id].size);
+      ASSERT(node->proc_id,
+             rhs->rs_entry_id < node->rs[rhs->rs_id].size);
+      if (lhs->rs_id != rhs->rs_id)
+        return lhs->rs_id < rhs->rs_id;
+      if (lhs->rs_entry_id != rhs->rs_entry_id)
+        return lhs->rs_entry_id < rhs->rs_entry_id;
+      ASSERTM(node->proc_id, lhs == rhs,
+              "Two ops own the same physical IQ entry: rs=%s entry=%s lhs=%s rhs=%s C=%llu\n",
+              unsstr64(lhs->rs_id), unsstr64(lhs->rs_entry_id),
+              unsstr64(lhs->op_num), unsstr64(rhs->op_num), cycle_count);
+      return false;
+
+    default:
+      ASSERTM(node->proc_id, FALSE,
+              "Unknown node issue queue schedule scheme %u\n",
+              NODE_ISSUE_QUEUE_SCHEDULE_SCHEME);
+      return false;
+  }
+}
+
+/* Select according to the configured baseline policy. */
+void node_schedule_policy_sched(Op* op) {
+  int32 replace_slot_op_id = NODE_ISSUE_QUEUE_FU_SLOT_INVALID;
 
   // Iterate through the FUs that this RS is connected to.
   Reservation_Station* rs = &node->rs[op->rs_id];
@@ -167,30 +319,29 @@ void node_schedule_oldest_first_sched(Op* op) {
       return;
     }
 
-    if (op->op_num >= s_op->op_num) {
+    if (!node_issue_queue_precedes(op, s_op)) {
       continue;
     }
 
-    // The slot is not empty, but we are older than the op that is in the slot
-    if (youngest_slot_op_id == NODE_ISSUE_QUEUE_FU_SLOT_INVALID) {
-      youngest_slot_op_id = fu_id;
+    // The slot is occupied by a lower-ranked candidate.
+    if (replace_slot_op_id == NODE_ISSUE_QUEUE_FU_SLOT_INVALID) {
+      replace_slot_op_id = fu_id;
       continue;
     }
 
-    // check if this slot is younger than the youngest known op
-    Op* youngest_op = node->sd.ops[youngest_slot_op_id];
-    if (s_op->op_num > youngest_op->op_num) {
-      youngest_slot_op_id = fu_id;
-    }
+    // Keep the lowest-ranked compatible candidate as the replacement target.
+    Op* replace_op = node->sd.ops[replace_slot_op_id];
+    if (node_issue_queue_precedes(replace_op, s_op))
+      replace_slot_op_id = fu_id;
   }
 
-  /* Did not find an empty slot or a slot that is younger than me, do nothing */
-  if (youngest_slot_op_id == NODE_ISSUE_QUEUE_FU_SLOT_INVALID) {
+  /* Did not find an empty slot or a lower-ranked slot. */
+  if (replace_slot_op_id == NODE_ISSUE_QUEUE_FU_SLOT_INVALID) {
     return;
   }
 
-  /* Did not find an empty slot, but we did find a slot that is younger that us */
-  uns32 fu_id = youngest_slot_op_id;
+  /* Replace the lowest-ranked compatible candidate. */
+  uns32 fu_id = replace_slot_op_id;
   DEBUG(node->proc_id, "Scheduler selecting    op_num:%s  fu_id:%d op:%s l1:%d\n", unsstr64(op->op_num), fu_id,
         disasm_op(op, TRUE), op->engine_info.l1_miss);
   ASSERT(node->proc_id, fu_id < (uns32)node->sd.max_op_count);
@@ -211,7 +362,8 @@ Dispatch_Func dispatch_func_table[NODE_ISSUE_QUEUE_DISPATCH_SCHEME_NUM] = {
 
 using Schedule_Func = void (*)(Op*);
 Schedule_Func schedule_func_table[NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_NUM] = {
-    [NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_OLDEST_FIRST] = {node_schedule_oldest_first_sched},
+    [NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_OLDEST_FIRST] = {node_schedule_policy_sched},
+    [NODE_ISSUE_QUEUE_SCHEDULE_SCHEME_RANDOM_PHYSICAL] = {node_schedule_policy_sched},
 };
 
 /**************************************************************************************/
@@ -300,7 +452,7 @@ void node_issue_queue_dispatch() {
     ASSERT(node->proc_id, op->state == OS_IN_ROB);
     op->state = OS_IN_RS;
     op->rs_id = (Counter)rs_id;
-    rs->rs_op_count++;
+    node_issue_queue_allocate_rs_entry(node, op, (uns)rs_id);
     rs->main_op_count++;
 
     num_fill_rs++;
