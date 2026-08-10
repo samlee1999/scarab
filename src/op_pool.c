@@ -220,6 +220,9 @@ void op_pool_setup_op(uns proc_id, Op* op) {
   op->h2p_chain_block_start_pc = 0;
   op->h2p_chain_block_op_idx = 0;
   op->h2p_chain_profile_access_recorded = FALSE;
+  op->h2p_chain_profile_first_dcache_cycle = MAX_CTR;
+  op->mem_reqbuf_match = FALSE;
+  op->mem_reqbuf_match_prefetch = FALSE;
   op->zereco_rf_covered = FALSE;
   op->zereco_iq_priority_candidate_bit = FALSE;
   op->zereco_iq_priority_bit = FALSE;

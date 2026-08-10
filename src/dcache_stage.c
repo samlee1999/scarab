@@ -84,6 +84,8 @@ Dcache_Stage* dc = NULL;
 typedef enum H2P_Chain_Load_Profile_Result_enum {
   H2P_CHAIN_LOAD_PROFILE_RESULT_DCACHE_HIT = 0,
   H2P_CHAIN_LOAD_PROFILE_RESULT_STORE_REQ_BUFFER_HIT,
+  H2P_CHAIN_LOAD_PROFILE_RESULT_PREFETCH_MSHR_HIT,
+  H2P_CHAIN_LOAD_PROFILE_RESULT_DEMAND_MSHR_HIT,
   H2P_CHAIN_LOAD_PROFILE_RESULT_MLC_HIT,
   H2P_CHAIN_LOAD_PROFILE_RESULT_SCARAB_L1_HIT,
   H2P_CHAIN_LOAD_PROFILE_RESULT_MEM_ACCESS,
@@ -99,6 +101,8 @@ typedef struct H2P_Chain_Load_Profile_Summary_Entry_struct {
   Counter dcache_hit;
   Counter store_req_buffer_hit;
   Counter dcache_miss;
+  Counter prefetch_mshr_hit;
+  Counter demand_mshr_hit;
   Counter mlc_hit;
   Counter scarab_l1_hit;
   Counter mem_access;
@@ -1185,6 +1189,14 @@ static inline void h2p_chain_load_profile_record_result_for_entry(
     case H2P_CHAIN_LOAD_PROFILE_RESULT_STORE_REQ_BUFFER_HIT:
       entry->store_req_buffer_hit++;
       break;
+    case H2P_CHAIN_LOAD_PROFILE_RESULT_PREFETCH_MSHR_HIT:
+      entry->dcache_miss++;
+      entry->prefetch_mshr_hit++;
+      break;
+    case H2P_CHAIN_LOAD_PROFILE_RESULT_DEMAND_MSHR_HIT:
+      entry->dcache_miss++;
+      entry->demand_mshr_hit++;
+      break;
     case H2P_CHAIN_LOAD_PROFILE_RESULT_MLC_HIT:
       entry->dcache_miss++;
       entry->mlc_hit++;
@@ -1199,9 +1211,12 @@ static inline void h2p_chain_load_profile_record_result_for_entry(
       break;
   }
 
-  if (op->dcache_cycle != MAX_CTR && op->done_cycle >= op->dcache_cycle) {
+  if (op->h2p_chain_profile_first_dcache_cycle != MAX_CTR &&
+      op->done_cycle >= op->h2p_chain_profile_first_dcache_cycle) {
+    Counter latency =
+      op->done_cycle - op->h2p_chain_profile_first_dcache_cycle;
     entry->latency_samples++;
-    entry->latency_total += op->done_cycle - op->dcache_cycle;
+    entry->latency_total += latency;
   }
 }
 
@@ -1227,6 +1242,7 @@ static inline void dcache_stage_record_main_chain_load_profile_access(
   if (!first_access || !dcache_stage_main_chain_load_profile_op(op))
     return;
 
+  op->h2p_chain_profile_first_dcache_cycle = cycle_count;
   STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_DCACHE_ACCESS);
   h2p_chain_load_profile_record_access(op, line_addr);
 }
@@ -1262,17 +1278,63 @@ static inline void dcache_stage_record_main_chain_load_raw_stream_access(
           (unsigned)op->oracle_info.pred_global_hist);
 }
 
-static inline void dcache_stage_record_main_chain_load_profile_latency(Op* op) {
+static inline void dcache_stage_record_main_chain_load_profile_latency(
+  Op* op, H2P_Chain_Load_Profile_Result result) {
   if (!dcache_stage_main_chain_load_profile_op(op) ||
-      op->dcache_cycle == MAX_CTR || op->done_cycle < op->dcache_cycle)
+      op->h2p_chain_profile_first_dcache_cycle == MAX_CTR ||
+      op->done_cycle < op->h2p_chain_profile_first_dcache_cycle)
     return;
 
-  Counter latency = op->done_cycle - op->dcache_cycle;
+  Counter latency =
+    op->done_cycle - op->h2p_chain_profile_first_dcache_cycle;
   STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_LATENCY_SAMPLES);
   INC_STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_LATENCY_TOTAL,
                  latency);
   INC_STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_LATENCY_AVG,
                  latency);
+
+#define RECORD_H2P_CHAIN_LOAD_CATEGORY_LATENCY(category)                   \
+  do {                                                                     \
+    STAT_EVENT(op->proc_id,                                                \
+               H2P_CHAIN_LOAD_PROFILE_##category##_LATENCY_SAMPLES);       \
+    INC_STAT_EVENT(op->proc_id,                                            \
+                   H2P_CHAIN_LOAD_PROFILE_##category##_LATENCY_TOTAL,      \
+                   latency);                                               \
+    INC_STAT_EVENT(op->proc_id,                                            \
+                   H2P_CHAIN_LOAD_PROFILE_##category##_LATENCY_AVG,        \
+                   latency);                                               \
+    INC_STAT_EVENT(op->proc_id,                                            \
+                   H2P_CHAIN_LOAD_PROFILE_##category##_SERVICE_CYCLE_PCT,  \
+                   latency);                                               \
+  } while (0)
+
+  switch (result) {
+    case H2P_CHAIN_LOAD_PROFILE_RESULT_DCACHE_HIT:
+      RECORD_H2P_CHAIN_LOAD_CATEGORY_LATENCY(DCACHE_HIT);
+      break;
+    case H2P_CHAIN_LOAD_PROFILE_RESULT_STORE_REQ_BUFFER_HIT:
+      RECORD_H2P_CHAIN_LOAD_CATEGORY_LATENCY(STORE_FWD);
+      break;
+    case H2P_CHAIN_LOAD_PROFILE_RESULT_PREFETCH_MSHR_HIT:
+      RECORD_H2P_CHAIN_LOAD_CATEGORY_LATENCY(MSHR_HIT);
+      RECORD_H2P_CHAIN_LOAD_CATEGORY_LATENCY(PREFETCH_MSHR_HIT);
+      break;
+    case H2P_CHAIN_LOAD_PROFILE_RESULT_DEMAND_MSHR_HIT:
+      RECORD_H2P_CHAIN_LOAD_CATEGORY_LATENCY(MSHR_HIT);
+      RECORD_H2P_CHAIN_LOAD_CATEGORY_LATENCY(DEMAND_MSHR_HIT);
+      break;
+    case H2P_CHAIN_LOAD_PROFILE_RESULT_MLC_HIT:
+      RECORD_H2P_CHAIN_LOAD_CATEGORY_LATENCY(MLC_HIT);
+      break;
+    case H2P_CHAIN_LOAD_PROFILE_RESULT_SCARAB_L1_HIT:
+      RECORD_H2P_CHAIN_LOAD_CATEGORY_LATENCY(SCARAB_L1_HIT);
+      break;
+    case H2P_CHAIN_LOAD_PROFILE_RESULT_MEM_ACCESS:
+      RECORD_H2P_CHAIN_LOAD_CATEGORY_LATENCY(MEM_ACCESS);
+      break;
+  }
+
+#undef RECORD_H2P_CHAIN_LOAD_CATEGORY_LATENCY
 }
 
 static inline void dcache_stage_record_main_chain_load_profile_dcache_hit(
@@ -1282,8 +1344,9 @@ static inline void dcache_stage_record_main_chain_load_profile_dcache_hit(
 
   STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_DCACHE_HIT);
   STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_DCACHE_HIT_PCT);
-  dcache_stage_record_main_chain_load_profile_latency(op);
   h2p_chain_load_profile_record_result(
+    op, H2P_CHAIN_LOAD_PROFILE_RESULT_DCACHE_HIT);
+  dcache_stage_record_main_chain_load_profile_latency(
     op, H2P_CHAIN_LOAD_PROFILE_RESULT_DCACHE_HIT);
 }
 
@@ -1294,8 +1357,9 @@ static inline void dcache_stage_record_main_chain_load_profile_store_fwd(
 
   STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_STORE_FWD);
   STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_STORE_FWD_PCT);
-  dcache_stage_record_main_chain_load_profile_latency(op);
   h2p_chain_load_profile_record_result(
+    op, H2P_CHAIN_LOAD_PROFILE_RESULT_STORE_REQ_BUFFER_HIT);
+  dcache_stage_record_main_chain_load_profile_latency(
     op, H2P_CHAIN_LOAD_PROFILE_RESULT_STORE_REQ_BUFFER_HIT);
 }
 
@@ -1306,23 +1370,34 @@ static inline void dcache_stage_record_main_chain_load_profile_fill(Op* op,
 
   STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_DCACHE_MISS);
   STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_DCACHE_MISS_PCT);
-  if (req->mlc_hit) {
+  H2P_Chain_Load_Profile_Result result;
+  if (op->mem_reqbuf_match) {
+    STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_MSHR_HIT);
+    STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_MSHR_HIT_PCT);
+    if (op->mem_reqbuf_match_prefetch) {
+      STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_PREFETCH_MSHR_HIT);
+      STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_PREFETCH_MSHR_HIT_PCT);
+      result = H2P_CHAIN_LOAD_PROFILE_RESULT_PREFETCH_MSHR_HIT;
+    } else {
+      STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_DEMAND_MSHR_HIT);
+      STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_DEMAND_MSHR_HIT_PCT);
+      result = H2P_CHAIN_LOAD_PROFILE_RESULT_DEMAND_MSHR_HIT;
+    }
+  } else if (req->mlc_hit) {
     STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_MLC_HIT);
     STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_MLC_HIT_PCT);
-    h2p_chain_load_profile_record_result(
-      op, H2P_CHAIN_LOAD_PROFILE_RESULT_MLC_HIT);
+    result = H2P_CHAIN_LOAD_PROFILE_RESULT_MLC_HIT;
   } else if (req->l1_hit) {
     STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_SCARAB_L1_HIT);
     STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_SCARAB_L1_HIT_PCT);
-    h2p_chain_load_profile_record_result(
-      op, H2P_CHAIN_LOAD_PROFILE_RESULT_SCARAB_L1_HIT);
+    result = H2P_CHAIN_LOAD_PROFILE_RESULT_SCARAB_L1_HIT;
   } else {
     STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_MEM_ACCESS);
     STAT_EVENT(op->proc_id, H2P_CHAIN_LOAD_PROFILE_MEM_ACCESS_PCT);
-    h2p_chain_load_profile_record_result(
-      op, H2P_CHAIN_LOAD_PROFILE_RESULT_MEM_ACCESS);
+    result = H2P_CHAIN_LOAD_PROFILE_RESULT_MEM_ACCESS;
   }
-  dcache_stage_record_main_chain_load_profile_latency(op);
+  h2p_chain_load_profile_record_result(op, result);
+  dcache_stage_record_main_chain_load_profile_latency(op, result);
 }
 
 static inline H2P_Oracle_Pred_Entry* h2p_oracle_pred_get_entry(uns proc_id,
@@ -1602,6 +1677,7 @@ static void h2p_chain_load_profile_dump_entry(
   Flag include_block_key) {
   Counter lower_level_accesses =
     entry->mlc_hit + entry->scarab_l1_hit + entry->mem_access;
+  Counter mshr_hit = entry->prefetch_mshr_hit + entry->demand_mshr_hit;
   Counter stride_abs_le_4 = entry->stride_zero + entry->stride_pos_1 +
                             entry->stride_neg_1 +
                             entry->stride_small_abs_le_4;
@@ -1631,6 +1707,7 @@ static void h2p_chain_load_profile_dump_entry(
           "%u,%.6f,"
           "%llu,%.6f,"
           "%llu,%.6f,%llu,%.6f,%llu,%.6f,"
+          "%llu,%.6f,%llu,%.6f,%llu,%.6f,"
           "%llu,%.6f,%llu,%.6f,%llu,%.6f,%llu,%.6f,"
           "%llu,%llu,%.6f,%llu,%.6f,%.6f,"
           "%llu,%.6f,%llu,%.6f,%llu,%.6f,"
@@ -1647,6 +1724,12 @@ static void h2p_chain_load_profile_dump_entry(
           h2p_chain_profile_pct(entry->store_req_buffer_hit, entry->accesses),
           (unsigned long long)entry->dcache_miss,
           h2p_chain_profile_pct(entry->dcache_miss, entry->accesses),
+          (unsigned long long)mshr_hit,
+          h2p_chain_profile_pct(mshr_hit, entry->accesses),
+          (unsigned long long)entry->prefetch_mshr_hit,
+          h2p_chain_profile_pct(entry->prefetch_mshr_hit, entry->accesses),
+          (unsigned long long)entry->demand_mshr_hit,
+          h2p_chain_profile_pct(entry->demand_mshr_hit, entry->accesses),
           (unsigned long long)entry->mlc_hit,
           h2p_chain_profile_pct(entry->mlc_hit, entry->accesses),
           (unsigned long long)entry->scarab_l1_hit,
@@ -1701,6 +1784,9 @@ static void h2p_chain_load_profile_dump_table(
           "store_req_buffer_hit_after_l1_miss,"
           "store_req_buffer_hit_after_l1_miss_pct,"
           "dcache_miss,dcache_miss_pct,"
+          "mshr_hit,mshr_hit_pct,"
+          "prefetch_mshr_hit,prefetch_mshr_hit_pct,"
+          "demand_mshr_hit,demand_mshr_hit_pct,"
           "mlc_hit,mlc_hit_pct,"
           "scarab_l1_hit,scarab_l1_hit_pct,"
           "mem_access,mem_access_pct,"

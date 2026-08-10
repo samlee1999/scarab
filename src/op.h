@@ -283,6 +283,13 @@ struct Op_struct {
   Addr h2p_chain_block_start_pc;
   uns h2p_chain_block_op_idx;
   Flag h2p_chain_profile_access_recorded;
+  Counter h2p_chain_profile_first_dcache_cycle;
+  /* Set when this dynamic memory op joins an already in-flight memory
+     request.  The second bit records whether that request originated as a
+     hardware prefetch.  These per-op bits are needed because the shared
+     Mem_Req may later be promoted from a prefetch to a demand request. */
+  Flag mem_reqbuf_match;
+  Flag mem_reqbuf_match_prefetch;
   Flag h2p_oracle_pred_checked;
   Flag zereco_rf_covered;
   Flag zereco_iq_priority_candidate_bit;

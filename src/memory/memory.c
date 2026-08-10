@@ -2747,6 +2747,14 @@ Flag mem_adjust_matching_request(Mem_Req* req, Mem_Req_Type type, Addr addr, uns
     req->conf_off_path &= op->conf_off_path;
     op->req = req;
 
+    /* Preserve the match type on the dynamic op.  req->type can be promoted
+       below, and req->demand_match_prefetch is shared by every op attached to
+       the request, so neither is sufficient to classify an individual load
+       later at fill time. */
+    op->mem_reqbuf_match = TRUE;
+    op->mem_reqbuf_match_prefetch =
+      demand_hit_prefetch || req->demand_match_prefetch;
+
     if (!req->done_func)
       req->done_func = done_func;
     if (req->mlc_miss)
