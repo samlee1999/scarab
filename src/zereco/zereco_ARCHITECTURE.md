@@ -42,9 +42,7 @@ branch fetch
 
 첫 구간은 PUBS가 정의한 misspeculation interval에 해당한다. Branch가 frontend를 통과하고, dependence chain과 issue opportunity를 기다린 뒤, 실행을 마쳐 actual outcome을 드러내는 시간이다. 두 번째 구간은 processor state를 복구하고 fetch를 redirect하여 첫번째 on-path instruction이 fetch 될 때까지의 시간이다. ZERECO는 branch operand를 일찍 준비함으로써 줄일 수 있는 첫 구간을 타깃으로 한다.
 
-> **Figure_1 삽입 위치 — Baseline H2P branch penalty breakdown**
->
-> 전체 misprediction penalty에서 fetch-to-resolution과 post-resolution recovery가 차지하는 비중을 보여준다. 이 Figure는 최적화 가능한 시간 구간의 크기를 보여주는 descriptive evidence이다. 물론 해당 구간이 곧 IPC bottleneck이라는 인과 증거로 사용하지 않는다.
+Figure_1
 
 ### 2.3 Dependency wait이 reducible interval을 지배한다
 
@@ -52,9 +50,7 @@ Fetch-to-resolution은 frontend traversal, dependency wait, ready-to-issue sched
 
 이 관찰은 필요한 mechanism의 범위를 결정한다. Branch가 ready된 뒤 branch 자체에만 priority를 부여하는 것은 너무 늦다. Branch를 ready 상태로 만드는 older producer 전체를 가속해야 한다.
 
-> **Figure_2 삽입 위치 — Fetch-to-resolution stage breakdown**
->
-> Frontend, dependency, scheduling, execution으로 구간을 나누고 dependency wait이 긴 H2P resolution의 중심임을 보여준다.
+Figure_2
 
 ### 2.4 Target Load latency는 causal bottleneck이다
 
@@ -62,9 +58,7 @@ Fetch-to-resolution은 frontend traversal, dependency wait, ready-to-issue sched
 
 중요한 근거는 long-latency load와 long branch resolution이 함께 나타난다는 correlation만이 아니다. 올바르게 선택된 Target Load의 latency를 줄였을 때 dependency wait과 fetch-to-resolution이 감소하고 IPC도 함께 증가한다. 이 controlled intervention은 Target Load latency가 실제 branch misprediction penalty의 bottleneck 지점이라는 causal evidence다.
 
-> **Figure_3 삽입 위치 — Causal effect of Target-Load acceleration**
->
-> 선택된 Target Load의 latency를 줄였을 때 dependency wait, fetch-to-resolution, IPC가 함께 변화하는 결과를 보여준다.
+Figure_3
 
 ### 2.5 Target Load에는 predictable stream과 irregular tail이 공존한다
 
@@ -76,9 +70,7 @@ Target-Load access는 static load PC 전체에 균등하게 분산되지 않는�
 - Abstain, wrong address, late arrival, memory-order constraint가 발생한 load는 normal demand path를 사용한다.
 - 이러한 residual load를 포함한 branch slice는 P-IQ 대상으로 유지한다.
 
-> **Figure_4 삽입 위치 — Target-Load characterization and online predictor selectivity**
->
-> Load-PC concentration, address repeatability, predictor coverage, prediction을 생성했을 때의 accuracy를 함께 보여준다.
+Figure_4
 
 ### 2.6 RF prefetch는 primary mechanism이고 P-IQ는 complementary mechanism이다
 
@@ -292,21 +284,15 @@ Normal instruction은 reserved P-IQ entry를 빌려 쓰지 않는다. 이를 통
 
 P-IQ가 성능을 높이려면 priority가 branch dependence path의 실제 issue winner를 바꿔야 한다. Aggressive age-based scheduler는 이미 많은 older producer를 우대하므로 incremental headroom이 작을 수 있다. 반대로 age advantage를 제거한 scheduling sensitivity에서는 slice priority가 dependency wait과 IPC를 개선한다. 이는 priority scheduling의 causal potential을 보여주지만, 모든 production scheduler에서 같은 gain이 발생한다는 의미는 아니다.
 
-> **Figure_5 삽입 위치 — RF prefetch와 P-IQ의 역할 분리**
->
-> RF-only, P-IQ-only, RF + filtered P-IQ를 비교하고 P-IQ가 RF를 대체하는 주 메커니즘이 아니라 residual scheduling을 보완하는 구조임을 보여준다. Age-based scheduling이 이미 제공하는 우선순위와 age-neutral sensitivity의 차이도 함께 표시한다.
+Figure_5
 
 H2P population이 높으면 finite Priority partition을 채울 만큼 많은 candidate가 발생할 수 있다. Non-stalling admission은 fallback instruction이 더 이상 prioritized되지 않는다는 사실을 유지하면서 partition-induced blocking을 줄인다.
 
-> **Figure_6 삽입 위치 — Strict-stall과 non-stall P-IQ 비교**
->
-> Priority partition 부족으로 발생하는 dispatch blocking과 Normal fallback이 성능 및 stall에 미치는 영향을 보여준다.
+Figure_6
 
 P-IQ capacity는 protected priority capacity, fallback frequency, Normal capacity 사이의 trade-off를 만든다. 적절한 capacity는 workload와 backend organization에 따라 달라지며 보편적인 상수가 아니다.
 
-> **Figure_7 삽입 위치 — P-IQ capacity sensitivity**
->
-> P-IQ entry 비율에 따른 IPC, Priority-to-Normal fallback, dispatch pressure의 관계를 보여준다.
+Figure_7
 
 ## 8. Hardware Implementation
 
