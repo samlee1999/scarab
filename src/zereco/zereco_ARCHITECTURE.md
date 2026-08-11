@@ -379,7 +379,7 @@ H2P branch는 accuracy-only branch prediction의 한계를 드러낸다. Branch 
 
 ## References
 
-- **PUBS**, “Performance Improvement by Prioritizing the Issue of the Instructions in Unconfident Branch Slices,” MICRO 2018.
-- **Branch Runahead**, “Branch Runahead: An Alternative to Branch Prediction for Impossible to Predict Branches,” MICRO 2021.
-- **RFP**, “Register File Prefetching,” ISCA 2022.
-- **TEA**, “Timely, Efficient, and Accurate Branch Precomputation,” MICRO 2024.
+- **PUBS**, “Performance Improvement by Prioritizing the Issue of the Instructions in Unconfident Branch Slices,” MICRO 2018. 원문: [PDF](</home/lee/scarab/reference/[2018, MICRO] PUBS.pdf>)
+- **Branch Runahead**, “Branch Runahead: An Alternative to Branch Prediction for Impossible to Predict Branches,” MICRO 2021. 원문: [PDF](</home/lee/scarab/reference/[2021, MICRO] Branch Runahead_Pruett,Y.Patt.pdf>)
+- **RFP**, “Register File Prefetching,” ISCA 2022. 원문: [PDF](</home/lee/scarab/reference/[2022, ISCA] Reg File prefetching.pdf>)
+- **TEA**, “Timely, Efficient, and Accurate Branch Precomputation,” MICRO 2024. 원문: [PDF](</home/lee/scarab/reference/[2024, MICRO] Timely_Efficient_and_Accurate_Branch_Precomputation.pdf>)
