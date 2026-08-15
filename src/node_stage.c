@@ -70,6 +70,7 @@
 #include "tea/tea_thread.h"
 #include "tea/tea_rename.h"
 #include "cmp_model.h"
+#include "zereco/rfp.h"
 
 /* Macros */
 
@@ -1026,6 +1027,11 @@ void node_retire() {
 
     op->oracle_info.hbt_pred_is_hard = hbt_is_hard_branch(op->inst_info->addr);
     op->oracle_info.hbt_misp_counter = hbt_get_counter(op->inst_info->addr);
+    /* Address prediction trains here, on every committed instance in order.
+       The backward walk that fills the buffer below cannot do this job: it
+       drops ops while walking, and base_va + stride * inflight only holds if
+       no instance is skipped. */
+    rfp_retire_train(op);
     fill_buffer_add(op->proc_id, op);
 
     // free the previous register entries with same architectural destination

@@ -298,6 +298,15 @@ struct Op_struct {
   Flag zereco_piq_fallback;
   Counter zereco_piq_dispatch_wait_cycles;
   Counter zereco_iq_normal_displaced_cycles;
+  /* Timed Register File Prefetch state.  A load's prefetch is launched after
+     rename, probes the L1 with spare read ports, and is validated against the
+     architectural address at the load's first dcache attempt. */
+  Flag rfp_pt_counted;             /* rename incremented this PC's inflight count */
+  Flag rfp_launched;               /* a prefetch packet was queued for this load */
+  Flag rfp_validated;              /* validation already ran (dcache retry safe) */
+  Addr rfp_pred_va;                /* address the prefetch was launched with */
+  Counter rfp_probe_cycle;         /* cycle the prefetch accessed the L1 */
+  Counter rfp_data_ready_cycle;    /* MAX_CTR until the prefetch holds data */
 };
 
 /**************************************************************************************/

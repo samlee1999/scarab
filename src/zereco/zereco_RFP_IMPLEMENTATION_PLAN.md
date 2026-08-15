@@ -3,7 +3,10 @@
 > Last updated: 2026-08-14
 > 근거: `[2022, ISCA] Reg File prefetching.pdf` 전체 재독 (본 문서의 §, Fig, 수치는 모두 해당 논문 기준)
 > 관련 문서: `zereco_REFERENCE_NOTES.md` §1 (RFP 노트), `zereco_ARCHITECTURE.md` §6 (Target-Load RF Prefetching)
-> 상태: **계획 v4 — 사용자 검토 대기 (구현 전)**
+> 상태: **계획 v5 — Phase 0 구현 완료, Phase 1 대기**
+> v5 변경: **실험 축을 설계 시점에 전부 파라미터로 개방** (§3.10 sweep matrix) — port 실패
+> 정책/port 우선순위/queue 수명 추가, resource-contention 계측 확장, **값 corner case의
+> 측정 가능 범위 정리** (§2.7)
 > v4 변경: **훈련 경로를 Fill Buffer/BW walk 재활용 2단 구조로 재설계** (§3.2, §3.7 — walk가
 > Target Load PC를 선별하고 retire가 주소를 추적), wakeup 비투기성의 정확한 의미 (§2.2)
 > v3 변경: store 케이스 전수 분류 + STA/STD 근거 (§2.3), 논문의 데이터 공백 기록 (§2.3),
@@ -291,7 +294,9 @@ fill pollution을 실측 비용으로 낸다.
 | Inflight counter (rename++ / commit−− / squash−−) | **충실** | bc 실측 ~49 in-flight — 없으면 예측 전부 빗나감 |
 | RFP Queue FIFO + L1 port 최저우선순위 | **충실** | injected→executed 손실(논문 24%p)이 곧 대역폭·timeliness 모델 |
 | Validation 시점/조건, covered 판정 | **충실** | coverage 정의 그 자체 (ARCHITECTURE §6.4) |
-| L1-miss 정책 (drop/진행) | **충실 — 양쪽 다** | 실험으로 결정할 설계 축 |
+| L1-miss 정책 (drop/진행) | **충실 — 양쪽 다** | 실험으로 결정할 설계 축 (§3.10) |
+| Port 실패 정책 / port 우선순위 | **충실 — 전 조합** | 대역폭이 1차 제약이라 결과를 좌우한다 (§3.4, §3.10) |
+| Stale-value 창 검출 | **계측만** | 값은 oracle이라 실행에 영향 없음; 하드웨어 위험도 보고용 (§2.7) |
 | RFP-inflight bit / speculative wakeup 정렬 | **근사** — done_cycle 등가 | §2.2. 논문 서술은 원형 유지 |
 | Store 처리 (forwarding/MD/flush) | **근사** — abstain 일원화 | §2.3. MDP 오판은 oracle이라 0%; 케이스 2·3 forwarding은 보류 항목 |
 | Store STA/STD 분리 (케이스 2′) | **해당 없음** | Scarab store는 데이터·주소 source를 가진 단일 op (§2.3) |
@@ -301,6 +306,39 @@ fill pollution을 실측 비용으로 낸다.
 | PAT / DTLB / context prefetcher | **생략** | §2.4 |
 | utility(2b)/inflight(7b) 비트폭 | **하드코딩** | sweep 계획 없음 — 파라미터 표면 축소 |
 | 데이터 이동 / PRF write port | **생략** | oracle-driven sim — RFP는 순수 timing 이벤트 |
+
+### 2.7 값 정확성과 corner case — 무엇을 측정할 수 있고 무엇은 못 하는가
+
+**우려되는 시나리오**: prefetch한 값으로 H2P branch가 resolve됐는데 그 값이 틀렸다면,
+"misprediction을 mispredict"하는 사태가 난다. 잘못된 recovery를 시작하고, 진짜 결과는 나중에
+드러난다.
+
+**Scarab에서는 발생할 수 없다.** Scarab은 timing simulator이고 **값은 트레이스에서 오는
+oracle**이다. RFP는 `done_cycle`만 바꾸므로 branch가 잘못된 값으로 resolve될 방법이 없다.
+따라서 이 사태 자체를 직접 계측할 수는 없다. (P-IQ, oracle RF 실험도 전부 같은 전제 위에
+서 있다.)
+
+**대신 하드웨어에서 그 사태를 일으킬 조건의 빈도는 정확히 잴 수 있다.** 실제 RFP에서 잘못된
+값이 쓰이는 경로를 전수 분류하면:
+
+| 경로 | 하드웨어 결과 | 우리 모델 |
+|---|---|---|
+| (a) 주소 오예측 | AGU 검증이 잡아냄 → demand 경로로 폴백. **값이 틀릴 일 없음** | `RFP_WRONG_ADDR`로 계측 |
+| (b) 주소는 맞지만 probe 이후 older store가 그 위치를 덮어씀 | **stale 값 → 잘못된 resolve → flush** | §2.3 abstain으로 대부분 차단. 잔여 창을 `RFP_STALE_VALUE_WINDOW`로 계측 |
+| (c) 다른 코어의 coherence write | flush | 단일 코어 실험이라 해당 없음 |
+
+즉 **위험 경로는 (b) 하나뿐**이고, launch-시점 `MEM_DATA_DEP` abstain + probe/validation의
+`scan_stores`로 거의 닫혀 있다. 남는 창은 정확히 하나다 — **load의 rename 이전에 이미 retire
+됐지만 write가 L1에 아직 안 내려간 store가, probe와 validation 사이에 drain되는 경우.**
+
+`rfp_stale_value_check`(기본 ON)가 이 창을 잡는다: line별 last-store-write-cycle 표(직접
+사상, O(1))를 두고 validation에서 `last_store_write[line] ∈ (rfp_probe_cycle,
+validate_cycle]`인지 본다. 타이밍은 건드리지 않는 순수 계측이다. 값이 0에 가까우면 "보수적
+모델이 놓친 위험이 무시할 수준"임을 수치로 보일 수 있고, 유의미하면 그 자체가 보고할 발견이다.
+
+`RFP_STALE_VALUE_FEEDS_H2P_BRANCH`는 한 걸음 더 간다 — 그 stale 후보 load가 실제로 H2P
+branch의 slice에 속하는지까지 세어, "우리 논문이 주장하는 가속 대상에서 이 위험이 몇 번
+나타나는가"에 직접 답한다.
 
 ---
 
@@ -467,13 +505,31 @@ rfp_rename_launch(op):
 말미 배치 = 그 cycle의 잔여 대역폭만 사용 = 논문의 "lowest priority" 그대로. demand는
 구조적으로 절대 밀리지 않는다.
 
+**`RFP_PORT_PRIORITY`로 이 전제를 실험 축으로 연다** (논문 Fig 14가 이 sweep을 검증한다 —
+shared 3.1%/43.4% vs dedicated 4.0%/57.4%):
+
+| 값 | 동작 | 배치 |
+|---|---|---|
+| 0 (기본) | 잔여 port만 사용. demand 절대 안 밀림 | 함수 말미 (현재 설계) |
+| 1 | bank당 `RFP_DEDICATED_READ_PORTS`개의 **전용 추가 port**. demand는 못 씀 | 말미, 별도 port pool |
+| 2 | prefetch 우선 — demand가 치르는 비용을 보이는 상한 | demand 루프 **이전** |
+
+policy 0에서는 `RFP_DEMAND_DELAYED_BY_PREFETCH_*`가 **반드시 0**이어야 한다 (검증 조건).
+policy 1/2에서 그 값이 곧 "coverage를 더 얻기 위해 demand가 낸 비용"이다.
+
 ```
 rfp_queue_drain():  head부터 최대 RFP_DRAIN_WIDTH개:
   1. identity 검증 실패 (op->op_num/unique_num 불일치 = squash 후 재활용) → drop(stale)
   2. op->rfp_validated 이미 TRUE  → drop (stat RFP_DROP_LOAD_FIRST)
      ← 논문 §3.3 "load becomes ready → prefetch dropped". Fig 13의 24%p가 이 경로
   3. scan_stores(pred_va, size) 겹침 → drop (stat RFP_DROP_STORE_CONFLICT)  [§2.3 보수화]
-  4. bank = pred_va 기준; get_read_port(bank) 실패 → head 유지, 이번 cycle 종료 (FIFO 순서 보존)
+  4. bank = pred_va 기준; port 획득 시도 (RFP_PORT_PRIORITY에 따라 대상 port가 다름)
+       실패 시 RFP_PORT_FAIL_POLICY:
+         0 (wait) : head 유지, 이번 cycle 종료 — 논문의 oldest-first 순서 보존.
+                    head-of-line blocking은 RFP_HEAD_OF_LINE_BLOCKED_CYCLES로 계측
+         1 (drop) : 즉시 폐기 (stat RFP_DROP_PORT_UNAVAILABLE)
+         2 (skip) : head는 두고 younger entry가 앞질러 probe (stat RFP_SKIPPED_PAST_HEAD)
+       RFP_QUEUE_MAX_WAIT_CYCLES 초과 시 폐기 (stat RFP_DROP_WAIT_TIMEOUT)
   5. cache_access(&dc->dcache, pred_va, &line, RFP_PROBE_UPDATES_REPL):
        hit  → op->rfp_data_ready_cycle = cycle + DCACHE_CYCLES; dequeue (stat RFP_EXECUTED)
        miss →
@@ -560,6 +616,11 @@ ZERECO의 complexity 주장을 만드는 자체 그림**이 된다.
 | `rfp_scope` | 0 | §3.7 |
 | `rfp_l1_miss_policy` | 0/1 | **양쪽 구현, 실험으로 결정** (§3.4, Phase 4 A/B) |
 | `rfp_probe_updates_repl` | 1 | §2.5 — probe가 demand touch를 대체 |
+| `rfp_port_fail_policy` | 0 (wait) | wait / drop / skip 3안 sweep (§3.4) |
+| `rfp_queue_max_wait_cycles` | 0 (무제한) | 오래된 packet의 queue 슬롯 점유 비용 |
+| `rfp_port_priority` | 0 (잔여 port) | 0/1/2 sweep — 논문 Fig 14 대응 (§3.4) |
+| `rfp_dedicated_read_ports` | 1 | `rfp_port_priority=1`일 때만 사용 |
+| `rfp_stale_value_check` | TRUE | §2.7 corner case 계측. 타이밍 불변 |
 
 utility(2b), inflight cap(127=7b)은 하드코딩한다 (§2.6).
 
@@ -591,6 +652,32 @@ utility(2b), inflight cap(127=7b)은 하드코딩한다 (§2.6).
 
 coverage/accuracy 정의는 README §8 집계 원칙과 동일: coverage = USEFUL / CANDIDATE,
 accuracy = USEFUL / (USEFUL + WRONG_ADDR 검증분).
+
+### 3.10 실험 축 (sweep matrix)
+
+설계 시점에 이미 "실험으로 정할 것"으로 분류한 축들. 전부 파라미터로 열려 있어 재구현 없이
+sweep할 수 있다. 기본값은 **보수적인 쪽**(ZERECO에 유리하지 않은 쪽)으로 잡았다.
+
+| 축 | 파라미터 | 값 | 무엇을 답하는가 |
+|---|---|---|---|
+| **predictor 용량** | `rfp_pt_entries` × `rfp_pt_assoc` | 128 / 256 / 512 / 1K / 2K / 4K | Target Load PC가 소수에 집중된다면 vanilla보다 작은 PT로 충분한가 (논문 Fig 18 대응) |
+| **confidence 폭** | `rfp_conf_bits` | 1 / 2 / 3 / 4 | 정확도 vs coverage 트레이드오프 (논문 Fig 17: 1-bit 최적) |
+| **queue 깊이** | `rfp_queue_entries` | 16 / 32 / 64 / 128 | queue-full 손실이 실제 제약인가 |
+| **port 실패 정책** | `rfp_port_fail_policy` | wait / drop / skip | head-of-line blocking vs 순서 보존 |
+| **port 우선순위** | `rfp_port_priority` (+`rfp_dedicated_read_ports`) | 잔여 / 전용 / prefetch-우선 | L1 대역폭이 1차 제약인가 (논문 Fig 14 대응) |
+| **L1 miss 정책** | `rfp_l1_miss_policy` | drop / lower-level 진행 | 논문은 +0.02%라 했지만 우리 Target Load 분포에서도 그런가. policy 1만 pollution·MSHR 비용 발생 |
+| **scope** | `rfp_scope` | H2P Target Load / 전체 load | ZERECO의 선별이 vanilla 대비 무엇을 얻고 잃는가 |
+| **queue 수명** | `rfp_queue_max_wait_cycles` | 0 / 32 / 64 / 128 | 늦은 packet을 버리는 것이 이득인가 |
+
+**논문에 실을 계측** (설계에 이미 반영):
+
+1. **Resource contention** — `RFP_PORT_CYCLES_*` 4종으로 L1 read port를 demand/prefetch/idle로
+   분해. `rfp_port_priority=0`에서 `RFP_DEMAND_DELAYED_BY_PREFETCH_*`가 0임을 보이면 "우리
+   기본 설정은 demand를 방해하지 않는다"가 **주장이 아니라 측정**이 된다.
+2. **Corner case** — §2.7. `RFP_STALE_VALUE_WINDOW`와 그중 H2P slice에 속한 비율.
+3. **낭비된 대역폭** — `RFP_WRONG_PROBE_ACCESSES` / `RFP_LOWER_LEVEL_FILLS_WASTED`.
+4. **깔때기 손실 분해** — oracle 상한과 timed 결과의 gap이 NOT_EXECUTED(대역폭) +
+   PARTIAL(timeliness) + PT miss(용량) + QUEUE_FULL로 완전히 설명되어야 한다 (§5.6).
 
 ---
 
@@ -640,7 +727,7 @@ accuracy = USEFUL / (USEFUL + WRONG_ADDR 검증분).
 | **1** | PT + retire 훈련 + rename lookup/inflight 수명주기(free_op 훅 포함) + **profile-only** 예측·검증 (pred_va 기록, dcache에서 비교·stat만; timing/port 불변) | baseline(reg_vector 확장판)과 cycle-identical + 깔때기/정확도 stat 산출 |
 | **2** | RFP Queue + drain + 실제 L1 probe (EXECUTED가 실측이 됨; covered fast path는 아직 OFF) | demand IPC 변화 ≈ 0 (repl-update 효과뿐), EXECUTED/INJECTED가 논문 shape |
 | **3** | Validation fast path ON (`done_cycle` 단축) + `zereco_rf_covered` 연결 + assert 확장 + L1-miss policy 1 (mem_req 경로) | IPC ladder: baseline < rfp_timed ≤ oracle_stride; P-IQ filtering 동작 확인 |
-| **4** | 무결성 counter 마감 + **실험 세트** (`zereco_rfp_timed.json`): ① **PT 크기 sweep → 최적 용량 결정** (scope 0 vs 1 각각 — Target Load 집중 가설 검증) ② **L1-miss policy 0 vs 1 A/B → 논문에 "실험 근거로 선택"으로 기술** ③ conf/queue sweep | §5의 7개 항목 전부 통과 |
+| **4** | 무결성 counter 마감 + **§3.10 sweep matrix 전체 실행** (`zereco_dbg.json`의 `configurations`에 항목 추가; `simulations` 배열은 고정) | §5의 7개 항목 전부 통과 + §3.10의 계측 4종 산출 |
 
 `reg_vector` 확장 근거: Target Load의 19%(SPEC 계열: deepsjeng 48.8%, leela 61.9%,
 xz 86.5%의 H2P walk가 절단)가 태깅 단계에서 누락되어 scope=0 훈련 모집단과 coverage
@@ -666,6 +753,12 @@ xz 86.5%의 H2P walk가 절단)가 태깅 단계에서 누락되어 scope=0 훈�
 8. **RFP-inflight bit**: 시뮬레이터 미구현 / **논문 mechanism·저장량에는 포함**.
    Scarab의 wakeup은 "결과 확정 후 미래 ready cycle 통보" 방식이라 순 timing이 *완벽한
    hit-miss predictor*와 동일함을 §2.2에 코드 근거와 함께 명시
+9. **실험 축 사전 개방 (v5)**: port 실패 정책(wait/drop/skip), port 우선순위(잔여/전용/
+   prefetch-우선), queue 수명, stale-value 계측을 **Phase 0 시점에 파라미터로 정의**해
+   나중에 재구현 없이 sweep 가능하게 했다 (§3.10)
+10. **값 corner case (v5)**: Scarab은 값이 oracle이라 "잘못된 prefetch 값으로 branch가
+    resolve되는" 사태를 만들 수 없다. 대신 **하드웨어에서 그 사태를 일으킬 유일한 조건**
+    (주소는 맞고 probe 이후 store가 덮어쓰는 창)의 빈도를 계측한다 (§2.7)
 
 **보류 (실측 후 재검토)**:
 
@@ -674,4 +767,34 @@ xz 86.5%의 H2P walk가 절단)가 태깅 단계에서 누락되어 scope=0 훈�
 | 케이스 2·3 store-data forwarding (`rfp_store_fwd_enable`) | Phase 1의 `RFP_ABSTAIN_STORE_DEP` 비율 확인 후 | 낮음 — dep store의 `done_cycle`을 `rfp_data_ready_cycle`로 쓰면 끝 (§2.3) |
 | PT partial-tag aliasing, PAT, context prefetcher | 필요 시 | §2.4, §2.6 |
 
-**다음 단계**: 사용자 문서 검토 → 피드백 → Phase 0 착수.
+---
+
+## 8. Phase 0 구현 기록 (2026-08-15)
+
+빌드 확인 완료 (`./sci --build-scarab zereco_dbg`).
+
+| 항목 | 위치 |
+|---|---|
+| `reg_vector` 64bit → `[(NUM_REG_IDS+63)/64]` | [dependency_chain_cache.h](../dependency_chain_cache.h), [.c:94](../dependency_chain_cache.c#L94) |
+| 파라미터 17개 (전부 기본 비활성) | [core.param.def](../core.param.def) |
+| Op 필드 6개 + 풀 리셋 | [op.h](../op.h), [op_pool.c](../op_pool.c) |
+| 통계 ~90개 (깔때기/contention/corner case/무결성) | [zereco.stat.def](zereco.stat.def) |
+| PT·queue 자료구조 + 결정론적 LCG (실구현) | [rfp.c](rfp.c) |
+| 훅 7곳 배선 (본문은 Phase 1~3) | §4 표 |
+| `file(GLOB CONFIGURE_DEPENDS)` | [CMakeLists.txt](../CMakeLists.txt) — 새 소스가 링크 단계에서 누락되던 문제 수정 |
+| `oldest_first_chain_tag_profile` config 추가 | `scarab-infra/json/zereco_dbg.json` |
+
+주의: `rfp_enable=1`로 켜도 Phase 1 전까지는 훅 본문이 비어 있어 아무 일도 일어나지 않는다.
+
+**빌드/실행 관례**: 빌드는 `cd /home/lee/scarab-infra && ./sci --build-scarab zereco_dbg.json`.
+실행(`./sci --sim zereco_dbg`)은 사용자가 직접 수행한다. 새 실험은 `configurations`에만
+항목을 추가하고 `simulations` 배열(68 SimPoint)은 고정한다.
+
+**실행 경로 참고** (`common/scripts/run_memtrace_single_simpoint.sh`): `PARAMS.<arch>`를
+`PARAMS.in`으로 복사한 뒤 config string을 **CLI 인자로 override**한다. 따라서 `core.param.def`
+기본값 → `PARAMS.golden_cove` → config string 순으로 우선순위가 올라간다. 새 RFP 파라미터는
+기본값이 전부 비활성이라 golden_cove를 건드릴 필요가 없다. 결과는 SimPoint 디렉터리의
+`zereco.stat.0.out`(및 `.csv`)에 나오며 `.warmup` 짝이 함께 생성된다.
+
+**다음 단계**: Phase 1 — PT 훈련 + rename lookup/inflight 수명주기 + profile-only 예측·검증.
+완료 판정은 baseline과 **cycle-identical**.

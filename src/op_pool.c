@@ -60,6 +60,7 @@ allocates them once and then hands out pointers every time 'alloc_op' is called.
 #include "uop_queue_stage.h"
 #include "tea/tea_fetch_stage.h"
 #include "tea/tea_rename.h"
+#include "zereco/rfp.h"
 
 /**************************************************************************************/
 /* Macros */
@@ -157,6 +158,11 @@ void free_op(Op* op) {
       !op->tea_early_flush_delta_recorded)
     STAT_EVENT(op->proc_id, TEA_H2P_MAIN_EXEC_UNKNOWN);
 
+  /* Every op reaches here, retired or squashed, so this is where a squashed
+     load gives back the in-flight count its rename took out.  Retired loads
+     already released theirs during training and clear the flag. */
+  rfp_note_op_freed(op);
+
   op->op_pool_valid = FALSE;
   op_pool_active_ops--;
   total_free_count++;
@@ -230,6 +236,12 @@ void op_pool_setup_op(uns proc_id, Op* op) {
   op->zereco_piq_fallback = FALSE;
   op->zereco_piq_dispatch_wait_cycles = 0;
   op->zereco_iq_normal_displaced_cycles = 0;
+  op->rfp_pt_counted = FALSE;
+  op->rfp_launched = FALSE;
+  op->rfp_validated = FALSE;
+  op->rfp_pred_va = 0;
+  op->rfp_probe_cycle = MAX_CTR;
+  op->rfp_data_ready_cycle = MAX_CTR;
   op->off_path = FALSE;  // FIXME: check
   op->state = OS_FETCHED;
   op->fu_num = -1;

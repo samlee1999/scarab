@@ -75,6 +75,7 @@
 #include "tea/tea_fetch_stage.h"
 #include "tea/tea_rename.h"
 #include "zereco/h2p_mispred_latency.h"
+#include "zereco/rfp.h"
 
 /**************************************************************************************/
 /* Global vars */
@@ -137,6 +138,7 @@ void cmp_init(uns mode) {
     init_fill_buffer(proc_id, "FILL_BUFFER");
     init_dependency_chain_cache(proc_id);
     init_on_off_path_cache(proc_id);
+    rfp_init(proc_id);
 
     /* TEA Thread initialization */
     if (TEA_ENABLE) {
@@ -201,6 +203,7 @@ void cmp_reset() {
     if (TEA_ENABLE) {
       reset_tea_thread(proc_id);
     }
+    rfp_reset(proc_id);
   }
   reset_memory();
   reset_zereco_h2p_mispred_latency_profiler();

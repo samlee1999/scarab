@@ -51,8 +51,11 @@ if(DEFINED ENV{SCARAB_ENABLE_PT_MEMTRACE})
 endif()
 
 set(srcs)
-foreach(dir IN LISTS scarab_dirs) 
-    file(GLOB dir_srcs
+foreach(dir IN LISTS scarab_dirs)
+    # CONFIGURE_DEPENDS re-globs at build time.  Without it a newly added source
+    # is missing from an existing build tree until someone re-runs cmake by
+    # hand, and the only symptom is an undefined-reference at link.
+    file(GLOB dir_srcs CONFIGURE_DEPENDS
       ${dir}/*.h
       ${dir}/*.cc
       ${dir}/*.c

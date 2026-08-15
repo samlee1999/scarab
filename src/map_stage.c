@@ -51,6 +51,7 @@
 #include "op_pool.h"
 #include "statistics.h"
 #include "thread.h"
+#include "zereco/rfp.h"
 
 /**************************************************************************************/
 /* Macros */
@@ -230,6 +231,12 @@ static inline void stage_process_op(Op* op) {
 
   /* register renaming allocation */
   reg_file_rename(op);
+
+  /* The load's destination physical register now exists, which is what an RFP
+     packet needs to name its write target, and thread_map_mem_dep() above has
+     already exposed any true store dependence.  Both facts are required here,
+     so this is the launch point (paper §3.2). */
+  rfp_rename_launch(op);
 
   /* setting wake up lists */
   add_to_wake_up_lists(op, &op->oracle_info, model->wake_hook);

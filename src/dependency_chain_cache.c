@@ -5,6 +5,7 @@
 #include "globals/global_vars.h"
 #include "log/dependency_chain_log.h"
 #include "statistics.h"
+#include "zereco/rfp.h"
 #include <string.h>
 #include <stdbool.h>
 
@@ -92,17 +93,19 @@ void reset_dependency_chain_cache(uns proc_id) {
 // =================================================================
 
 static void add_reg_to_live_in_list(SourceList* list, Reg_Info* reg) {
-    if (reg->id < 64) {
-        list->reg_vector |= (1ULL << reg->id);
-    }
+    if (reg->id >= NUM_REG_IDS)
+        return;
+    list->reg_vector[reg->id / 64] |= 1ULL << (reg->id % 64);
 }
 
 static bool remove_reg_from_live_in_list(SourceList* list, Reg_Info* reg) {
-    if (reg->id < 64 && ((list->reg_vector >> reg->id) & 1ULL)) {
-        list->reg_vector &= ~(1ULL << reg->id);
-        return true;
-    }
-    return false;
+    if (reg->id >= NUM_REG_IDS)
+        return false;
+    uint64_t bit = 1ULL << (reg->id % 64);
+    if (!(list->reg_vector[reg->id / 64] & bit))
+        return false;
+    list->reg_vector[reg->id / 64] &= ~bit;
+    return true;
 }
 
 static void add_addr_to_live_in_list(SourceList* list, Addr addr) {
@@ -289,6 +292,13 @@ static void commit_dependency_chain_entry(
         target_load_count++;
         if (!ordered_ops[i].zereco_rf_covered)
             all_target_loads_rf_covered = false;
+        /* This load sits in an H2P backward slice, so it is a Target Load.
+           Under RFP_SCOPE 0 that makes it -- and only it -- eligible to own a
+           Prefetch Table entry.  Membership is what scopes RFP to the H2P
+           chain; the per-instance address tracking happens at retire. */
+        if (ordered_ops[i].inst_info)
+            rfp_note_target_load(proc_id, ordered_ops[i].inst_info->addr,
+                                 ordered_ops[i].oracle_info.va);
     }
 
     dep_entry->target_load_count = target_load_count;

@@ -153,3 +153,139 @@ DEF_STAT(ZERECO_IQ_PRIORITY_NORMAL_COMPETITION_CYCLES, COUNT, NO_RATIO)
 DEF_STAT(ZERECO_IQ_PRIORITY_NORMAL_COMPETING_PRIORITY_OPS, COUNT, NO_RATIO)
 DEF_STAT(ZERECO_PIQ_PARTITION_INTEGRITY_MISMATCHES, COUNT, NO_RATIO)
 DEF_STAT(ZERECO_PIQ_NONSTALL_INTEGRITY_MISMATCHES, COUNT, NO_RATIO)
+
+/**************************************************************************************/
+/* Timed Register File Prefetch (RFP).
+ *
+ * The funnel mirrors Fig. 13 of the RFP paper (ISCA'22) so the two can be read
+ * side by side.  Reference values there, as a fraction of all loads:
+ * injected 72%, executed 48%, useful 43.4% (34.2% full + 9.2% partial).
+ * See src/zereco/zereco_RFP_IMPLEMENTATION_PLAN.md §3.9. */
+
+/* Funnel: every load the configured scope makes eligible for a Prefetch Table
+ * entry, narrowing down to the ones whose prefetch actually saved latency. */
+DEF_STAT(RFP_CANDIDATE_LOADS, COUNT, NO_RATIO)
+DEF_STAT(RFP_PT_HIT, COUNT, NO_RATIO)
+DEF_STAT(RFP_PT_HIT_PCT, PERCENT, RFP_CANDIDATE_LOADS)
+DEF_STAT(RFP_ELIGIBLE, COUNT, NO_RATIO)
+DEF_STAT(RFP_INJECTED, COUNT, NO_RATIO)
+DEF_STAT(RFP_INJECTED_PCT, PERCENT, RFP_CANDIDATE_LOADS)
+DEF_STAT(RFP_EXECUTED, COUNT, NO_RATIO)
+DEF_STAT(RFP_EXECUTED_PCT, PERCENT, RFP_CANDIDATE_LOADS)
+DEF_STAT(RFP_USEFUL_FULL, COUNT, NO_RATIO)
+DEF_STAT(RFP_USEFUL_PARTIAL, COUNT, NO_RATIO)
+DEF_STAT(RFP_USEFUL, COUNT, NO_RATIO)
+/* Coverage over all loads, directly comparable to the paper's 43.4%. */
+DEF_STAT(RFP_USEFUL_PCT, PERCENT, RFP_CANDIDATE_LOADS)
+/* Coverage over Target Loads only -- the number ZERECO's scoped design is
+ * actually accountable for, since it never tries to accelerate the rest. */
+DEF_STAT(RFP_USEFUL_OF_TARGET_PCT, PERCENT, RFP_PT_HIT)
+
+/* Prefetch Table occupancy and turnover. */
+DEF_STAT(RFP_PT_ALLOCATED_BY_WALK, COUNT, NO_RATIO)
+DEF_STAT(RFP_PT_ALLOCATED_BY_RETIRE, COUNT, NO_RATIO)
+DEF_STAT(RFP_PT_REFRESHED_BY_WALK, COUNT, NO_RATIO)
+DEF_STAT(RFP_PT_EVICTIONS, COUNT, NO_RATIO)
+DEF_STAT(RFP_PT_STRIDE_RESETS, COUNT, NO_RATIO)
+DEF_STAT(RFP_PT_CONF_SATURATED, COUNT, NO_RATIO)
+
+/* LSQ interaction.  A load with a true store dependence is left entirely on the
+ * demand path; the paper would instead forward the store's data into the
+ * prefetch (§3.2.1 case a/b), so this counts the population that our
+ * conservative model gives up.  The paper never reports this number. */
+DEF_STAT(RFP_ABSTAIN_STORE_DEP, COUNT, NO_RATIO)
+DEF_STAT(RFP_ABSTAIN_STORE_DEP_PCT, PERCENT, RFP_CANDIDATE_LOADS)
+DEF_STAT(RFP_ABSTAIN_STORE_DEP_FWD_READY, COUNT, NO_RATIO)
+DEF_STAT(RFP_ABSTAIN_STORE_DEP_FWD_WAIT, COUNT, NO_RATIO)
+
+/* Why an injected prefetch never produced data. */
+DEF_STAT(RFP_DROP_QUEUE_FULL, COUNT, NO_RATIO)
+DEF_STAT(RFP_DROP_LOAD_FIRST, COUNT, NO_RATIO)
+DEF_STAT(RFP_DROP_STORE_CONFLICT, COUNT, NO_RATIO)
+DEF_STAT(RFP_DROP_L1_MISS, COUNT, NO_RATIO)
+DEF_STAT(RFP_DROP_MSHR_UNAVAILABLE, COUNT, NO_RATIO)
+DEF_STAT(RFP_DROP_PORT_UNAVAILABLE, COUNT, NO_RATIO)
+DEF_STAT(RFP_DROP_STALE, COUNT, NO_RATIO)
+
+/* Why validation rejected a prefetch that did produce data. */
+DEF_STAT(RFP_WRONG_ADDR, COUNT, NO_RATIO)
+DEF_STAT(RFP_WRONG_ADDR_PCT, PERCENT, RFP_CANDIDATE_LOADS)
+DEF_STAT(RFP_VAL_STORE_CONFLICT, COUNT, NO_RATIO)
+DEF_STAT(RFP_NOT_PREDICTED, COUNT, NO_RATIO)
+DEF_STAT(RFP_NOT_EXECUTED, COUNT, NO_RATIO)
+
+/* Timeliness: how far ahead of the load the prefetch data landed. */
+DEF_STAT(RFP_LEAD_TIME_SAMPLES, COUNT, NO_RATIO)
+DEF_STAT(RFP_LEAD_TIME_TOTAL, COUNT, NO_RATIO)
+DEF_STAT(RFP_LEAD_TIME_AVG, RATIO, RFP_LEAD_TIME_SAMPLES)
+DEF_STAT(RFP_LATE_CYCLES_TOTAL, COUNT, NO_RATIO)
+DEF_STAT(RFP_LATE_CYCLES_AVG, RATIO, RFP_USEFUL_PARTIAL)
+DEF_STAT(RFP_LAUNCH_TO_PROBE_TOTAL, COUNT, NO_RATIO)
+DEF_STAT(RFP_LAUNCH_TO_PROBE_AVG, RATIO, RFP_EXECUTED)
+DEF_STAT(RFP_SAVED_CYCLES_TOTAL, COUNT, NO_RATIO)
+DEF_STAT(RFP_SAVED_CYCLES_AVG, RATIO, RFP_USEFUL)
+
+/* Cost: L1 bandwidth the prefetches consumed, and the share of it wasted. */
+DEF_STAT(RFP_PROBE_L1_ACCESSES, COUNT, NO_RATIO)
+DEF_STAT(RFP_WRONG_PROBE_ACCESSES, COUNT, NO_RATIO)
+DEF_STAT(RFP_WRONG_PROBE_PCT, PERCENT, RFP_PROBE_L1_ACCESSES)
+DEF_STAT(RFP_QUEUE_OCCUPANCY_TOTAL, COUNT, NO_RATIO)
+DEF_STAT(RFP_QUEUE_FULL_CYCLES, COUNT, NO_RATIO)
+DEF_STAT(RFP_PORT_DENIED_CYCLES, COUNT, NO_RATIO)
+
+/* L1 read-port contention, split by who consumed the bandwidth.  With
+ * rfp_port_priority 0 the DEMAND_* and RFP_* counts never overlap: prefetches
+ * only take ports demand loads left idle, so RFP_DEMAND_DELAYED_* must stay
+ * zero.  Under priority 1 (dedicated ports) and 2 (prefetch first) they are the
+ * measurement of what demand traffic pays for the extra coverage. */
+DEF_STAT(RFP_PORT_CYCLES_AVAILABLE, COUNT, NO_RATIO)
+DEF_STAT(RFP_PORT_CYCLES_USED_BY_DEMAND, COUNT, NO_RATIO)
+DEF_STAT(RFP_PORT_CYCLES_USED_BY_PREFETCH, COUNT, NO_RATIO)
+DEF_STAT(RFP_PORT_CYCLES_IDLE, COUNT, NO_RATIO)
+DEF_STAT(RFP_PORT_UTILIZATION_BY_PREFETCH_PCT, PERCENT, RFP_PORT_CYCLES_AVAILABLE)
+DEF_STAT(RFP_DEMAND_DELAYED_BY_PREFETCH_OPS, COUNT, NO_RATIO)
+DEF_STAT(RFP_DEMAND_DELAYED_BY_PREFETCH_CYCLES, COUNT, NO_RATIO)
+DEF_STAT(RFP_DEDICATED_PORT_CYCLES_USED, COUNT, NO_RATIO)
+
+/* Queue residency, and the two ways a packet can leave without probing. */
+DEF_STAT(RFP_QUEUE_WAIT_TOTAL, COUNT, NO_RATIO)
+DEF_STAT(RFP_QUEUE_WAIT_AVG, RATIO, RFP_INJECTED)
+DEF_STAT(RFP_DROP_WAIT_TIMEOUT, COUNT, NO_RATIO)
+DEF_STAT(RFP_HEAD_OF_LINE_BLOCKED_CYCLES, COUNT, NO_RATIO)
+DEF_STAT(RFP_SKIPPED_PAST_HEAD, COUNT, NO_RATIO)
+
+/* L1-miss policy 1: what continuing to the lower levels actually costs. */
+DEF_STAT(RFP_LOWER_LEVEL_REQUESTS, COUNT, NO_RATIO)
+DEF_STAT(RFP_LOWER_LEVEL_FILLS, COUNT, NO_RATIO)
+DEF_STAT(RFP_LOWER_LEVEL_FILLS_USEFUL, COUNT, NO_RATIO)
+DEF_STAT(RFP_LOWER_LEVEL_FILLS_WASTED, COUNT, NO_RATIO)
+DEF_STAT(RFP_LOWER_LEVEL_FILLS_WASTED_PCT, PERCENT, RFP_LOWER_LEVEL_FILLS)
+DEF_STAT(RFP_MSHR_OCCUPANCY_TOTAL, COUNT, NO_RATIO)
+DEF_STAT(RFP_COALESCED_WITH_INFLIGHT, COUNT, NO_RATIO)
+
+/* Correctness corner case (measurement only -- Scarab's values are oracle, so
+ * this never changes execution).  A prefetch whose address was right can still
+ * hold stale data if a store drained to the L1 between the probe and the load's
+ * validation.  In hardware that is the one path by which a branch could resolve
+ * on a wrong value and "mispredict a misprediction"; here it counts how often
+ * real hardware would have had to recover.  The paper never reports it. */
+DEF_STAT(RFP_STALE_VALUE_WINDOW, COUNT, NO_RATIO)
+DEF_STAT(RFP_STALE_VALUE_WINDOW_PCT, PERCENT, RFP_USEFUL)
+DEF_STAT(RFP_STALE_VALUE_FEEDS_BRANCH, COUNT, NO_RATIO)
+DEF_STAT(RFP_STALE_VALUE_FEEDS_H2P_BRANCH, COUNT, NO_RATIO)
+DEF_STAT(RFP_COVERED_FEEDS_H2P_BRANCH, COUNT, NO_RATIO)
+
+/* Prefetch Table accounting drift.  These are diagnostics, not assertions: a
+ * finite table can evict an entry between a load's rename and its retire, which
+ * strands the in-flight count the rename took out.  Small values are the
+ * expected cost of a bounded table; a large one means it is thrashing and the
+ * predictions built on inflight are unreliable. */
+DEF_STAT(RFP_INFLIGHT_UNDERFLOW, COUNT, NO_RATIO)
+DEF_STAT(RFP_PT_EVICT_WITH_INFLIGHT, COUNT, NO_RATIO)
+
+/* Loads that re-entered the dcache stage after losing port arbitration.  Normal
+ * behavior; reported because it measures dcache port pressure. */
+DEF_STAT(RFP_VALIDATE_REENTRY, COUNT, NO_RATIO)
+
+/* Integrity: must stay at zero. */
+DEF_STAT(RFP_STALE_DEREF_BLOCKED, COUNT, NO_RATIO)

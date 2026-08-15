@@ -2,6 +2,7 @@
 #define __DEPENDENCY_CC_H__
 
 #include "globals/global_types.h"
+#include "isa/isa_macros.h"
 #include "op.h"
 #include "table_info.h"
 #include <stdbool.h>
@@ -19,11 +20,18 @@
 // 자료구조 정의
 // =================================================================
 
-#define MAX_ARCH_REGS                 64  // 추적할 아키텍처 레지스터 수
 #define MAX_MEM_LIVE_INS              16  // [논문 반영] 메모리 의존성 버퍼 크기
 
+/* The live-in vector must cover every value Reg_Info.id can take.  x86 flattens
+   to NUM_REG_IDS (95) ids, the top of which are the TMP0-TMP15 uop-cracking
+   temporaries.  A single 64-bit word silently dropped ids >= 64, so a walk whose
+   dependence flowed through a TMP register lost its producer -- e.g. the
+   "ILD r78(TMP0) <- ..." / "IADD r3 <- r78(TMP0), r3" pair that a
+   read-modify-write instruction cracks into, which hid the load from the slice. */
+#define DCC_REG_VECTOR_WORDS          ((NUM_REG_IDS + 63) / 64)
+
 typedef struct SourceList_struct {
-    uint64_t reg_vector;                  // [논문 반영] Register Bit Vector
+    uint64_t reg_vector[DCC_REG_VECTOR_WORDS];  // [논문 반영] Register Bit Vector
     Addr     addrs[MAX_MEM_LIVE_INS];     // [논문 반영] 16-entry 메모리 버퍼
     uns      addr_count;
 } SourceList;

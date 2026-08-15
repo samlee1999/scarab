@@ -60,6 +60,7 @@
 /* Phase 4.1: TEA Store Buffer */
 #include "tea/tea_store_buffer.h"
 #include "tea/tea_thread.h"
+#include "zereco/rfp.h"
 
 /**************************************************************************************/
 /* Macros */
@@ -493,6 +494,11 @@ tea_load_dcache_access:
     if (dcache_stage_try_main_chain_load_oracle(op))
       continue;
 
+    /* Validate ahead of the port check: a covered load consumed its L1 access
+       when the prefetch probed, so it must not take a port now. */
+    if (rfp_try_validate(op))
+      continue;
+
     /* check on the availability of a read port for the given bank */
     // the bank bits are the lowest order cache index bits
     uns bank = op->oracle_info.va >> dc->dcache.shift_bits & N_BIT_MASK(LOG2(DCACHE_BANKS));
@@ -607,6 +613,12 @@ tea_load_dcache_access:
     update_l2way_pref_req_queue();
   if (L2MARKV_PREF_ON && !L1MARKV_PREF_IMMEDIATE)
     update_l2markv_pref_req_queue();
+
+  /* Last claim on this cycle's dcache resources: RFP probes only ever run on
+     read ports nothing else wanted, which is how the paper gives prefetches the
+     lowest L1 arbitration priority (§3.2). */
+  rfp_queue_drain(dc->proc_id);
+
   dcache_stage_assert_occupancy("phase2");
 }
 

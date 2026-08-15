@@ -445,3 +445,67 @@ DEF_PARAM(zereco_piq_dispatch_policy, ZERECO_PIQ_DISPATCH_POLICY, uns, uns, 0, )
 /* [EXPERIMENT: ZERECO_H2P_MISPRED_LATENCY_PROFILE]
    Profile execute-resolved H2P mispred/misfetch latency without changing pipeline behavior. */
 DEF_PARAM(zereco_h2p_mispred_latency_profile, ZERECO_H2P_MISPRED_LATENCY_PROFILE, Flag, Flag, FALSE, )
+/* [EXPERIMENT: ZERECO TIMED RFP] Register File Prefetching (ISCA'22) with real
+   launch timing, L1 bandwidth contention, and finite predictor storage.  Unlike
+   the h2p_chain_perfect_load oracle -- which predicts and validates in the same
+   cycle after address generation -- this model launches after rename, probes the
+   L1 with spare read ports, and only accelerates a load whose data actually
+   arrived in time.  The two are mutually exclusive.  See
+   src/zereco/zereco_RFP_IMPLEMENTATION_PLAN.md. */
+DEF_PARAM(rfp_enable, RFP_ENABLE, Flag, Flag, FALSE, )
+/* Prefetch Table geometry.  Paper uses 1K-2K entries, 8-way (§3.1, §3.5). */
+DEF_PARAM(rfp_pt_entries, RFP_PT_ENTRIES, uns, uns, 1024, )
+DEF_PARAM(rfp_pt_assoc, RFP_PT_ASSOC, uns, uns, 8, )
+/* Confidence counter width.  Paper Fig 17: 1 bit maximizes performance because
+   wrong prefetches are cheap and wider counters cost coverage. */
+DEF_PARAM(rfp_conf_bits, RFP_CONF_BITS, uns, uns, 1, )
+/* log2 of the probability of incrementing confidence when a stride repeats.
+   Paper §3.1 increments with probability 1/16. */
+DEF_PARAM(rfp_conf_inc_prob_log2, RFP_CONF_INC_PROB_LOG2, uns, uns, 4, )
+/* RFP request FIFO depth (paper §3.5: 64 entries). */
+DEF_PARAM(rfp_queue_entries, RFP_QUEUE_ENTRIES, uns, uns, 64, )
+/* Max RFP probes drained per cycle.  Spare L1 read ports are the real limit. */
+DEF_PARAM(rfp_drain_width, RFP_DRAIN_WIDTH, uns, uns, 2, )
+/* Effective load latency once the value is prefetched into the register file. */
+DEF_PARAM(rfp_hit_latency, RFP_HIT_LATENCY, uns, uns, 1, )
+/* Which loads may own a Prefetch Table entry:
+   0 = H2P backward-slice Target Loads only, allocated by the retire-time walk
+       (ZERECO), 1 = every retired load (vanilla RFP baseline). */
+DEF_PARAM(rfp_scope, RFP_SCOPE, uns, uns, 0, )
+/* RFP probe that misses the L1: 0 = drop the request, 1 = continue to the lower
+   levels like a demand miss.  Both are evaluated; policy 1 is the only one that
+   can pollute the L1 or occupy MSHRs. */
+DEF_PARAM(rfp_l1_miss_policy, RFP_L1_MISS_POLICY, uns, uns, 0, )
+/* What a queued prefetch does when it cannot get an L1 read port this cycle:
+   0 = wait at the FIFO head, preserving the paper's oldest-first order,
+   1 = drop the request immediately,
+   2 = leave it queued but let younger entries probe past it (non-blocking FIFO).
+   Policy 0 protects order at the cost of head-of-line blocking; 2 trades order
+   for throughput.  Swept, not assumed. */
+DEF_PARAM(rfp_port_fail_policy, RFP_PORT_FAIL_POLICY, uns, uns, 0, )
+/* Cycles a packet may sit in the queue before being dropped (0 = unlimited).
+   A stale packet wastes a queue slot the next load could use, so the useful
+   lifetime is bounded by how far RFP runs ahead of its load. */
+DEF_PARAM(rfp_queue_max_wait_cycles, RFP_QUEUE_MAX_WAIT_CYCLES, uns, uns, 0, )
+/* How RFP probes compete with demand loads for L1 read ports:
+   0 = lowest priority; probes use only ports the demand loads left unused,
+   1 = dedicated ports; RFP_DEDICATED_READ_PORTS extra read ports per bank serve
+       prefetches only (paper Fig 14 measures this as 3.1% -> 4.0% speedup and
+       43.4% -> 57.4% coverage, showing L1 bandwidth is the binding constraint),
+   2 = prefetch first; an upper bound that shows what demand traffic pays. */
+DEF_PARAM(rfp_port_priority, RFP_PORT_PRIORITY, uns, uns, 0, )
+DEF_PARAM(rfp_dedicated_read_ports, RFP_DEDICATED_READ_PORTS, uns, uns, 1, )
+/* Detect the one window in which correct-address prefetched data could still be
+   stale: a store that drained to the L1 between the probe and the load's
+   validation.  Scarab's values are oracle, so this never corrupts execution --
+   the counter reports how often real hardware would have had to recover, which
+   is the number the paper needs.  Measurement only; changes no timing. */
+DEF_PARAM(rfp_stale_value_check, RFP_STALE_VALUE_CHECK, Flag, Flag, TRUE, )
+/* Let an RFP probe update L1 replacement state.  A correct prefetch replaces the
+   demand access the covered load no longer performs, so the L1 touch count is
+   preserved rather than lost (paper §3: bandwidth-neutral when correct). */
+DEF_PARAM(rfp_probe_updates_repl, RFP_PROBE_UPDATES_REPL, Flag, Flag, TRUE, )
+/* Seed stride/base from consecutive instances inside one backward-walk snapshot
+   to shorten predictor warm-up.  Snapshot-internal instances are contiguous, so
+   this is safe; across snapshots the retire path is the only valid trainer. */
+DEF_PARAM(rfp_walk_bootstrap, RFP_WALK_BOOTSTRAP, Flag, Flag, FALSE, )
