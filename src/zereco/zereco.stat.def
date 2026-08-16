@@ -174,6 +174,9 @@ DEF_STAT(RFP_EXECUTED, COUNT, NO_RATIO)
 DEF_STAT(RFP_EXECUTED_PCT, PERCENT, RFP_CANDIDATE_LOADS)
 DEF_STAT(RFP_USEFUL_FULL, COUNT, NO_RATIO)
 DEF_STAT(RFP_USEFUL_PARTIAL, COUNT, NO_RATIO)
+/* Prefetch completed but not early enough to beat the load's own L1 access, so
+ * it saved nothing.  Distinct from never having executed. */
+DEF_STAT(RFP_USEFUL_LATE, COUNT, NO_RATIO)
 DEF_STAT(RFP_USEFUL, COUNT, NO_RATIO)
 /* Coverage over all loads, directly comparable to the paper's 43.4%. */
 DEF_STAT(RFP_USEFUL_PCT, PERCENT, RFP_CANDIDATE_LOADS)
@@ -227,6 +230,9 @@ DEF_STAT(RFP_SAVED_CYCLES_AVG, RATIO, RFP_USEFUL)
 
 /* Cost: L1 bandwidth the prefetches consumed, and the share of it wasted. */
 DEF_STAT(RFP_PROBE_L1_ACCESSES, COUNT, NO_RATIO)
+/* Probes issued for wrong-path loads.  Hardware cannot tell them apart, so they
+ * consume real bandwidth even though no funnel counter credits them. */
+DEF_STAT(RFP_OFFPATH_PROBES, COUNT, NO_RATIO)
 DEF_STAT(RFP_WRONG_PROBE_ACCESSES, COUNT, NO_RATIO)
 DEF_STAT(RFP_WRONG_PROBE_PCT, PERCENT, RFP_PROBE_L1_ACCESSES)
 DEF_STAT(RFP_QUEUE_OCCUPANCY_TOTAL, COUNT, NO_RATIO)

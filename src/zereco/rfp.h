@@ -66,11 +66,22 @@ typedef struct RFP_Core_State_struct {
   Flag initialized;
   RFP_PT_Entry* pt;      /* pt_sets * RFP_PT_ASSOC entries */
   uns pt_sets;
-  RFP_Queue_Entry* queue; /* RFP_QUEUE_ENTRIES-deep FIFO */
+  /* Request FIFO.  Entries drop out by going invalid rather than by being
+     shifted, so the head skips tombstones at the start of each drain -- which
+     is also what lets RFP_PORT_FAIL_POLICY 2 probe past a blocked head. */
+  RFP_Queue_Entry* queue;
   uns queue_head;
   uns queue_count;
+  /* Extra read ports that serve prefetches only (RFP_PORT_PRIORITY 1), one set
+     per dcache bank.  Unused by the other priority policies. */
+  Ports* dedicated_ports;
+  /* Per-cycle port bookkeeping, reset on the cycle's first drain. */
+  Counter port_cycle;
+  uns ports_taken_this_cycle;
   uns64 rand_state;      /* deterministic source for the 1/16 confidence bump */
 } RFP_Core_State;
+
+struct Dcache_Stage_struct;
 
 void rfp_init(uns proc_id);
 void rfp_reset(uns proc_id);
@@ -89,9 +100,22 @@ void rfp_retire_train(Op* op);
    eligible and no older store overlaps this load. */
 void rfp_rename_launch(Op* op);
 
-/* End of the dcache stage: spend L1 read ports the demand loads left unused on
-   queued prefetches.  Demand traffic therefore always wins arbitration. */
-void rfp_queue_drain(uns proc_id);
+/* Drain queued prefetches into the L1.  Called twice per dcache cycle; the hook
+   whose position matches RFP_PORT_PRIORITY does the work and the other returns.
+   `before_demand` is TRUE at the call placed ahead of the demand loop, which is
+   where priority 2 (prefetch first) probes.  Priorities 0 and 1 run after the
+   demand loop, so they can only take ports the demand loads did not want. */
+void rfp_queue_drain(uns proc_id, struct Dcache_Stage_struct* dcache,
+                     Flag before_demand);
+
+/* End of the dcache cycle: attribute this cycle's L1 read ports to demand
+   traffic, prefetches, or idle. */
+void rfp_account_dcache_ports(uns proc_id, struct Dcache_Stage_struct* dcache);
+
+/* A demand load just failed to get a read port.  Only counts as prefetch
+   interference when a prefetch actually took a port this cycle, which cannot
+   happen under the default priority. */
+void rfp_note_demand_port_denied(uns proc_id);
 
 /* A load reached the dcache stage.  Returns TRUE when a prefetch covered it, in
    which case the load is already complete and must not access the cache. */

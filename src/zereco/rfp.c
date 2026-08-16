@@ -23,7 +23,11 @@
 #include "globals/utils.h"
 
 #include "core.param.h"
+#include "dcache_stage.h"
+#include "libs/cache_lib.h"
+#include "libs/port_lib.h"
 #include "memory/memory.h"
+#include "memory/memory.param.h"
 #include "op.h"
 #include "statistics.h"
 
@@ -139,6 +143,17 @@ void rfp_init(uns proc_id) {
   ASSERTM(proc_id, RFP_SCOPE <= 1, "rfp_scope must be 0 or 1\n");
   ASSERTM(proc_id, RFP_L1_MISS_POLICY <= 1,
           "rfp_l1_miss_policy must be 0 (drop) or 1 (continue to lower levels)\n");
+  /* Sending a probe on to the lower levels needs a fill callback and a pending
+     table, which arrive with the Phase 3 datapath.  Fail loudly rather than
+     silently dropping the miss and reporting it as policy 1. */
+  ASSERTM(proc_id, RFP_L1_MISS_POLICY == 0,
+          "rfp_l1_miss_policy 1 is not implemented yet (Phase 3)\n");
+  ASSERTM(proc_id, RFP_PORT_FAIL_POLICY <= 2,
+          "rfp_port_fail_policy must be 0 (wait), 1 (drop), or 2 (skip)\n");
+  ASSERTM(proc_id, RFP_PORT_PRIORITY <= 2,
+          "rfp_port_priority must be 0 (spare), 1 (dedicated), or 2 (prefetch first)\n");
+  ASSERTM(proc_id, RFP_PORT_PRIORITY != 1 || RFP_DEDICATED_READ_PORTS > 0,
+          "rfp_port_priority 1 needs at least one dedicated read port\n");
   ASSERTM(proc_id, RFP_PT_ASSOC > 0 && RFP_PT_ENTRIES >= RFP_PT_ASSOC &&
                      RFP_PT_ENTRIES % RFP_PT_ASSOC == 0,
           "rfp_pt_entries (%u) must be a non-zero multiple of rfp_pt_assoc (%u)\n",
@@ -158,8 +173,22 @@ void rfp_init(uns proc_id) {
   ASSERTM(proc_id, state->pt && state->queue,
           "Failed to allocate RFP Prefetch Table / request queue\n");
 
+  if (RFP_PORT_PRIORITY == 1) {
+    state->dedicated_ports = (Ports*)calloc(DCACHE_BANKS, sizeof(Ports));
+    ASSERTM(proc_id, state->dedicated_ports,
+            "Failed to allocate RFP dedicated dcache ports\n");
+    for (uns bank = 0; bank < DCACHE_BANKS; ++bank) {
+      char name[MAX_STR_LENGTH + 1];
+      snprintf(name, MAX_STR_LENGTH, "RFP DCACHE BANK %u PORTS", bank);
+      init_ports(&state->dedicated_ports[bank], name, RFP_DEDICATED_READ_PORTS,
+                 0, FALSE);
+    }
+  }
+
   state->queue_head = 0;
   state->queue_count = 0;
+  state->port_cycle = MAX_CTR;
+  state->ports_taken_this_cycle = 0;
   state->rand_state = 0x9E3779B97F4A7C15ULL ^ ((uns64)proc_id + 1);
   state->initialized = TRUE;
 }
@@ -173,6 +202,8 @@ void rfp_reset(uns proc_id) {
   memset(state->queue, 0, sizeof(RFP_Queue_Entry) * RFP_QUEUE_ENTRIES);
   state->queue_head = 0;
   state->queue_count = 0;
+  state->port_cycle = MAX_CTR;
+  state->ports_taken_this_cycle = 0;
 }
 
 /**************************************************************************************/
@@ -375,12 +406,30 @@ void rfp_rename_launch(Op* op) {
   /* base_va is the last retired address and inflight counts the instances
      between it and this one, so this lands on the address this load will
      compute -- if the stride held (paper §3.1). */
-  op->rfp_pred_va = (Addr)((int64)entry->base_va +
-                           entry->stride * (int64)entry->inflight);
-  op->rfp_launched = TRUE;
+  Addr pred_va = (Addr)((int64)entry->base_va +
+                        entry->stride * (int64)entry->inflight);
 
-  /* Phase 1 has no request queue, so injection cannot fail yet; Phase 2 makes
-     this subject to queue capacity and turns the gap into RFP_DROP_QUEUE_FULL. */
+  RFP_Core_State* state = rfp_get_state(proc_id);
+  if (state->queue_count >= RFP_QUEUE_ENTRIES) {
+    /* The queue is the packet's only path to the L1, so a full queue is a lost
+       prefetch -- not a stalled one.  The load proceeds normally. */
+    if (on_path)
+      STAT_EVENT(proc_id, RFP_DROP_QUEUE_FULL);
+    return;
+  }
+
+  RFP_Queue_Entry* slot =
+    &state->queue[(state->queue_head + state->queue_count) % RFP_QUEUE_ENTRIES];
+  slot->op = op;
+  slot->op_num = op->op_num;
+  slot->unique_num = op->unique_num;
+  slot->pred_va = pred_va;
+  slot->mem_size = op->oracle_info.mem_size;
+  slot->launch_cycle = cycle_count;
+  state->queue_count++;
+
+  op->rfp_pred_va = pred_va;
+  op->rfp_launched = TRUE;
   if (on_path) {
     STAT_EVENT(proc_id, RFP_INJECTED);
     STAT_EVENT(proc_id, RFP_INJECTED_PCT);
@@ -390,12 +439,193 @@ void rfp_rename_launch(Op* op) {
 /**************************************************************************************/
 /* Dcache hooks */
 
-void rfp_queue_drain(uns proc_id) {
+/* A queue slot is live while it still points at its op; dropping a packet just
+   clears the pointer, and the head walks past the tombstones. */
+static inline void rfp_queue_compact(RFP_Core_State* state) {
+  while (state->queue_count && !state->queue[state->queue_head].op) {
+    state->queue_head = (state->queue_head + 1) % RFP_QUEUE_ENTRIES;
+    state->queue_count--;
+  }
+}
+
+void rfp_queue_drain(uns proc_id, Dcache_Stage* dcache, Flag before_demand) {
   if (!rfp_active())
     return;
-  (void)proc_id;
-  /* Phase 2: drain up to RFP_DRAIN_WIDTH packets using read ports the demand
-     loads left unused this cycle. */
+  /* Exactly one of the two call sites does the work, chosen by the policy:
+     priority 2 probes ahead of the demand loop, everything else after it. */
+  if (before_demand != (RFP_PORT_PRIORITY == 2))
+    return;
+
+  RFP_Core_State* state = rfp_get_state(proc_id);
+  if (!state->initialized)
+    return;
+
+  if (state->port_cycle != cycle_count) {
+    state->port_cycle = cycle_count;
+    state->ports_taken_this_cycle = 0;
+  }
+
+  rfp_queue_compact(state);
+  INC_STAT_EVENT(proc_id, RFP_QUEUE_OCCUPANCY_TOTAL, state->queue_count);
+  if (state->queue_count >= RFP_QUEUE_ENTRIES)
+    STAT_EVENT(proc_id, RFP_QUEUE_FULL_CYCLES);
+
+  uns probes = 0;
+  for (uns ii = 0; ii < state->queue_count && probes < RFP_DRAIN_WIDTH; ++ii) {
+    RFP_Queue_Entry* e =
+      &state->queue[(state->queue_head + ii) % RFP_QUEUE_ENTRIES];
+    Op* op = e->op;
+    if (!op)
+      continue;
+
+    /* Funnel counters follow on-path work, but an off-path prefetch still costs
+       real L1 bandwidth, so the resource counters below stay ungated. */
+    Flag on_path = !op->off_path;
+
+    /* The op pool recycles entries after a squash, so the packet is only
+       meaningful while the op it named still exists. */
+    if (!op->op_pool_valid || op->unique_num != e->unique_num ||
+        op->op_num != e->op_num) {
+      if (on_path)
+        STAT_EVENT(proc_id, RFP_DROP_STALE);
+      e->op = NULL;
+      continue;
+    }
+
+    /* The load reached the dcache stage first, so there is no latency left to
+       hide (paper §3.3 drops the prefetch in exactly this case). */
+    if (op->rfp_validated) {
+      if (on_path)
+        STAT_EVENT(proc_id, RFP_DROP_LOAD_FIRST);
+      e->op = NULL;
+      continue;
+    }
+
+    if (RFP_QUEUE_MAX_WAIT_CYCLES &&
+        cycle_count - e->launch_cycle > RFP_QUEUE_MAX_WAIT_CYCLES) {
+      if (on_path)
+        STAT_EVENT(proc_id, RFP_DROP_WAIT_TIMEOUT);
+      e->op = NULL;
+      continue;
+    }
+
+    /* An older store still draining to memory can own this address (§2.3). */
+    if (scan_stores(e->pred_va, e->mem_size)) {
+      if (on_path)
+        STAT_EVENT(proc_id, RFP_DROP_STORE_CONFLICT);
+      e->op = NULL;
+      continue;
+    }
+
+    uns bank = (uns)((e->pred_va >> dcache->dcache.shift_bits) &
+                     N_BIT_MASK(LOG2(DCACHE_BANKS)));
+    Ports* ports = (RFP_PORT_PRIORITY == 1) ? &state->dedicated_ports[bank]
+                                            : &dcache->ports[bank];
+    if (!get_read_port(ports)) {
+      STAT_EVENT(proc_id, RFP_PORT_DENIED_CYCLES);
+      if (RFP_PORT_FAIL_POLICY == 1) {
+        if (on_path)
+          STAT_EVENT(proc_id, RFP_DROP_PORT_UNAVAILABLE);
+        e->op = NULL;
+        continue;
+      }
+      if (RFP_PORT_FAIL_POLICY == 2) {
+        STAT_EVENT(proc_id, RFP_SKIPPED_PAST_HEAD);
+        continue; /* let a younger packet use the bandwidth instead */
+      }
+      /* Policy 0 keeps the paper's oldest-first order and retries next cycle. */
+      STAT_EVENT(proc_id, RFP_HEAD_OF_LINE_BLOCKED_CYCLES);
+      break;
+    }
+
+    if (RFP_PORT_PRIORITY == 1)
+      STAT_EVENT(proc_id, RFP_DEDICATED_PORT_CYCLES_USED);
+    else
+      state->ports_taken_this_cycle++;
+    probes++;
+
+    /* Both averages divide by on-path counters (RFP_EXECUTED, RFP_INJECTED), so
+       the numerators have to follow the same population -- otherwise off-path
+       waits inflate the reported wait by the off-path probe ratio. */
+    Counter waited = cycle_count - e->launch_cycle;
+    if (on_path) {
+      INC_STAT_EVENT(proc_id, RFP_LAUNCH_TO_PROBE_TOTAL, waited);
+      INC_STAT_EVENT(proc_id, RFP_LAUNCH_TO_PROBE_AVG, waited);
+      INC_STAT_EVENT(proc_id, RFP_QUEUE_WAIT_TOTAL, waited);
+      INC_STAT_EVENT(proc_id, RFP_QUEUE_WAIT_AVG, waited);
+    }
+    STAT_EVENT(proc_id, RFP_PROBE_L1_ACCESSES);
+    if (!on_path)
+      STAT_EVENT(proc_id, RFP_OFFPATH_PROBES);
+
+    Addr line_addr;
+    Dcache_Data* line = (Dcache_Data*)cache_access(
+      &dcache->dcache, e->pred_va, &line_addr, RFP_PROBE_UPDATES_REPL);
+    /* Record the probe whether it hit or missed: the port was spent either way,
+       which is what the wasted-bandwidth accounting needs. */
+    op->rfp_probe_cycle = cycle_count;
+    if (line) {
+      /* The line is in the L1, so the value reaches the register file after the
+         usual access latency.  Whether that beats the load's own access is
+         decided at validation. */
+      op->rfp_data_ready_cycle = cycle_count + DCACHE_CYCLES;
+      if (on_path) {
+        STAT_EVENT(proc_id, RFP_EXECUTED);
+        STAT_EVENT(proc_id, RFP_EXECUTED_PCT);
+      }
+    } else if (on_path) {
+      /* Policy 0 abandons a missing prefetch and lets the load fetch the line
+         itself.  Continuing to the lower levels arrives with Phase 3. */
+      STAT_EVENT(proc_id, RFP_DROP_L1_MISS);
+    }
+    e->op = NULL;
+  }
+
+  rfp_queue_compact(state);
+}
+
+void rfp_account_dcache_ports(uns proc_id, Dcache_Stage* dcache) {
+  if (!rfp_active())
+    return;
+  RFP_Core_State* state = rfp_get_state(proc_id);
+  if (!state->initialized)
+    return;
+
+  uns used = 0;
+  for (uns bank = 0; bank < DCACHE_BANKS; ++bank) {
+    Ports* p = &dcache->ports[bank];
+    if (p->read_last_cycle == cycle_count)
+      used += p->read_ports_in_use;
+  }
+
+  uns available = DCACHE_BANKS * DCACHE_READ_PORTS;
+  uns by_prefetch =
+    (state->port_cycle == cycle_count) ? state->ports_taken_this_cycle : 0;
+  /* Dedicated ports live outside the demand pool, so they never show up in
+     `used`; keep the two accounted separately. */
+  uns by_demand = used > by_prefetch ? used - by_prefetch : 0;
+
+  INC_STAT_EVENT(proc_id, RFP_PORT_CYCLES_AVAILABLE, available);
+  INC_STAT_EVENT(proc_id, RFP_PORT_CYCLES_USED_BY_DEMAND, by_demand);
+  INC_STAT_EVENT(proc_id, RFP_PORT_CYCLES_USED_BY_PREFETCH, by_prefetch);
+  INC_STAT_EVENT(proc_id, RFP_PORT_UTILIZATION_BY_PREFETCH_PCT, by_prefetch);
+  INC_STAT_EVENT(proc_id, RFP_PORT_CYCLES_IDLE,
+                 available > used ? available - used : 0);
+}
+
+void rfp_note_demand_port_denied(uns proc_id) {
+  if (!rfp_active())
+    return;
+  RFP_Core_State* state = rfp_get_state(proc_id);
+  if (!state->initialized)
+    return;
+  /* Only prefetches that actually took a demand port this cycle can be blamed.
+     Under the default priority the drain runs after every demand load, so this
+     must stay at zero -- that is the check that "RFP never delays demand". */
+  if (state->port_cycle == cycle_count && state->ports_taken_this_cycle) {
+    STAT_EVENT(proc_id, RFP_DEMAND_DELAYED_BY_PREFETCH_OPS);
+    INC_STAT_EVENT(proc_id, RFP_DEMAND_DELAYED_BY_PREFETCH_CYCLES, 1);
+  }
 }
 
 Flag rfp_try_validate(Op* op) {
@@ -425,6 +655,10 @@ Flag rfp_try_validate(Op* op) {
   if (op->rfp_pred_va != op->oracle_info.va) {
     STAT_EVENT(proc_id, RFP_WRONG_ADDR);
     STAT_EVENT(proc_id, RFP_WRONG_ADDR_PCT);
+    /* A wrong prefetch that already probed spent L1 bandwidth for nothing --
+       the only bandwidth RFP adds over the baseline (paper §3). */
+    if (op->rfp_probe_cycle != MAX_CTR)
+      STAT_EVENT(proc_id, RFP_WRONG_PROBE_ACCESSES);
     return FALSE;
   }
 
@@ -435,11 +669,48 @@ Flag rfp_try_validate(Op* op) {
     return FALSE;
   }
 
-  /* Phase 1 stops here: the address was right and nothing forbade the prefetch,
-     but no probe ran, so there is no data and no latency to save.  This counts
-     the coverage a perfectly timely, bandwidth-free RFP would reach -- the
-     ceiling Phase 2/3 are measured against. */
-  STAT_EVENT(proc_id, RFP_NOT_EXECUTED);
+  /* The address was right and nothing forbade the prefetch.  What remains is
+     whether the data actually got here in time to save anything. */
+  if (op->rfp_data_ready_cycle == MAX_CTR) {
+    STAT_EVENT(proc_id, RFP_NOT_EXECUTED);
+    return FALSE;
+  }
+
+  /* Earliest the register file could supply the value, and what the load would
+     otherwise pay.  The prefetch hit the L1, so the demand access would hit
+     too -- DCACHE_CYCLES is the right comparison, not a miss latency. */
+  Counter ready = op->rfp_data_ready_cycle;
+  Counter deliver = MAX2(ready, cycle_count + RFP_HIT_LATENCY);
+  Counter demand_done =
+    cycle_count + DCACHE_CYCLES + op->inst_info->extra_ld_latency;
+
+  if (deliver >= demand_done) {
+    /* The prefetch completed, but not early enough to beat the load's own
+       access, so it saves nothing. */
+    STAT_EVENT(proc_id, RFP_USEFUL_LATE);
+    INC_STAT_EVENT(proc_id, RFP_LATE_CYCLES_TOTAL, deliver - demand_done);
+    return FALSE;
+  }
+
+  if (ready <= cycle_count) {
+    STAT_EVENT(proc_id, RFP_USEFUL_FULL);
+    STAT_EVENT(proc_id, RFP_LEAD_TIME_SAMPLES);
+    INC_STAT_EVENT(proc_id, RFP_LEAD_TIME_TOTAL, cycle_count - ready);
+    INC_STAT_EVENT(proc_id, RFP_LEAD_TIME_AVG, cycle_count - ready);
+  } else {
+    STAT_EVENT(proc_id, RFP_USEFUL_PARTIAL);
+    INC_STAT_EVENT(proc_id, RFP_LATE_CYCLES_TOTAL, ready - cycle_count);
+    INC_STAT_EVENT(proc_id, RFP_LATE_CYCLES_AVG, ready - cycle_count);
+  }
+
+  STAT_EVENT(proc_id, RFP_USEFUL);
+  STAT_EVENT(proc_id, RFP_USEFUL_PCT);
+  STAT_EVENT(proc_id, RFP_USEFUL_OF_TARGET_PCT);
+  INC_STAT_EVENT(proc_id, RFP_SAVED_CYCLES_TOTAL, demand_done - deliver);
+  INC_STAT_EVENT(proc_id, RFP_SAVED_CYCLES_AVG, demand_done - deliver);
+
+  /* Phase 2 measures only.  Phase 3 returns TRUE here and completes the load
+     without a cache access, which is where the saved cycles become real. */
   return FALSE;
 }
 

@@ -501,10 +501,15 @@ DEF_PARAM(rfp_dedicated_read_ports, RFP_DEDICATED_READ_PORTS, uns, uns, 1, )
    the counter reports how often real hardware would have had to recover, which
    is the number the paper needs.  Measurement only; changes no timing. */
 DEF_PARAM(rfp_stale_value_check, RFP_STALE_VALUE_CHECK, Flag, Flag, TRUE, )
-/* Let an RFP probe update L1 replacement state.  A correct prefetch replaces the
-   demand access the covered load no longer performs, so the L1 touch count is
-   preserved rather than lost (paper §3: bandwidth-neutral when correct). */
-DEF_PARAM(rfp_probe_updates_repl, RFP_PROBE_UPDATES_REPL, Flag, Flag, TRUE, )
+/* Whether an RFP probe counts as a demand access to the L1.  cache_access() with
+   update_repl does three things: it updates replacement state, clears the line's
+   prefetch bit, and increments the demand-access count that feeds prefetcher
+   throttling.  All three are correct once a covered load stops performing its
+   own access -- the probe then stands in for it.  Until then the load still
+   accesses the cache, so counting the probe as well double-counts and perturbs
+   the very baseline the measurement is compared against.  Default off; turn it
+   on together with the covered fast path. */
+DEF_PARAM(rfp_probe_updates_repl, RFP_PROBE_UPDATES_REPL, Flag, Flag, FALSE, )
 /* Seed stride/base from consecutive instances inside one backward-walk snapshot
    to shorten predictor warm-up.  Snapshot-internal instances are contiguous, so
    this is safe; across snapshots the retire path is the only valid trainer. */

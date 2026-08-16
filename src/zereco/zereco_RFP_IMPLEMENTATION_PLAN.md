@@ -796,5 +796,105 @@ xz 86.5%의 H2P walk가 절단)가 태깅 단계에서 누락되어 scope=0 훈�
 기본값이 전부 비활성이라 golden_cove를 건드릴 필요가 없다. 결과는 SimPoint 디렉터리의
 `zereco.stat.0.out`(및 `.csv`)에 나오며 `.warmup` 짝이 함께 생성된다.
 
-**다음 단계**: Phase 1 — PT 훈련 + rename lookup/inflight 수명주기 + profile-only 예측·검증.
-완료 판정은 baseline과 **cycle-identical**.
+---
+
+## 9. Phase 1 결과 (2026-08-15, `260815_RFP_baseline_oldest_first`)
+
+**검증 통과**: 3개 config가 68 SimPoint 전수에서 cycle-identical, 그리고 새 baseline이 기존
+`zereco/baseline_oldest_first`와 완전 일치 — **reg_vector 수정도 Phase 1도 타이밍을 바꾸지
+않았다.** §2.2의 "walk 결과를 아무도 읽지 않으면 timing 불변" 추론이 실측으로 확인됐다.
+
+| 측정 | scope 0 (Target Load) | scope 1 (전체 load) |
+|---|---:|---:|
+| Target Load 비율 (PT_HIT / 전체 load) | 59.2% | 94.0% |
+| injected | 29.0% | 46.7% |
+| 주소 정확도 (correct / launched) | 92.6% | 95.1% |
+| coverage 상한 (대역폭·timeliness 무한 가정) | 26.8% of loads / **45.4% of Target Loads** | 44.4% of loads |
+| **PT 할당 / 축출** | **155K / 134K** | **18.9M / 18.9M** |
+
+**논문에 없는 숫자 두 개**:
+
+1. **PT 압력이 122배 차이난다.** 같은 1024-entry PT로 vanilla는 clang/gcc/deepsjeng/omnetpp에서
+   **축출률 100%**(완전 스래싱)인데 ZERECO scope는 대부분 들어맞는다(omnetpp 1,673 할당 / 1 축출).
+   Target Load 기준 coverage는 45.4% vs 44.4%로 동등하므로 — **훨씬 작은 predictor로 같은
+   성능**이 complexity 주장의 실측 근거가 된다. 예외는 gcc(scope 0에서도 97% 축출)로, PT 크기
+   sweep에서 주목할 워크로드다.
+2. **store abstain 비용은 Target Load의 10.7%.** 그중 store 데이터가 이미 준비된 경우(논문
+   case a, 즉시 forwarding)는 12.1%뿐이고 나머지는 store 완료를 기다려야 한다 ⇒ §2.3의
+   보류 결정이 타당했고, 나중에 붙일 여지도 그만큼이다.
+
+**설계 추론 확인**: validation 시점 store conflict가 347M load 중 **1,362건**. §2.3에서
+"launch-시점 abstain이 `scan_stores`가 잡던 창을 거의 닫는다"고 한 추론 그대로다.
+
+**기각된 우려**: `RFP_VALIDATE_REENTRY`(142.8M)를 port 경쟁으로 읽었으나 오독이었다 —
+`STALL_ON_WAIT_MEM`이 기본 TRUE라 **miss 대기 op도 dcache stage에 잔류해 매 cycle 재계수**된다.
+실제 L1D read port 사용률을 직접 재보니 **33.3%(2/3가 유휴)** 였다. 정확한 예측 하나당 demand
+access가 사라지므로 순 대역폭 증가는 오예측분뿐(≈ +0.85%)이고, 기본 정책에서는 아무도 쓰지 않는
+port cycle만 가져가므로 demand가 밀릴 수 없다.
+
+---
+
+## 10. Phase 2 구현 (2026-08-16)
+
+빌드 확인 완료. 실험 디스크립터: `260816_RFP_phase2_oldest_first`, 4 config × 68 SimPoint.
+
+**구현**: RFP Queue(tombstone FIFO) + 실제 L1 probe. `rfp_rename_launch`가 packet을 큐에
+넣고(용량 초과 시 `RFP_DROP_QUEUE_FULL`), `rfp_queue_drain`이 stale/load-first/timeout/
+store-conflict를 거른 뒤 port를 얻어 `cache_access`로 probe한다. **`rfp_try_validate`는 여전히
+FALSE를 반환**하므로 covered load의 latency는 아직 줄지 않는다 — 다만 full/partial/late를
+구분해 **coverage는 이번에 실측**된다.
+
+| 정책 | 파라미터 | 구현 |
+|---|---|---|
+| port 우선순위 | `rfp_port_priority` | 0 잔여 / 1 전용 port(별도 `Ports` 풀) / 2 prefetch 우선(demand 루프 앞에서 drain) |
+| port 실패 | `rfp_port_fail_policy` | 0 wait(head 유지) / 1 drop / 2 skip(younger가 앞지름) |
+| L1 miss | `rfp_l1_miss_policy` | **0(drop)만 구현**; 1은 fill 콜백과 pending 테이블이 필요해 Phase 3. `rfp_init`이 1을 assert로 거부해 조용한 오작동을 막는다 |
+
+**`rfp_probe_updates_repl` 기본값을 FALSE로 바꿨다.** `cache_access(update_repl=TRUE)`는
+replacement 갱신만 하는 게 아니라 **line의 prefetch 비트를 지우고 `num_demand_access`를
+증가**시킨다([cache_lib.c:230-235](../libs/cache_lib.c#L230)). 이 셋은 covered load가 자기
+cache access를 생략하게 되는 시점(Phase 3)부터는 옳지만, 지금은 load가 여전히 접근하므로
+**이중 계상**이 되고 `pref_throttlefb_on`(설정에서 ON)을 통해 stream prefetcher의 throttling
+동작까지 바꿔 baseline 비교를 오염시킨다.
+
+**그래서 Phase 2의 검증 조건이 강해진다 — baseline과 cycle-identical이어야 한다:**
+
+| 조건 | 이유 |
+|---|---|
+| probe가 유휴 port만 사용 (`rfp_port_priority=0`) | demand가 밀릴 수 없음 |
+| probe가 cache 상태를 바꾸지 않음 (`rfp_probe_updates_repl=0`) | hit rate·prefetcher 피드백 불변 |
+| `rfp_try_validate`가 FALSE 반환 | load latency 불변 |
+
+⇒ **`RFP_DEMAND_DELAYED_BY_PREFETCH_OPS == 0`이고 cycle이 baseline과 완전히 일치**해야 한다.
+어긋나면 구현 버그다. (Phase 3에서 fast path와 함께 `rfp_probe_updates_repl=1`로 되돌린다.)
+
+### 10.1 연구 목표 대비 남은 구멍 — RFP + P-IQ 결합
+
+ZERECO의 본체는 "RFP가 primary, RF-uncovered residual slice에 P-IQ"인데 **그 결합 설정이 아직
+실행 불가능하다.** RF filtering(`ZERECO_IQ_PRIORITY_POLICY=2`)은 `op->zereco_rf_covered`를 읽어
+slice를 억제하는데, 이 플래그는 **여전히 기존 oracle만 설정**한다. timed RFP는 Phase 2까지
+"측정만" 하므로 이 플래그를 세우지 않는다 — 세우면 실제로 빨라지지 않은 load를 covered로
+보고하는 셈이 된다.
+
+조용히 policy 1처럼 동작하는 것을 막기 위해
+[dependency_chain_cache.c](../dependency_chain_cache.c)에 `ZERECO_IQ_PRIORITY_POLICY==2 &&
+RFP_ENABLE` 조합을 **명시적으로 거부하는 assert**를 넣었다.
+
+**Phase 3에서 함께 처리할 것** (셋이 한 묶음이다):
+1. `rfp_try_validate`가 covered load를 실제로 완료시키고 `done_cycle`을 단축
+2. 같은 자리에서 `op->zereco_rf_covered = TRUE`
+3. 위 assert를 `(H2P_CHAIN_PERFECT_LOAD && oracle predictor) || RFP_ENABLE` 조건으로 완화
+
+**그 전에 정해야 할 정의 — PARTIAL을 covered로 볼 것인가.** oracle에서는 timeliness가
+공짜라 covered 판정이 "주소 일치 + store 충돌 없음"으로 끝났지만, timed 모델은 도착 시점이
+FULL / PARTIAL / LATE로 갈린다. `zereco_ARCHITECTURE.md` §6.4의 네 번째 조건("dependent
+wakeup을 실제로 앞당길 만큼 일찍 도착")을 PARTIAL은 부분적으로만 만족한다.
+
+이 선택은 결과를 바꾼다 — §7.1이 "Target Load 하나라도 uncovered면 slice는 priority 유지"
+이므로, PARTIAL을 covered로 치면 P-IQ 억제가 늘고 아니면 준다. `rfp_covered_requires_full`
+파라미터로 열어두되, **Phase 2가 산출할 FULL/PARTIAL 분포를 보고 기본값을 정한다**:
+PARTIAL이 미미하면 논쟁거리가 아니고, 상당하면 §3.10 sweep 축에 추가한다.
+
+**다음 단계**: Phase 2 결과에서 EXECUTED/USEFUL 전환율과 `RFP_PORT_DENIED_CYCLES`,
+`RFP_DROP_QUEUE_FULL`을 보고 queue 깊이·port 실패 정책 sweep 필요 여부를 결정한 뒤 Phase 3
+(covered fast path + `zereco_rf_covered` 연결 + L1-miss policy 1).

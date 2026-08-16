@@ -381,6 +381,10 @@ void update_dcache_stage(Stage_Data* src_sd) {
   }
   dcache_stage_assert_occupancy("phase1");
 
+  /* Prefetch-first arbitration (RFP_PORT_PRIORITY 2) probes here, ahead of the
+     demand loop; every other policy waits until the end of the cycle. */
+  rfp_queue_drain(dc->proc_id, dc, TRUE);
+
   /* phase 2 - check the dcache port availability and do dcache access */
   int start_op_count = dc->sd.op_count;
   Counter last_oldest_op_num = 0;
@@ -506,6 +510,8 @@ tea_load_dcache_access:
           (op->table_info->mem_type == MEM_ST) ? "ST" : "LD", bank);
     if (!PERFECT_DCACHE && ((op->table_info->mem_type == MEM_ST && !get_write_port(&dc->ports[bank])) ||
                             (op->table_info->mem_type != MEM_ST && !get_read_port(&dc->ports[bank])))) {
+      if (op->table_info->mem_type != MEM_ST)
+        rfp_note_demand_port_denied(dc->proc_id);
       op->state = OS_WAIT_DCACHE;
       continue;
     }
@@ -614,10 +620,11 @@ tea_load_dcache_access:
   if (L2MARKV_PREF_ON && !L1MARKV_PREF_IMMEDIATE)
     update_l2markv_pref_req_queue();
 
-  /* Last claim on this cycle's dcache resources: RFP probes only ever run on
-     read ports nothing else wanted, which is how the paper gives prefetches the
-     lowest L1 arbitration priority (§3.2). */
-  rfp_queue_drain(dc->proc_id);
+  /* Last claim on this cycle's dcache resources: under the default priority RFP
+     probes only ever run on read ports nothing else wanted, which is how the
+     paper gives prefetches the lowest L1 arbitration priority (§3.2). */
+  rfp_queue_drain(dc->proc_id, dc, FALSE);
+  rfp_account_dcache_ports(dc->proc_id, dc);
 
   dcache_stage_assert_occupancy("phase2");
 }
