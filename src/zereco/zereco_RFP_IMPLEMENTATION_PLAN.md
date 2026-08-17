@@ -594,9 +594,11 @@ launch/validation 경로에는 별도 조건이 없다.
 | `RFP_SCOPE 0` (기본) | **BW walk만** (`rfp_note_target_load`) | H2P Target Load PC 전용 = ZERECO |
 | `RFP_SCOPE 1` | **retire에서 모든 load** | vanilla RFP 비교용 |
 
-두 모드의 코드 차이는 **할당 정책 한 줄**이다. `op->chain_bit`은 RFP 경로에서 더 이상 쓰지
-않으므로, frontend 태깅 게이트에 `RFP_ENABLE`을 추가할 필요도 없다 (P-IQ는 기존대로 chain_bit
-사용).
+두 모드의 코드 차이는 **할당 정책 한 줄**이다. `op->chain_bit`은 **scope 필터에는 쓰이지
+않지만**(멤버십이 곧 필터), v5에서 추가한 per-load 계측(`RFP_COVERED_FEEDS_H2P_BRANCH`,
+`RFP_STALE_VALUE_FEEDS_H2P_BRANCH`)이 "이 dynamic load가 H2P slice에 속하는가"를 물으므로
+frontend 태깅 게이트에 `RFP_ENABLE`을 추가했다 (§14 수정 2). 태깅은 비트·카운터만 붙이므로
+timing-neutral이고, P-IQ는 기존대로 chain_bit을 사용한다.
 
 **Scope 0의 논문 스토리**: Target Load static PC는 소수에 집중된다(기존 관찰). 따라서 vanilla의
 1K-entry PT보다 훨씬 작은 PT로 같은 coverage가 나와야 하며, **PT 크기 sweep(논문 Fig 18 대응)이
@@ -975,7 +977,7 @@ return TRUE;                       ← cache access·port 소비 없음
 
 | 항목 | 내용 |
 |---|---|
-| **covered 판정 기준** (D1) | `rfp_covered_min_saved_cycles` (1~`DCACHE_CYCLES`). 1=어떤 절약이든 인정, 4=access를 통째로 제거한 경우만. §11.1에서 PARTIAL이 2배로 나왔으므로 이 축이 coverage를 3배 가른다 |
+| **covered 판정 기준** (D1) | `rfp_covered_min_saved_cycles` (1~`DCACHE_CYCLES`). **latency 이득은 항상 취하고**, threshold는 `zereco_rf_covered` **주장만** 가른다 — 즉 P-IQ filtering이 slice의 priority를 벗길지 결정하는 순수 정책 knob (첫 구현이 이득까지 버리던 것을 재실행 전에 수정; §13) |
 | **off-path launch** (D2) | `rfp_launch_offpath` 기본 **TRUE**(HW 충실). FALSE는 **오라클**이며 confidence gating이 회수할 수 있는 상한 측정 전용 — 제안이 아니다. inflight 카운트는 양쪽 모두 수행해 대역폭 효과만 분리한다 |
 | **L1-miss policy 1** (D3) | `rfp_send_to_lower_levels` + `rfp_fill_done`(→`dcache_fill_line` 래핑) + pending 테이블. **coalesce된 요청은 콜백이 오지 않으므로** 슬롯 할당 시 죽은 owner를 lazy 회수한다(`RFP_PENDING_FILL_RECLAIMED`) |
 | `rfp_probe_updates_repl` | **TRUE로 복귀** — covered load가 자기 access를 생략하므로 probe가 그 자리를 대신하는 것이 이제 옳다 |
@@ -987,3 +989,79 @@ return TRUE;                       ← cache access·port 소비 없음
 **주의**: Phase 3부터는 cycle-identical이 성립하지 않는다 — 그게 목적이다. 대신 확인할 것은
 `RFP_DEMAND_DELAYED_BY_PREFETCH_OPS`=0(기본 정책)과 IPC가 baseline **이상**이라는 점,
 그리고 `RFP_SAVED_CYCLES_AVG`(Phase 2 실측 2.68cy)가 실제 IPC 이득과 정합하는지다.
+
+---
+
+## 13. Phase 3 결과 (2026-08-17 재실행, `260817_RFP_phase3_oldest_first`)
+
+첫 실행에서 두 결함을 잡고(§13.1) 전체 재실행했다. 무결성 전부 통과, 나머지 4개 config는
+첫 실행과 **비트 단위로 재현**됐다.
+
+| config | IPC geomean | H2P fetch→resolve | H2P dependency | L1D read miss |
+|---|---:|---:|---:|---:|
+| baseline | — | 42.02 cy | 29.94 cy | 126.0M |
+| `rfp_target` (L1-hit RF 경로만) | +1.75% | −3.48% | −4.97% | 125.6M |
+| `_dedicated` | +1.78% | −3.48% | −4.98% | 125.5M |
+| `_onpath` (오라클) | +1.75% | −3.47% | −4.96% | — |
+| `_full_only` | +1.75% | 동일 | 동일 | 동일 |
+| **`_l2` (miss를 하위로)** | **+5.90%** | — | — | **95.8M (−24%)** |
+| `rfp_all` (vanilla) | +1.78% | −3.63% | −5.20% | 125.4M |
+
+**핵심 발견 — 자세한 해석은 중간 점검 기록 참고**:
+
+1. **캐시 경로가 RF 경로보다 3.4배 크다.** `_l2`의 이득은 L1 miss 30.2M 제거에서 온다.
+   RF 경로의 이득 상한은 L1 접근 4cy인데 miss는 16~200cy라 산술적으로 당연한 결과이며,
+   **이것이 논문(§3.2.2)의 원래 설계다** — drop이 기본이던 우리가 벗어나 있었다.
+   ⇒ `rfp_l1_miss_policy` 기본값을 1로 변경 (§14).
+   ⇒ **motivation 재구성 필요**: "RF vs 캐시 prefetch 대결"이 아니라 **"criticality 기반
+   주소 예측기 하나, 데이터 전달 경로 둘(L1-hit→RF, L1-miss→cache fill)"**.
+   실측: miss 경로의 RF 전달은 요청의 0.02%뿐(load가 fill보다 먼저 도착) — miss 경로는
+   사실상 순수 캐시 prefetch다.
+2. **대역폭·wrong-path는 성능 제약이 아니다.** probe를 66% 줄여도(_onpath) / port를 늘려도
+   (_dedicated) IPC 변화 ≤0.03%p. coverage와 IPC가 분리되어 있다 — 한계 prefetch는 critical
+   path 밖이다. ⇒ confidence gating 폐기, dedicated port는 negative result로만 인용.
+3. **선별이 vanilla와 동등 성능**: +1.75% vs +1.78%, PT 할당 155K vs 18.9M (122×).
+4. claimed 176M cy vs 실현 23.3M cy (13%) — OoO 흡수 + "이득은 그 branch가 실제로 틀렸을
+   때만 실현". ⇒ 1차 지표는 IPC가 아니라 **H2P resolution latency**.
+
+### 13.1 첫 실행에서 잡은 결함
+
+- **`_l2` 68개 중 67개 크래시**: `new_mem_req`에 load 데이터 크기를 넘겼으나 memory 시스템은
+  line 단위 요청만 받는다(`size % L1_LINE_SIZE == 0` assert). demand miss 경로처럼
+  `DCACHE_LINE_SIZE`로 수정.
+- **D1 threshold가 이득까지 폐기**: `saved < threshold`에서 `return FALSE`로 demand 경로로
+  보내 `_full_only`의 IPC가 +0.74%로 왜곡됐다. 데이터는 이미 RF에 있으므로 **이득은 항상
+  취하고 covered 주장만 threshold로 가르도록** 수정 — 재실행에서 IPC가 `rfp_target`과
+  일치함을 확인 (예상대로).
+
+---
+
+## 14. Phase 4 — 1단계: 기본값 정정 + P-IQ 결합 (2026-08-18)
+
+**계획 §6의 Phase 4 중 남은 sweep은 PT 용량과 confidence 폭뿐이다** — §3.10의 8축 중
+queue 깊이/수명·port 실패·port 우선순위는 Phase 2~3 실측이 "제약 아님"으로 답했고, L1-miss
+정책과 scope는 측정 완료. 순서: ① 기본값 정정 → ② P-IQ 결합 첫 실행 → ③ PT/conf sweep.
+
+**기본값 변경**: `rfp_l1_miss_policy` 0→1 (논문 설계·실측 우위). 이후 모든 실험이 상속.
+
+**총체 점검(코드 재독) 결과 수정 4건**:
+
+| # | 발견 | 수정 |
+|---|---|---|
+| 1 | `rfp_stale_value_check`가 기본 TRUE인데 **검출기 미구현** — §2.7의 계측이 전부 0 | line별 last-store-write 타임스탬프 테이블 구현. store hit 경로와 **store-miss fill 경로 모두** 기록, validation에서 `probe < write ≤ validate` 창 검사. 타이밍 불변 |
+| 2 | `rfp_only`(policy 0)에서 frontend 태깅이 꺼져 `chain_bit` 기반 stat 2개가 항상 0 | 태깅 게이트에 `RFP_ENABLE` 추가 — 비트·카운터만 붙이므로 timing-neutral |
+| 3 | `rfp_walk_bootstrap` 선언만 있고 미구현인데 조용히 무시 | `rfp_init` assert로 명시 거부 |
+| 4 | `RFP_STALE_VALUE_FEEDS_BRANCH` stat 발화 코드 없음 | 정의 삭제 (H2P 변형만 유지) |
+
+**실험 `260818_RFP_piq_integration`** (7 × 68): P-IQ가 실제 RF 모델과 처음 결합된다.
+
+| config | 질문 |
+|---|---|
+| `rfp_only` | 교정된 RFP 메인 (miss→하위 레벨 포함) |
+| `rfp_piq_unfiltered` (policy 1) | filtering이 줄여야 할 priority 모집단 |
+| `rfp_piq_filtered` (policy 2) | RF filtering이 실제로 억제하는가 (`ZERECO_IQ_SLICES_PRIORITY_SUPPRESSED_PCT`) |
+| `rfp_piq_partition` (+20% 유한 partition, non-stall) | partition 비용 |
+| `rfp_piq_filtered_randq` + `baseline_randq` | oldest-first가 흡수하던 P-IQ headroom 분리 |
+
+descriptor는 baseline 문자열 **파싱→덮어쓰기→재직렬화**로 생성 (append 방식은 중복 인자를
+만들어 파서 순서에 결과가 좌우된다 — 점검에서 발견, 수정).

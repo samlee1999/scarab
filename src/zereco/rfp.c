@@ -165,6 +165,10 @@ void rfp_init(uns proc_id) {
   ASSERTM(proc_id, RFP_QUEUE_ENTRIES > 0, "rfp_queue_entries must be non-zero\n");
   ASSERTM(proc_id, RFP_DRAIN_WIDTH > 0, "rfp_drain_width must be non-zero\n");
   ASSERTM(proc_id, RFP_HIT_LATENCY > 0, "rfp_hit_latency must be non-zero\n");
+  /* Declared for the warm-up experiment but has no implementation behind it;
+     fail loudly rather than let a sweep silently measure nothing. */
+  ASSERTM(proc_id, !RFP_WALK_BOOTSTRAP,
+          "rfp_walk_bootstrap is not implemented\n");
 
   state->pt_sets = RFP_PT_ENTRIES / RFP_PT_ASSOC;
   state->pt = (RFP_PT_Entry*)calloc(RFP_PT_ENTRIES, sizeof(RFP_PT_Entry));
@@ -189,6 +193,13 @@ void rfp_init(uns proc_id) {
     (RFP_Pending_Fill*)calloc(RFP_QUEUE_ENTRIES, sizeof(RFP_Pending_Fill));
   ASSERTM(proc_id, state->pending,
           "Failed to allocate RFP pending-fill tracking\n");
+
+  if (RFP_STALE_VALUE_CHECK) {
+    state->last_store_cycle =
+      (Counter*)calloc(RFP_STALE_TABLE_ENTRIES, sizeof(Counter));
+    ASSERTM(proc_id, state->last_store_cycle,
+            "Failed to allocate RFP stale-value tracking\n");
+  }
 
   state->queue_head = 0;
   state->queue_count = 0;
@@ -455,6 +466,39 @@ void rfp_rename_launch(Op* op) {
 
 /**************************************************************************************/
 /* Dcache hooks */
+
+/**************************************************************************************/
+/* Stale-prefetch detection.
+ *
+ * A prefetch whose address was right can still hold stale data if a store wrote
+ * that line after the probe read it.  In hardware that is the one path by which
+ * a branch could resolve on a wrong value; here values come from the trace, so
+ * this only counts how often real hardware would have had to recover. */
+
+static inline uns rfp_stale_slot(Addr line_addr) {
+  return (uns)((line_addr >> LOG2(DCACHE_LINE_SIZE)) %
+               RFP_STALE_TABLE_ENTRIES);
+}
+
+void rfp_note_store_write(uns proc_id, Addr line_addr) {
+  if (!rfp_active() || !RFP_STALE_VALUE_CHECK)
+    return;
+  RFP_Core_State* state = rfp_get_state(proc_id);
+  if (!state->initialized || !state->last_store_cycle)
+    return;
+  state->last_store_cycle[rfp_stale_slot(line_addr)] = cycle_count;
+}
+
+/* TRUE when a store wrote this line after the prefetch read it. */
+static Flag rfp_prefetch_went_stale(uns proc_id, Op* op) {
+  if (!RFP_STALE_VALUE_CHECK || op->rfp_probe_cycle == MAX_CTR)
+    return FALSE;
+  RFP_Core_State* state = rfp_get_state(proc_id);
+  if (!state->last_store_cycle)
+    return FALSE;
+  Counter wrote = state->last_store_cycle[rfp_stale_slot(op->oracle_info.va)];
+  return wrote > op->rfp_probe_cycle && wrote <= cycle_count;
+}
 
 /**************************************************************************************/
 /* Probes that continue past the L1 (RFP_L1_MISS_POLICY 1) */
@@ -825,6 +869,19 @@ Flag rfp_try_validate(Op* op) {
     INC_STAT_EVENT(proc_id, RFP_LATE_CYCLES_TOTAL, ready - cycle_count);
     INC_STAT_EVENT(proc_id, RFP_LATE_CYCLES_AVG, ready - cycle_count);
   }
+
+  /* The prefetched value is about to be handed to the load.  If a store wrote
+     this line after the probe read it, real hardware would have been using
+     stale data here -- count it, and separately count the case that matters to
+     us, where the load feeds an H2P branch's dependence chain. */
+  if (rfp_prefetch_went_stale(proc_id, op)) {
+    STAT_EVENT(proc_id, RFP_STALE_VALUE_WINDOW);
+    STAT_EVENT(proc_id, RFP_STALE_VALUE_WINDOW_PCT);
+    if (op->chain_bit)
+      STAT_EVENT(proc_id, RFP_STALE_VALUE_FEEDS_H2P_BRANCH);
+  }
+  if (op->chain_bit)
+    STAT_EVENT(proc_id, RFP_COVERED_FEEDS_H2P_BRANCH);
 
   STAT_EVENT(proc_id, RFP_USEFUL);
   STAT_EVENT(proc_id, RFP_USEFUL_PCT);

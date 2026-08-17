@@ -2378,6 +2378,10 @@ static inline void dcache_cacheline_hit(Op* op, Addr line_addr, Dcache_Data* lin
   line->misc_state = (line->misc_state & 2) | op->off_path;
   if (!op->off_path) {
     line->dirty |= op->table_info->mem_type == MEM_ST;
+    /* Timestamp the write so a prefetch that read this line earlier can be
+       recognised as holding stale data (plan §2.7). */
+    if (op->table_info->mem_type == MEM_ST)
+      rfp_note_store_write(op->proc_id, line_addr);
   }
 
   /* wake up source inst if the op is completed */
@@ -2660,6 +2664,10 @@ static inline void dcache_fill_process_cacheline(Mem_Req* req, Dcache_Data* data
     data->prefetch &= op->table_info->mem_type == MEM_PF || op->table_info->mem_type == MEM_WH;
     data->read_count[op->off_path] += (op->table_info->mem_type == MEM_LD);
     data->write_count[op->off_path] += (op->table_info->mem_type == MEM_ST);
+    /* Store that missed and is completing through the fill: timestamp the write
+       for stale-prefetch detection, same as the store-hit path (plan §2.7). */
+    if (!op->off_path && op->table_info->mem_type == MEM_ST)
+      rfp_note_store_write(op->proc_id, req->addr);
 
     DEBUG(dc->proc_id, "%s: %s line addr:0x%s: %7d\n", unsstr64(op->op_num), disasm_op(op, FALSE), hexstr64s(req->addr),
           (int)(req->addr >> LOG2(DCACHE_LINE_SIZE)));

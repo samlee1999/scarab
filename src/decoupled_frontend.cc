@@ -382,8 +382,14 @@ void Decoupled_FE::apply_main_chain_block_tag(Op* op) {
   op->h2p_chain_block_op_idx = 0;
   op->h2p_chain_profile_access_recorded = FALSE;
 
+  /* RFP_ENABLE is part of the gate for statistics only: the timed RFP model
+     scopes itself through Prefetch Table membership, but its per-load counters
+     split coverage by whether the load sits in an H2P slice, which needs the
+     chain_bit even when no priority policy is running.  Tagging attaches bits
+     and fires counters and nothing else, so this stays timing-neutral. */
   if ((!H2P_CHAIN_PERFECT_LOAD && !H2P_CHAIN_LOAD_PROFILE &&
-       !H2P_CHAIN_LOAD_RAW_STREAM_DUMP && !ZERECO_IQ_PRIORITY_POLICY) ||
+       !H2P_CHAIN_LOAD_RAW_STREAM_DUMP && !ZERECO_IQ_PRIORITY_POLICY &&
+       !RFP_ENABLE) ||
       op->thread_id != 0 || op->off_path || !op->inst_info ||
       !op->table_info) {
     reset_main_chain_block_tracking();

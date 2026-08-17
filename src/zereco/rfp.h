@@ -32,6 +32,9 @@ extern "C" {
    ~49 concurrent instances of a single load PC measured in GAP bc. */
 #define RFP_UTILITY_MAX 3   /* 2-bit utility */
 #define RFP_INFLIGHT_MAX 127 /* 7-bit in-flight counter */
+/* Slots in the store-write timestamp table used for stale-prefetch detection.
+   Measurement scaffolding, not modeled hardware, so size it generously. */
+#define RFP_STALE_TABLE_ENTRIES (64 * 1024)
 
 /* One static load PC.  `base_va` is the address of the most recently *retired*
    instance, so a prediction for an instance that is `inflight` allocations
@@ -90,6 +93,10 @@ typedef struct RFP_Core_State_struct {
   /* Probes waiting on a lower-level fill (RFP_L1_MISS_POLICY 1). */
   RFP_Pending_Fill* pending;
   uns pending_count;
+  /* Direct-mapped record of when each L1 line was last written by a store, used
+     only to detect the stale-prefetch window.  Approximate by construction: two
+     lines that alias share a slot, which can only over-report. */
+  Counter* last_store_cycle;
   /* Per-cycle port bookkeeping, reset on the cycle's first drain. */
   Counter port_cycle;
   uns ports_taken_this_cycle;
@@ -135,6 +142,12 @@ void rfp_note_demand_port_denied(uns proc_id);
 /* Fill callback for a probe that continued past the L1.  Performs the normal
    dcache fill, then hands the data to the load that asked for it. */
 Flag rfp_fill_done(Mem_Req* req);
+
+/* A store just wrote a line in the L1.  Recorded so validation can tell whether
+   a correct-address prefetch read the line before that write landed -- the one
+   window in which the prefetched value could be stale.  Scarab's values are
+   oracle, so this only ever counts; see the plan §2.7. */
+void rfp_note_store_write(uns proc_id, Addr line_addr);
 
 /* A load reached the dcache stage.  Returns TRUE when a prefetch covered it, in
    which case the load is already complete and must not access the cache. */
