@@ -44,21 +44,21 @@ void init_dependency_chain_cache(uns proc_id) {
                 "P-IQ sweep percentage must be 10, 15, 20, 25, or 50\n");
     }
     if (ZERECO_IQ_PRIORITY_POLICY == 2) {
-        /* RF filtering reads op->zereco_rf_covered, which today only the
-           h2p_chain_perfect_load oracle sets.  The timed RFP model will set it
-           once a covered load actually skips its cache access (Phase 3); until
-           then combining rfp_enable with this policy would filter on a flag
-           that is never TRUE, silently degrading it to policy 1. */
-        ASSERTM(proc_id, !RFP_ENABLE,
-                "RF-filtered IQ priority cannot use the timed RFP model yet: it "
-                "needs the covered fast path that sets zereco_rf_covered (Phase 3)\n");
-        ASSERTM(proc_id, H2P_CHAIN_PERFECT_LOAD,
-                "online RF-filtered IQ priority requires h2p_chain_perfect_load=1\n");
-        ASSERTM(proc_id, H2P_CHAIN_ORACLE_PREDICTOR == 1 ||
-                         H2P_CHAIN_ORACLE_PREDICTOR == 2,
-                "online RF-filtered IQ priority requires stride or top-delta predictor\n");
-        ASSERTM(proc_id, H2P_CHAIN_ORACLE_GRANULARITY == 0,
-                "online RF-filtered IQ priority is defined for exact-vaddr RF prediction\n");
+        /* RF filtering reads op->zereco_rf_covered.  Either RF model may supply
+           it: the h2p_chain_perfect_load oracle, or the timed RFP model once a
+           covered load actually skips its cache access.  Requiring one of them
+           keeps the filter from running against a flag nothing ever sets, which
+           would silently degrade this policy to policy 1. */
+        ASSERTM(proc_id, H2P_CHAIN_PERFECT_LOAD || RFP_ENABLE,
+                "online RF-filtered IQ priority needs an RF model: either "
+                "h2p_chain_perfect_load=1 or rfp_enable=1\n");
+        if (H2P_CHAIN_PERFECT_LOAD) {
+            ASSERTM(proc_id, H2P_CHAIN_ORACLE_PREDICTOR == 1 ||
+                             H2P_CHAIN_ORACLE_PREDICTOR == 2,
+                    "online RF-filtered IQ priority requires stride or top-delta predictor\n");
+            ASSERTM(proc_id, H2P_CHAIN_ORACLE_GRANULARITY == 0,
+                    "online RF-filtered IQ priority is defined for exact-vaddr RF prediction\n");
+        }
         ASSERTM(proc_id, ZERECO_IQ_RF_COVERED_STREAK_THRESHOLD > 0,
                 "RF-covered streak threshold must be non-zero\n");
     }

@@ -895,6 +895,95 @@ wakeup을 실제로 앞당길 만큼 일찍 도착")을 PARTIAL은 부분적으�
 파라미터로 열어두되, **Phase 2가 산출할 FULL/PARTIAL 분포를 보고 기본값을 정한다**:
 PARTIAL이 미미하면 논쟁거리가 아니고, 상당하면 §3.10 sweep 축에 추가한다.
 
-**다음 단계**: Phase 2 결과에서 EXECUTED/USEFUL 전환율과 `RFP_PORT_DENIED_CYCLES`,
-`RFP_DROP_QUEUE_FULL`을 보고 queue 깊이·port 실패 정책 sweep 필요 여부를 결정한 뒤 Phase 3
-(covered fast path + `zereco_rf_covered` 연결 + L1-miss policy 1).
+---
+
+## 11. Phase 2 결과 (2026-08-16, `260816_RFP_phase2_oldest_first`)
+
+**검증 4종 통과**: 3개 RFP config가 baseline과 cycle-identical,
+`RFP_DEMAND_DELAYED_BY_PREFETCH_OPS`=0, `RFP_STALE_DEREF_BLOCKED`=0, 그리고 **Phase 1 상한
+93.26M → Phase 2 실측 58.83M의 gap이 손실 채널로 99.92% 설명**된다(미설명 0.08%).
+
+| | scope 0 (Target Load) | +dedicated port | scope 1 |
+|---|---:|---:|---:|
+| injected | 28.9% | 29.0% | 46.6% |
+| executed | 18.3% | **22.5%** | 26.6% |
+| useful | 16.9% | **21.0%** | 25.1% |
+| 상한 도달률 | 63.1% | — | — |
+
+**손실 내역** (injected 대비): LOAD_FIRST 26% / L1_MISS 11% / WRONG_ADDR 7.4% /
+QUEUE_FULL 0.3%.
+
+### 11.1 왜 PARTIAL이 FULL의 2배인가 — 예측 가능성과 run-ahead의 역상관
+
+`saved = min(V−P, 4)` (V=validation, P=probe)이고 실측 `P ≈ R+2.5`(rename 후 2.5 cycle)이므로,
+FULL이 되려면 **rename→AGU 거리가 6.5 cycle 이상**이어야 한다. 저장 cycle을 역산하면 두 무리가
+선명히 갈린다:
+
+| | rename→AGU | 원인 |
+|---|---:|---|
+| PARTIAL load | **~4.6 cy** | operand가 rename 시점에 이미 준비됨 — scheduling pipe만 지나고 실행 |
+| FULL load | **~23.8 cy** | operand를 기다림 — 창이 넉넉 |
+
+RFP 논문 §3.2도 같은 이분법을 보고한다(63% operand 미준비 / 37% 준비). 그런데 **우리는
+PARTIAL이 67%로 훨씬 많다.** 이유는 eligible 조건이다: launch하려면 stride confidence가
+saturate돼야 하고, 그런 load는 대개 **induction variable로 주소를 만드는 load**라 operand가
+일찍 준비된다.
+
+⇒ **"주소를 예측할 수 있다"와 "prefetch가 앞서 달릴 여유가 있다"가 서로 역상관**이다.
+RFP 구조에 내재된 긴장이며, dedicated port가 FULL을 19.3M→26.5M(+37%)로 올려도 `V−R≈4.6`인
+load는 원리적으로 4.6 cycle 이상 못 번다.
+
+**큐는 제약이 아니다**: 평균 점유 1.35/64, full 0.06% cycle. 제약은 port(head-blocked 15.2%
+cycle)이고, 그마저 평균 대기는 2.5 cycle이다. ⇒ `rfp_queue_entries` sweep은 불필요.
+
+### 11.2 off-path 대역폭 — baseline 대비로 보면 초과분은 10%p
+
+| | off-path 비율 |
+|---|---:|
+| baseline 기계의 실행된 memory op | **58.9%** |
+| RFP probe (scope 0) | 68.8% |
+
+이 기계는 **원래 wrong path가 59%**다. 69%는 "0에서 늘어난 것"이 아니라 **10%p 초과**다.
+초과 원인은 RFP가 **rename에서 launch**하기 때문 — rename 시점 wrong-path 인구는 execute
+시점보다 크다(실행 전에 squash되는 op도 packet은 이미 보냈다).
+
+**정정**: 이전 서술에서 "Target Load는 squash 확률이 가장 높은 load"라 한 것은 **틀렸다.**
+Target Load는 backward slice이므로 자기 H2P보다 **older**이고 그 branch의 오예측으로
+squash되지 않는다. 실제 메커니즘은 **loop-carried** — 직전 iteration의 H2P가 이번 iteration의
+Target Load를 날린다. 다만 이는 "H2P가 있는 코드 영역에 살기 때문"이지 slice 소속 자체의
+효과가 아니며, 측정된 scope 0/1 차이(68.8% vs 63.5%)는 config 간 probe 수가 달라 교란된
+비교다 — 정황일 뿐 증명이 아니다.
+
+**수정한 통계 버그**: `RFP_LAUNCH_TO_PROBE_AVG` / `RFP_QUEUE_WAIT_AVG`의 분자가 전체 probe를,
+분모가 on-path만 세어 대기시간을 off-path 비율만큼 부풀렸다(9.5 → 실제 2.54 cycle). 분자도
+on-path로 게이팅.
+
+---
+
+## 12. Phase 3 구현 (2026-08-17)
+
+빌드 확인 완료. 실험: `260817_RFP_phase3_oldest_first`, **7 config × 68 SimPoint**.
+
+**드디어 IPC가 움직이는 첫 단계다.** `rfp_try_validate`가 covered load를 실제로 완료시킨다:
+
+```
+op->state = OS_SCHEDULED;  op->done_cycle = op->wake_cycle = deliver;
+op->zereco_rf_covered = TRUE;      ← P-IQ의 RF filtering이 소비
+wake_up_ops(op, REG_DATA_DEP, ...);
+return TRUE;                       ← cache access·port 소비 없음
+```
+
+| 항목 | 내용 |
+|---|---|
+| **covered 판정 기준** (D1) | `rfp_covered_min_saved_cycles` (1~`DCACHE_CYCLES`). 1=어떤 절약이든 인정, 4=access를 통째로 제거한 경우만. §11.1에서 PARTIAL이 2배로 나왔으므로 이 축이 coverage를 3배 가른다 |
+| **off-path launch** (D2) | `rfp_launch_offpath` 기본 **TRUE**(HW 충실). FALSE는 **오라클**이며 confidence gating이 회수할 수 있는 상한 측정 전용 — 제안이 아니다. inflight 카운트는 양쪽 모두 수행해 대역폭 효과만 분리한다 |
+| **L1-miss policy 1** (D3) | `rfp_send_to_lower_levels` + `rfp_fill_done`(→`dcache_fill_line` 래핑) + pending 테이블. **coalesce된 요청은 콜백이 오지 않으므로** 슬롯 할당 시 죽은 owner를 lazy 회수한다(`RFP_PENDING_FILL_RECLAIMED`) |
+| `rfp_probe_updates_repl` | **TRUE로 복귀** — covered load가 자기 access를 생략하므로 probe가 그 자리를 대신하는 것이 이제 옳다 |
+| P-IQ assert | `H2P_CHAIN_PERFECT_LOAD \|\| RFP_ENABLE`로 완화. **RFP + RF-filtered P-IQ 결합이 이제 실행 가능**하다 (§10.1 해소) |
+
+**실험 축**: `rfp_target`(메인) / `_dedicated`(대역폭이 상한인가) / `_l2`(miss 진행 가치) /
+`_onpath`(오라클 상한) / `_full_only`(covered 기준 엄격단) / `rfp_all`(vanilla).
+
+**주의**: Phase 3부터는 cycle-identical이 성립하지 않는다 — 그게 목적이다. 대신 확인할 것은
+`RFP_DEMAND_DELAYED_BY_PREFETCH_OPS`=0(기본 정책)과 IPC가 baseline **이상**이라는 점,
+그리고 `RFP_SAVED_CYCLES_AVG`(Phase 2 실측 2.68cy)가 실제 IPC 이득과 정합하는지다.

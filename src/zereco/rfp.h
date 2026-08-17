@@ -62,6 +62,18 @@ typedef struct RFP_Queue_Entry_struct {
   Counter launch_cycle;
 } RFP_Queue_Entry;
 
+/* A probe that missed the L1 and was sent on to the lower levels
+   (RFP_L1_MISS_POLICY 1).  The memory system carries no back-pointer to the op,
+   so the fill callback finds its owner here by line address and identity. */
+typedef struct RFP_Pending_Fill_struct {
+  Flag valid;
+  Addr line_addr;
+  Op* op;
+  Counter op_num;
+  Counter unique_num;
+  Counter issue_cycle;
+} RFP_Pending_Fill;
+
 typedef struct RFP_Core_State_struct {
   Flag initialized;
   RFP_PT_Entry* pt;      /* pt_sets * RFP_PT_ASSOC entries */
@@ -75,6 +87,9 @@ typedef struct RFP_Core_State_struct {
   /* Extra read ports that serve prefetches only (RFP_PORT_PRIORITY 1), one set
      per dcache bank.  Unused by the other priority policies. */
   Ports* dedicated_ports;
+  /* Probes waiting on a lower-level fill (RFP_L1_MISS_POLICY 1). */
+  RFP_Pending_Fill* pending;
+  uns pending_count;
   /* Per-cycle port bookkeeping, reset on the cycle's first drain. */
   Counter port_cycle;
   uns ports_taken_this_cycle;
@@ -116,6 +131,10 @@ void rfp_account_dcache_ports(uns proc_id, struct Dcache_Stage_struct* dcache);
    interference when a prefetch actually took a port this cycle, which cannot
    happen under the default priority. */
 void rfp_note_demand_port_denied(uns proc_id);
+
+/* Fill callback for a probe that continued past the L1.  Performs the normal
+   dcache fill, then hands the data to the load that asked for it. */
+Flag rfp_fill_done(Mem_Req* req);
 
 /* A load reached the dcache stage.  Returns TRUE when a prefetch covered it, in
    which case the load is already complete and must not access the cache. */

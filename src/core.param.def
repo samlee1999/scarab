@@ -509,8 +509,19 @@ DEF_PARAM(rfp_stale_value_check, RFP_STALE_VALUE_CHECK, Flag, Flag, TRUE, )
    accesses the cache, so counting the probe as well double-counts and perturbs
    the very baseline the measurement is compared against.  Default off; turn it
    on together with the covered fast path. */
-DEF_PARAM(rfp_probe_updates_repl, RFP_PROBE_UPDATES_REPL, Flag, Flag, FALSE, )
+DEF_PARAM(rfp_probe_updates_repl, RFP_PROBE_UPDATES_REPL, Flag, Flag, TRUE, )
 /* Seed stride/base from consecutive instances inside one backward-walk snapshot
    to shorten predictor warm-up.  Snapshot-internal instances are contiguous, so
    this is safe; across snapshots the retire path is the only valid trainer. */
 DEF_PARAM(rfp_walk_bootstrap, RFP_WALK_BOOTSTRAP, Flag, Flag, FALSE, )
+/* Cycles a prefetch must save before the load counts as RF-covered.  A prefetch
+   that lands after the load's address generation still beats the cache access,
+   but only partly, and RF coverage is what suppresses IQ priority for the rest
+   of the branch slice -- so how much help is enough is a real design choice.
+   1 accepts any saving; DCACHE_CYCLES - rfp_hit_latency (4 by default) accepts
+   only prefetches that removed the whole access. */
+DEF_PARAM(rfp_covered_min_saved_cycles, RFP_COVERED_MIN_SAVED_CYCLES, uns, uns, 1, )
+/* Launch prefetches for wrong-path loads too.  Real hardware cannot tell the
+   paths apart at rename, so TRUE is the faithful setting; FALSE is an oracle
+   that bounds what any confidence-based launch gate could recover. */
+DEF_PARAM(rfp_launch_offpath, RFP_LAUNCH_OFFPATH, Flag, Flag, TRUE, )

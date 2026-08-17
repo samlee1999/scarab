@@ -22,6 +22,8 @@
 #include "globals/global_vars.h"
 #include "globals/utils.h"
 
+#include "model.h"
+
 #include "core.param.h"
 #include "dcache_stage.h"
 #include "libs/cache_lib.h"
@@ -143,11 +145,9 @@ void rfp_init(uns proc_id) {
   ASSERTM(proc_id, RFP_SCOPE <= 1, "rfp_scope must be 0 or 1\n");
   ASSERTM(proc_id, RFP_L1_MISS_POLICY <= 1,
           "rfp_l1_miss_policy must be 0 (drop) or 1 (continue to lower levels)\n");
-  /* Sending a probe on to the lower levels needs a fill callback and a pending
-     table, which arrive with the Phase 3 datapath.  Fail loudly rather than
-     silently dropping the miss and reporting it as policy 1. */
-  ASSERTM(proc_id, RFP_L1_MISS_POLICY == 0,
-          "rfp_l1_miss_policy 1 is not implemented yet (Phase 3)\n");
+  ASSERTM(proc_id, RFP_COVERED_MIN_SAVED_CYCLES > 0 &&
+                     RFP_COVERED_MIN_SAVED_CYCLES <= DCACHE_CYCLES,
+          "rfp_covered_min_saved_cycles must be between 1 and dcache_cycles\n");
   ASSERTM(proc_id, RFP_PORT_FAIL_POLICY <= 2,
           "rfp_port_fail_policy must be 0 (wait), 1 (drop), or 2 (skip)\n");
   ASSERTM(proc_id, RFP_PORT_PRIORITY <= 2,
@@ -185,8 +185,14 @@ void rfp_init(uns proc_id) {
     }
   }
 
+  state->pending =
+    (RFP_Pending_Fill*)calloc(RFP_QUEUE_ENTRIES, sizeof(RFP_Pending_Fill));
+  ASSERTM(proc_id, state->pending,
+          "Failed to allocate RFP pending-fill tracking\n");
+
   state->queue_head = 0;
   state->queue_count = 0;
+  state->pending_count = 0;
   state->port_cycle = MAX_CTR;
   state->ports_taken_this_cycle = 0;
   state->rand_state = 0x9E3779B97F4A7C15ULL ^ ((uns64)proc_id + 1);
@@ -200,8 +206,10 @@ void rfp_reset(uns proc_id) {
 
   memset(state->pt, 0, sizeof(RFP_PT_Entry) * RFP_PT_ENTRIES);
   memset(state->queue, 0, sizeof(RFP_Queue_Entry) * RFP_QUEUE_ENTRIES);
+  memset(state->pending, 0, sizeof(RFP_Pending_Fill) * RFP_QUEUE_ENTRIES);
   state->queue_head = 0;
   state->queue_count = 0;
+  state->pending_count = 0;
   state->port_cycle = MAX_CTR;
   state->ports_taken_this_cycle = 0;
 }
@@ -409,6 +417,15 @@ void rfp_rename_launch(Op* op) {
   Addr pred_va = (Addr)((int64)entry->base_va +
                         entry->stride * (int64)entry->inflight);
 
+  /* Oracle that bounds what a confidence-based launch gate could recover.  It
+     suppresses only the request, never the in-flight bookkeeping above: real
+     hardware counts wrong-path allocations too, and skipping them here would
+     shift every later prediction instead of isolating the bandwidth effect. */
+  if (!on_path && !RFP_LAUNCH_OFFPATH) {
+    STAT_EVENT(proc_id, RFP_OFFPATH_LAUNCH_SUPPRESSED);
+    return;
+  }
+
   RFP_Core_State* state = rfp_get_state(proc_id);
   if (state->queue_count >= RFP_QUEUE_ENTRIES) {
     /* The queue is the packet's only path to the L1, so a full queue is a lost
@@ -438,6 +455,104 @@ void rfp_rename_launch(Op* op) {
 
 /**************************************************************************************/
 /* Dcache hooks */
+
+/**************************************************************************************/
+/* Probes that continue past the L1 (RFP_L1_MISS_POLICY 1) */
+
+/* Register the probe so the fill callback can find its load, then issue the
+   request.  Returns FALSE when no MSHR or tracking slot was available, in which
+   case the prefetch is simply abandoned and the load fetches the line itself. */
+static Flag rfp_send_to_lower_levels(uns proc_id, Op* op, Addr line_addr) {
+  RFP_Core_State* state = rfp_get_state(proc_id);
+
+  /* Reclaim slots whose fill will never arrive.  A request that coalesced with
+     one already in flight never reaches our callback, and a squashed or
+     already-validated load has no use for the data -- without reclamation those
+     slots would accumulate until the table wedged shut. */
+  RFP_Pending_Fill* slot = NULL;
+  for (uns ii = 0; ii < RFP_QUEUE_ENTRIES; ++ii) {
+    RFP_Pending_Fill* p = &state->pending[ii];
+    if (p->valid) {
+      Op* owner = p->op;
+      if (!owner->op_pool_valid || owner->unique_num != p->unique_num ||
+          owner->op_num != p->op_num || owner->rfp_validated) {
+        p->valid = FALSE;
+        state->pending_count--;
+        STAT_EVENT(proc_id, RFP_PENDING_FILL_RECLAIMED);
+      }
+    }
+    if (!p->valid && !slot)
+      slot = p;
+  }
+  if (!slot)
+    return FALSE;
+
+  if (!mem_can_allocate_req_buffer(proc_id, MRT_DPRF, FALSE))
+    return FALSE;
+
+  /* Requests are line-granular, like every other miss the memory system sees --
+     the load's own data size is not a legal request size.  No op back-pointer
+     either: the memory system would otherwise treat this as the load's demand
+     request and complete it a second time. */
+  if (!new_mem_req(MRT_DPRF, proc_id, line_addr, DCACHE_LINE_SIZE, 0, NULL,
+                   rfp_fill_done, op->unique_num, NULL))
+    return FALSE;
+
+  slot->valid = TRUE;
+  slot->line_addr = line_addr;
+  slot->op = op;
+  slot->op_num = op->op_num;
+  slot->unique_num = op->unique_num;
+  slot->issue_cycle = cycle_count;
+  state->pending_count++;
+  STAT_EVENT(proc_id, RFP_LOWER_LEVEL_REQUESTS);
+  return TRUE;
+}
+
+Flag rfp_fill_done(Mem_Req* req) {
+  /* Fill the line the normal way first; a failure here means the fill must be
+     retried, so nothing else may be consumed yet. */
+  Flag filled = dcache_fill_line(req);
+  if (filled != SUCCESS)
+    return filled;
+
+  uns proc_id = req->proc_id;
+  RFP_Core_State* state = rfp_get_state(proc_id);
+  if (!state->initialized)
+    return SUCCESS;
+
+  STAT_EVENT(proc_id, RFP_LOWER_LEVEL_FILLS);
+  for (uns ii = 0; ii < RFP_QUEUE_ENTRIES; ++ii) {
+    RFP_Pending_Fill* p = &state->pending[ii];
+    if (!p->valid || p->unique_num != req->unique_num)
+      continue;
+
+    Op* op = p->op;
+    p->valid = FALSE;
+    state->pending_count--;
+
+    /* The load may have been squashed, or may have already given up waiting and
+       fetched the line itself, while the fill was in flight. */
+    if (!op->op_pool_valid || op->unique_num != p->unique_num ||
+        op->op_num != p->op_num || op->rfp_validated) {
+      STAT_EVENT(proc_id, RFP_LOWER_LEVEL_FILLS_WASTED);
+      STAT_EVENT(proc_id, RFP_LOWER_LEVEL_FILLS_WASTED_PCT);
+      return SUCCESS;
+    }
+
+    op->rfp_data_ready_cycle = cycle_count;
+    STAT_EVENT(proc_id, RFP_LOWER_LEVEL_FILLS_USEFUL);
+    return SUCCESS;
+  }
+
+  /* No owner left: its tracking slot was reclaimed, or the request coalesced
+     with one the hardware prefetcher had already issued. */
+  STAT_EVENT(proc_id, RFP_COALESCED_WITH_INFLIGHT);
+  return SUCCESS;
+}
+
+/**************************************************************************************/
+/* Request queue */
 
 /* A queue slot is live while it still points at its op; dropping a packet just
    clears the pointer, and the head walks past the tombstones. */
@@ -573,9 +688,15 @@ void rfp_queue_drain(uns proc_id, Dcache_Stage* dcache, Flag before_demand) {
         STAT_EVENT(proc_id, RFP_EXECUTED);
         STAT_EVENT(proc_id, RFP_EXECUTED_PCT);
       }
+    } else if (RFP_L1_MISS_POLICY == 1) {
+      /* Continue past the L1 like a demand miss.  This is the only policy that
+         can pollute the cache or hold an MSHR, so those costs land in the
+         measurements rather than being assumed away. */
+      if (!rfp_send_to_lower_levels(proc_id, op, line_addr) && on_path)
+        STAT_EVENT(proc_id, RFP_DROP_MSHR_UNAVAILABLE);
     } else if (on_path) {
       /* Policy 0 abandons a missing prefetch and lets the load fetch the line
-         itself.  Continuing to the lower levels arrives with Phase 3. */
+         itself. */
       STAT_EVENT(proc_id, RFP_DROP_L1_MISS);
     }
     e->op = NULL;
@@ -692,6 +813,8 @@ Flag rfp_try_validate(Op* op) {
     return FALSE;
   }
 
+  Counter saved = demand_done - deliver;
+
   if (ready <= cycle_count) {
     STAT_EVENT(proc_id, RFP_USEFUL_FULL);
     STAT_EVENT(proc_id, RFP_LEAD_TIME_SAMPLES);
@@ -706,12 +829,34 @@ Flag rfp_try_validate(Op* op) {
   STAT_EVENT(proc_id, RFP_USEFUL);
   STAT_EVENT(proc_id, RFP_USEFUL_PCT);
   STAT_EVENT(proc_id, RFP_USEFUL_OF_TARGET_PCT);
-  INC_STAT_EVENT(proc_id, RFP_SAVED_CYCLES_TOTAL, demand_done - deliver);
-  INC_STAT_EVENT(proc_id, RFP_SAVED_CYCLES_AVG, demand_done - deliver);
+  INC_STAT_EVENT(proc_id, RFP_SAVED_CYCLES_TOTAL, saved);
+  INC_STAT_EVENT(proc_id, RFP_SAVED_CYCLES_AVG, saved);
 
-  /* Phase 2 measures only.  Phase 3 returns TRUE here and completes the load
-     without a cache access, which is where the saved cycles become real. */
-  return FALSE;
+  /* The value is in (or on its way to) the destination physical register, so the
+     load completes without touching the cache -- the probe already spent that
+     access.  Dependents wake off `deliver` instead of the full access latency,
+     which is the whole point of prefetching into the register file. */
+  op->state = OS_SCHEDULED;
+  op->dcache_cycle = cycle_count;
+  op->done_cycle = deliver;
+  op->wake_cycle = deliver;
+  op->oracle_info.dcmiss = FALSE;
+  op->engine_info.dcmiss = FALSE;
+
+  /* Claiming RF coverage is a separate question from taking the speedup.  The
+     data is already in the register file either way, so the load always keeps
+     what the prefetch bought it; but a load helped only marginally is still
+     sitting on the branch's critical path, and RF coverage is what strips the
+     rest of its slice of IQ priority (zereco_ARCHITECTURE.md §7.1).  Only claim
+     it once the saving clears the configured bar.  Consumed after retire, so it
+     never reorders the current occurrence. */
+  if (saved >= RFP_COVERED_MIN_SAVED_CYCLES)
+    op->zereco_rf_covered = TRUE;
+  else
+    STAT_EVENT(proc_id, RFP_USEFUL_BELOW_THRESHOLD);
+
+  wake_up_ops(op, REG_DATA_DEP, model->wake_hook);
+  return TRUE;
 }
 
 /**************************************************************************************/

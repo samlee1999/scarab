@@ -177,6 +177,11 @@ DEF_STAT(RFP_USEFUL_PARTIAL, COUNT, NO_RATIO)
 /* Prefetch completed but not early enough to beat the load's own L1 access, so
  * it saved nothing.  Distinct from never having executed. */
 DEF_STAT(RFP_USEFUL_LATE, COUNT, NO_RATIO)
+/* Prefetch beat the cache access but by less than rfp_covered_min_saved_cycles,
+ * so the load is not claimed as RF-covered and keeps its slice's IQ priority. */
+DEF_STAT(RFP_USEFUL_BELOW_THRESHOLD, COUNT, NO_RATIO)
+/* Wrong-path launches the rfp_launch_offpath oracle suppressed. */
+DEF_STAT(RFP_OFFPATH_LAUNCH_SUPPRESSED, COUNT, NO_RATIO)
 DEF_STAT(RFP_USEFUL, COUNT, NO_RATIO)
 /* Coverage over all loads, directly comparable to the paper's 43.4%. */
 DEF_STAT(RFP_USEFUL_PCT, PERCENT, RFP_CANDIDATE_LOADS)
@@ -268,6 +273,9 @@ DEF_STAT(RFP_LOWER_LEVEL_FILLS_WASTED, COUNT, NO_RATIO)
 DEF_STAT(RFP_LOWER_LEVEL_FILLS_WASTED_PCT, PERCENT, RFP_LOWER_LEVEL_FILLS)
 DEF_STAT(RFP_MSHR_OCCUPANCY_TOTAL, COUNT, NO_RATIO)
 DEF_STAT(RFP_COALESCED_WITH_INFLIGHT, COUNT, NO_RATIO)
+/* Tracking slots freed without a fill: the request merged with one already in
+ * flight, or the load was squashed or gave up before the data returned. */
+DEF_STAT(RFP_PENDING_FILL_RECLAIMED, COUNT, NO_RATIO)
 
 /* Correctness corner case (measurement only -- Scarab's values are oracle, so
  * this never changes execution).  A prefetch whose address was right can still
