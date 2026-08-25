@@ -302,3 +302,105 @@ DEF_STAT(RFP_VALIDATE_REENTRY, COUNT, NO_RATIO)
 
 /* Integrity: must stay at zero. */
 DEF_STAT(RFP_STALE_DEREF_BLOCKED, COUNT, NO_RATIO)
+
+/* Critical-path oracle walk (2026-08-21 direction).  Computed on every
+   backward walk regardless of the consumer knobs, so any run measures the
+   reachability-slice vs critical-chain gap.  DEP_OPS/CRITICAL_OPS count walk
+   occurrences of slice members (static PCs weighted by how often their slice
+   is re-walked), not dynamic frontend instances -- the dynamic-instance
+   population is still ZERECO_IQ_CHAIN_BIT_PORTION vs
+   ZERECO_IQ_PRIORITY_CANDIDATE_PORTION. */
+DEF_STAT(ZERECO_WALK_SLICE_DEP_OPS, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRITICAL_OPS, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRITICAL_OP_PORTION, PERCENT, ZERECO_WALK_SLICE_DEP_OPS)
+DEF_STAT(ZERECO_WALK_TARGET_LOADS_SEEN, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRITICAL_TARGET_LOADS, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRITICAL_TARGET_LOAD_PORTION, PERCENT,
+         ZERECO_WALK_TARGET_LOADS_SEEN)
+DEF_STAT(ZERECO_WALK_CRITICAL_STEPS, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRITICAL_MULTI_FOLLOW, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_BLOCK_MASK_RESETS, COUNT, NO_RATIO)
+/* Critical walk could not read a valid broadcast tag for a producer and fell
+   back to a bounded substitute.  Non-zero means some last-arrival comparisons
+   used a weaker signal than op->wake_cycle; UNKNOWN means none of the
+   timestamps were usable at all. */
+DEF_STAT(ZERECO_WALK_READY_CYCLE_FALLBACK, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_READY_CYCLE_UNKNOWN, COUNT, NO_RATIO)
+
+/* ---- Phase-1 walk reach instrumentation (2026-08-24) ----
+   Distance = retired uops between the H2P branch and the op, i.e. exactly what
+   a walk-distance limit would cap.  Buckets are cumulative-readable:
+   0:<=8  1:<=16  2:<=32  3:<=64  4:<=128  5:<=256  6:>256.
+   Each histogram has a _WIDE_ twin counted only for slices whose H2P had
+   room >= 256 older uops in the snapshot; read the WIDE twin when sizing a
+   limit, because a branch near the young end of the window is reach-truncated
+   for reasons unrelated to its dataflow.  MUST stay consecutive: the code
+   indexes these as BASE + bucket. */
+DEF_STAT(ZERECO_WALK_CRIT_OP_DIST_0, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_OP_DIST_1, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_OP_DIST_2, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_OP_DIST_3, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_OP_DIST_4, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_OP_DIST_5, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_OP_DIST_6, COUNT, NO_RATIO)
+
+DEF_STAT(ZERECO_WALK_CRIT_TL_DIST_0, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_TL_DIST_1, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_TL_DIST_2, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_TL_DIST_3, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_TL_DIST_4, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_TL_DIST_5, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_TL_DIST_6, COUNT, NO_RATIO)
+
+DEF_STAT(ZERECO_WALK_CRIT_TL_DIST_WIDE_0, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_TL_DIST_WIDE_1, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_TL_DIST_WIDE_2, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_TL_DIST_WIDE_3, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_TL_DIST_WIDE_4, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_TL_DIST_WIDE_5, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_TL_DIST_WIDE_6, COUNT, NO_RATIO)
+
+/* Per-slice required reach = distance to the FARTHEST critical Target Load.
+   The cumulative sum of these buckets is the direct prediction of the
+   walk-distance sweep: at limit D, slices in buckets beyond D lose a load. */
+DEF_STAT(ZERECO_WALK_SLICE_REACH_0, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_SLICE_REACH_1, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_SLICE_REACH_2, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_SLICE_REACH_3, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_SLICE_REACH_4, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_SLICE_REACH_5, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_SLICE_REACH_6, COUNT, NO_RATIO)
+
+DEF_STAT(ZERECO_WALK_SLICE_REACH_WIDE_0, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_SLICE_REACH_WIDE_1, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_SLICE_REACH_WIDE_2, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_SLICE_REACH_WIDE_3, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_SLICE_REACH_WIDE_4, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_SLICE_REACH_WIDE_5, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_SLICE_REACH_WIDE_6, COUNT, NO_RATIO)
+
+DEF_STAT(ZERECO_WALK_SLICES_MEASURED, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_SLICES_WIDE, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_SLICE_NO_CRIT_TL, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_ROOM_TOTAL, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_SPAN_TOTAL, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_CRIT_SPAN_WIDE_TOTAL, COUNT, NO_RATIO)
+/* Chain ran to the oldest snapshot entry: cut by window reach, not dataflow.
+   If these are large, 512 is already truncating and the sweep starts from an
+   already-clipped state. */
+DEF_STAT(ZERECO_WALK_SPAN_HIT_WINDOW_EDGE, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_WALK_SRC_CUT_BY_WINDOW, COUNT, NO_RATIO)
+
+/* ---- Phase-2 walk reach limit (2026-08-25) ---- */
+/* Slices whose reach was actually clipped by zereco_walk_max_distance (the H2P
+   had more room than the limit allows).  Zero means the limit never bound. */
+DEF_STAT(ZERECO_WALK_SLICE_REACH_CLIPPED, COUNT, NO_RATIO)
+/* Critical-walk source whose youngest older writer exists in the snapshot but
+   is not a reachability member -- under a reach limit this is the chain edge
+   the sweep moves.  Compare against SRC_CUT_BY_WINDOW, which is the writer not
+   being in the snapshot at all. */
+DEF_STAT(ZERECO_WALK_SRC_CUT_BY_DISTANCE, COUNT, NO_RATIO)
+/* 16-entry memory live-in list was full, so a store->load edge was dropped.
+   Pre-existing silent truncation, now visible. */
+DEF_STAT(ZERECO_WALK_MEM_LIVEIN_OVERFLOW, COUNT, NO_RATIO)
+

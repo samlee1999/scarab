@@ -976,6 +976,7 @@ void node_retire() {
        * All other retires are "optional" to release resources in the PIN frontend */
       inst_count[node->proc_id]++;
       hbt_retire_instruction_tick(node->proc_id);
+      dcc_retire_instruction_tick(node->proc_id);
       STAT_EVENT(op->proc_id, NODE_INST_COUNT);
 
       if (op->fetched_instruction) {

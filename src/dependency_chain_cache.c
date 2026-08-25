@@ -14,6 +14,7 @@ Dependency_Chain_Cache_Entry** dependency_chain_caches;
 Dependency_Chain_Cache_Entry** block_caches;
 Block_Cache_Tag_Entry** empty_block_tag_store;
 Backward_Walk_Engine** bw_engines;
+static Counter* dcc_retired_inst_count;
 
 // =================================================================
 // 초기화 및 리셋 함수
@@ -67,7 +68,8 @@ void init_dependency_chain_cache(uns proc_id) {
         block_caches = (Dependency_Chain_Cache_Entry**)calloc(NUM_CORES, sizeof(Dependency_Chain_Cache_Entry*));
         empty_block_tag_store = (Block_Cache_Tag_Entry**)calloc(NUM_CORES, sizeof(Block_Cache_Tag_Entry*));
         bw_engines = (Backward_Walk_Engine**)calloc(NUM_CORES, sizeof(Backward_Walk_Engine*));
-        ASSERT(0, dependency_chain_caches && block_caches && empty_block_tag_store && bw_engines);
+        dcc_retired_inst_count = (Counter*)calloc(NUM_CORES, sizeof(Counter));
+        ASSERT(0, dependency_chain_caches && block_caches && empty_block_tag_store && bw_engines && dcc_retired_inst_count);
     }
     ASSERT(proc_id < NUM_CORES, "proc_id out of bounds\n");
 
@@ -116,10 +118,13 @@ static bool remove_reg_from_live_in_list(SourceList* list, Reg_Info* reg) {
     return true;
 }
 
-static void add_addr_to_live_in_list(SourceList* list, Addr addr) {
-    if (list->addr_count >= MAX_MEM_LIVE_INS) return;
-    for (uns i = 0; i < list->addr_count; ++i) if (list->addrs[i] == addr) return;
+/* Returns false when the 16-entry memory live-in list is full and the address
+   had to be dropped -- a silently missed store->load edge, so it is counted. */
+static bool add_addr_to_live_in_list(SourceList* list, Addr addr) {
+    for (uns i = 0; i < list->addr_count; ++i) if (list->addrs[i] == addr) return true;
+    if (list->addr_count >= MAX_MEM_LIVE_INS) return false;
     list->addrs[list->addr_count++] = addr;
+    return true;
 }
 
 static bool remove_addr_from_live_in_list(SourceList* list, Addr addr) {
@@ -204,7 +209,8 @@ static int collect_h2p_indices(uns proc_id, Op* ordered_ops,
     return h2p_count;
 }
 
-static int build_dependency_mask_for_target(Op* ordered_ops, int trigger_op_idx,
+static int build_dependency_mask_for_target(uns proc_id, Op* ordered_ops,
+                                            int trigger_op_idx,
                                             bool* is_data_dependent) {
     SourceList live_in_list = {0};
     memset(is_data_dependent, false, sizeof(bool) * FILL_BUFFER_SIZE);
@@ -215,10 +221,24 @@ static int build_dependency_mask_for_target(Op* ordered_ops, int trigger_op_idx,
     if (trigger_op->inst_info && trigger_op->table_info) {
         for (int i = 0; i < trigger_op->table_info->num_src_regs; ++i) add_reg_to_live_in_list(&live_in_list, &trigger_op->inst_info->srcs[i]);
     }
-    if (trigger_op->table_info && trigger_op->table_info->mem_type == MEM_LD) add_addr_to_live_in_list(&live_in_list, trigger_op->oracle_info.va);
+    if (trigger_op->table_info && trigger_op->table_info->mem_type == MEM_LD &&
+        !add_addr_to_live_in_list(&live_in_list, trigger_op->oracle_info.va))
+        STAT_EVENT(proc_id, ZERECO_WALK_MEM_LIVEIN_OVERFLOW);
+
+    /* Walk reach limit: stop at ZERECO_WALK_MAX_DISTANCE retired uops before the
+       trigger.  Bounding the reachability walk is sufficient -- the critical
+       walk only follows producers that reachability already owns. */
+    int oldest_visible = 0;
+    if (ZERECO_WALK_MAX_DISTANCE) {
+        int bounded = trigger_op_idx - (int)ZERECO_WALK_MAX_DISTANCE;
+        if (bounded > 0)
+            oldest_visible = bounded;
+        if (trigger_op_idx > (int)ZERECO_WALK_MAX_DISTANCE)
+            STAT_EVENT(proc_id, ZERECO_WALK_SLICE_REACH_CLIPPED);
+    }
 
     int first_dep_op_idx = trigger_op_idx;
-    for (int i = trigger_op_idx - 1; i >= 0; --i) {
+    for (int i = trigger_op_idx - 1; i >= oldest_visible; --i) {
         Op* current_op = &ordered_ops[i];
         bool depends = false;
         if (!current_op->table_info || !current_op->inst_info) continue;
@@ -232,17 +252,200 @@ static int build_dependency_mask_for_target(Op* ordered_ops, int trigger_op_idx,
             is_data_dependent[i] = true;
             first_dep_op_idx = i;
             for (int s = 0; s < current_op->table_info->num_src_regs; ++s) add_reg_to_live_in_list(&live_in_list, &current_op->inst_info->srcs[s]);
-            if (current_op->table_info->mem_type == MEM_LD) add_addr_to_live_in_list(&live_in_list, current_op->oracle_info.va);
+            if (current_op->table_info->mem_type == MEM_LD &&
+                !add_addr_to_live_in_list(&live_in_list, current_op->oracle_info.va))
+                STAT_EVENT(proc_id, ZERECO_WALK_MEM_LIVEIN_OVERFLOW);
         }
     }
 
     return first_dep_op_idx;
 }
 
+/* =================================================================
+ * Critical-path oracle walk (2026-08-21 direction)
+ *
+ * The reachability walk above answers "which committed ops can influence the
+ * trigger" -- it unions every source at every step.  This walk answers "which
+ * ops actually gated the trigger's resolution": starting from the H2P branch
+ * it follows, at each op, only the source whose producer delivered its value
+ * LAST.  The comparison key is op->wake_cycle -- the very timestamp map.c
+ * uses to compute a consumer's rdy_cycle (rdy_cycle = MAX over producers of
+ * wake_cycle), so "largest wake_cycle among my producers" is by construction
+ * "the source I waited for".  Loads carry their true service time in
+ * wake_cycle (dcache_stage stamps the actual data-return cycle, miss and fill
+ * included), so a missing load naturally pulls the walk through its address
+ * chain.  x86 conditional branches read flags, so the walk descends
+ * branch -> flag producer (cmp/test) -> the later of the cmp's sources.
+ *
+ * Producer matching (youngest older writer per register id, youngest older
+ * store with exact committed-VA match for a load) mirrors the reachability
+ * walk, and a producer is only followed if it is inside the reachability
+ * slice, so is_critical is a strict subset of is_data_dependent -- the
+ * frontend's candidate-subset-of-chain invariant is preserved.
+ *
+ * This is a simulator oracle: wake_cycle is not architectural state a real
+ * RIW would hold.  It measures the headroom of criticality selection before
+ * any hardware mechanism is designed (a hardware path would need a coarse
+ * per-entry result timestamp; feasibility is deliberately out of scope). */
+static Counter dcc_op_value_ready_cycle(uns proc_id, const Op* op) {
+    /* op_pool_setup_op does not clear wake_cycle, so an op that never
+       broadcast (or a missed completion path) can carry the slot's previous
+       occupant's tag.  Every legitimate broadcast tag lies inside this op's
+       own lifetime [map_cycle, retire_cycle] -- the lower bound is map (not
+       sched) because an RFP-covered load launches at rename and can deliver
+       before its own AGU slot -- while a previous occupant's tag precedes
+       this op's rename, so the window rejects stale values. */
+    if (op->wake_cycle && op->map_cycle != MAX_CTR &&
+        op->wake_cycle >= op->map_cycle && op->wake_cycle <= op->retire_cycle)
+        return op->wake_cycle;
+
+    /* No usable broadcast tag.  Every fallback is bounded by retire_cycle: an
+       unbounded value (MAX_CTR) would win every last-arrival comparison and
+       silently steer the whole walk, and would overflow the slack addition
+       below.  Both counters must stay near zero for the selection to mean
+       what it claims. */
+    STAT_EVENT(proc_id, ZERECO_WALK_READY_CYCLE_FALLBACK);
+    if (op->exec_cycle != MAX_CTR && op->exec_cycle <= op->retire_cycle)
+        return op->exec_cycle;
+    if (op->done_cycle != MAX_CTR && op->done_cycle <= op->retire_cycle)
+        return op->done_cycle;
+    STAT_EVENT(proc_id, ZERECO_WALK_READY_CYCLE_UNKNOWN);
+    return op->retire_cycle;
+}
+
+/* Distance buckets shared by the Phase-1 reach instrumentation.  Distance is
+   measured in retired uops between the H2P branch and the op, i.e. exactly the
+   quantity a walk-distance limit would cap. */
+static inline int dcc_dist_bucket(int d) {
+    if (d <= 8)   return 0;
+    if (d <= 16)  return 1;
+    if (d <= 32)  return 2;
+    if (d <= 64)  return 3;
+    if (d <= 128) return 4;
+    if (d <= 256) return 5;
+    return 6;
+}
+
+static void build_critical_path_mask_for_target(uns proc_id, Op* ordered_ops,
+                                                int trigger_op_idx,
+                                                const bool* is_data_dependent,
+                                                bool* is_critical) {
+    memset(is_critical, false, sizeof(bool) * FILL_BUFFER_SIZE);
+    is_critical[trigger_op_idx] = true;
+
+    int worklist[FILL_BUFFER_SIZE];
+    int worklist_count = 0;
+    worklist[worklist_count++] = trigger_op_idx;
+
+    while (worklist_count > 0) {
+        int cur = worklist[--worklist_count];
+        Op* cur_op = &ordered_ops[cur];
+        if (!cur_op->table_info || !cur_op->inst_info)
+            continue;
+
+        /* Gather this op's in-snapshot producers (deduplicated by index). */
+        int     producer_idx[MAX_SRCS + 1];
+        Counter producer_rdy[MAX_SRCS + 1];
+        int     producer_count = 0;
+
+        for (int srci = 0; srci < cur_op->table_info->num_src_regs; ++srci) {
+            Reg_Info* src = &cur_op->inst_info->srcs[srci];
+            if (src->id >= NUM_REG_IDS)
+                continue;
+            bool writer_found = false;
+            for (int j = cur - 1; j >= 0; --j) {
+                Op* cand = &ordered_ops[j];
+                if (!cand->table_info || !cand->inst_info)
+                    continue;
+                bool writes = false;
+                for (int d = 0; d < cand->table_info->num_dest_regs; ++d) {
+                    if (cand->inst_info->dests[d].id == src->id) {
+                        writes = true;
+                        break;
+                    }
+                }
+                if (!writes)
+                    continue;
+                writer_found = true;
+                /* Youngest older writer found; keep it only if the
+                   reachability walk also owns it (subset invariant).  Under a
+                   reach limit the writer may exist but sit beyond it, which is
+                   the chain edge the sweep is actually moving. */
+                if (!is_data_dependent[j])
+                    STAT_EVENT(proc_id, ZERECO_WALK_SRC_CUT_BY_DISTANCE);
+                if (is_data_dependent[j]) {
+                    bool dup = false;
+                    for (int k = 0; k < producer_count; ++k)
+                        if (producer_idx[k] == j)
+                            dup = true;
+                    if (!dup && producer_count < MAX_SRCS + 1) {
+                        producer_idx[producer_count] = j;
+                        producer_rdy[producer_count] =
+                          dcc_op_value_ready_cycle(proc_id, cand);
+                        producer_count++;
+                    }
+                }
+                break;
+            }
+            /* Scanned to the oldest snapshot entry without finding any writer
+               for this source: the producer lived outside the window, so the
+               chain is cut here by window reach rather than by dataflow. */
+            if (!writer_found)
+                STAT_EVENT(proc_id, ZERECO_WALK_SRC_CUT_BY_WINDOW);
+        }
+
+        if (cur_op->table_info->mem_type == MEM_LD) {
+            for (int j = cur - 1; j >= 0; --j) {
+                Op* cand = &ordered_ops[j];
+                if (!cand->table_info || !cand->inst_info)
+                    continue;
+                if (cand->table_info->mem_type != MEM_ST ||
+                    cand->oracle_info.va != cur_op->oracle_info.va)
+                    continue;
+                if (is_data_dependent[j]) {
+                    bool dup = false;
+                    for (int k = 0; k < producer_count; ++k)
+                        if (producer_idx[k] == j)
+                            dup = true;
+                    if (!dup && producer_count < MAX_SRCS + 1) {
+                        producer_idx[producer_count] = j;
+                        producer_rdy[producer_count] =
+                          dcc_op_value_ready_cycle(proc_id, cand);
+                        producer_count++;
+                    }
+                }
+                break;
+            }
+        }
+
+        if (producer_count == 0)
+            continue;  /* chain start: live-in came from beyond the window */
+
+        Counter last_arrival = 0;
+        for (int k = 0; k < producer_count; ++k)
+            last_arrival = MAX2(last_arrival, producer_rdy[k]);
+
+        int followed = 0;
+        for (int k = 0; k < producer_count; ++k) {
+            if (producer_rdy[k] + ZERECO_CRITICAL_SLACK_CYCLES < last_arrival)
+                continue;
+            followed++;
+            int j = producer_idx[k];
+            if (!is_critical[j]) {
+                is_critical[j] = true;
+                worklist[worklist_count++] = j;
+            }
+        }
+        STAT_EVENT(proc_id, ZERECO_WALK_CRITICAL_STEPS);
+        if (followed > 1)
+            STAT_EVENT(proc_id, ZERECO_WALK_CRITICAL_MULTI_FOLLOW);
+    }
+}
+
 static int build_iq_priority_candidate_mask(Op* ordered_ops,
                                             int first_dep_op_idx,
                                             int trigger_op_idx,
-                                            bool* is_data_dependent,
+                                            const bool* is_data_dependent,
                                             bool* is_priority_candidate) {
     memset(is_priority_candidate, false, sizeof(bool) * FILL_BUFFER_SIZE);
 
@@ -272,7 +475,8 @@ static int build_iq_priority_candidate_mask(Op* ordered_ops,
 
 static void commit_dependency_chain_entry(
   uns proc_id, Op* ordered_ops, int first_dep_op_idx, int trigger_op_idx,
-  bool* is_data_dependent, bool* is_priority_candidate,
+  bool* is_data_dependent, const bool* is_critical,
+  bool* is_priority_candidate,
   Addr* block_start_pc_map,
   uns* block_op_idx_map, uns* block_total_ops_map) {
     Op* trigger_op = &ordered_ops[trigger_op_idx];
@@ -297,6 +501,16 @@ static void commit_dependency_chain_entry(
         if (!is_data_dependent[i] || !ordered_ops[i].table_info ||
             ordered_ops[i].table_info->mem_type != MEM_LD)
             continue;
+        STAT_EVENT(proc_id, ZERECO_WALK_TARGET_LOADS_SEEN);
+        if (is_critical[i]) {
+            STAT_EVENT(proc_id, ZERECO_WALK_CRITICAL_TARGET_LOADS);
+            STAT_EVENT(proc_id, ZERECO_WALK_CRITICAL_TARGET_LOAD_PORTION);
+        }
+        /* Critical-only Target-Load scope: a slice load off the critical
+           chain neither owns a PT entry nor counts toward the slice's
+           RF-coverage judgment, so both RFP consumers see one population. */
+        if (RFP_TARGET_CRITICAL_ONLY && !is_critical[i])
+            continue;
         target_load_count++;
         if (!ordered_ops[i].zereco_rf_covered)
             all_target_loads_rf_covered = false;
@@ -318,6 +532,8 @@ static void commit_dependency_chain_entry(
         for (int i = first_dep_op_idx; i <= trigger_op_idx; ++i) {
             if (!is_data_dependent[i] || !ordered_ops[i].table_info ||
                 ordered_ops[i].table_info->mem_type != MEM_LD)
+                continue;
+            if (RFP_TARGET_CRITICAL_ONLY && !is_critical[i])
                 continue;
             if (ordered_ops[i].zereco_rf_covered) {
                 STAT_EVENT(proc_id, ZERECO_IQ_TARGET_LOADS_RF_COVERED);
@@ -574,11 +790,79 @@ void add_dependency_chain(uns proc_id, Op* ordered_ops, int ordered_op_count) {
         int trigger_op_idx = h2p_indices[h];
         bool is_data_dependent[FILL_BUFFER_SIZE];
         int first_dep_op_idx =
-            build_dependency_mask_for_target(ordered_ops, trigger_op_idx,
+            build_dependency_mask_for_target(proc_id, ordered_ops, trigger_op_idx,
                                              is_data_dependent);
+        /* Oracle criticality is computed for every walk (stats always
+           measure the reachability-vs-critical gap); the knobs below only
+           choose whether a consumer uses it. */
+        bool is_critical[FILL_BUFFER_SIZE];
+        build_critical_path_mask_for_target(proc_id, ordered_ops,
+                                            trigger_op_idx, is_data_dependent,
+                                            is_critical);
+        /* ---- Phase-1 reach instrumentation (2026-08-24) ----
+           `room` is how many older uops this H2P could even see in the
+           snapshot; a branch sitting near the young end of the window has a
+           short reach for reasons that have nothing to do with its dataflow.
+           So every distance histogram is emitted twice: once over all slices,
+           and once restricted to slices with room >= 256, which is the
+           unbiased view to read when sizing a walk-distance limit. */
+        int room = trigger_op_idx;
+        bool wide = (room >= 256);
+        int oldest_crit = trigger_op_idx;
+        int reach_crit_tl = -1;   /* farthest critical Target Load, -1 = none */
+
+        for (int i = first_dep_op_idx; i <= trigger_op_idx; ++i) {
+            if (!is_data_dependent[i])
+                continue;
+            STAT_EVENT(proc_id, ZERECO_WALK_SLICE_DEP_OPS);
+            if (!is_critical[i])
+                continue;
+            STAT_EVENT(proc_id, ZERECO_WALK_CRITICAL_OPS);
+            STAT_EVENT(proc_id, ZERECO_WALK_CRITICAL_OP_PORTION);
+
+            int dist = trigger_op_idx - i;
+            if (i < oldest_crit)
+                oldest_crit = i;
+            STAT_EVENT(proc_id, ZERECO_WALK_CRIT_OP_DIST_0 + dcc_dist_bucket(dist));
+
+            if (ordered_ops[i].table_info &&
+                ordered_ops[i].table_info->mem_type == MEM_LD) {
+                STAT_EVENT(proc_id, ZERECO_WALK_CRIT_TL_DIST_0 + dcc_dist_bucket(dist));
+                if (wide)
+                    STAT_EVENT(proc_id,
+                               ZERECO_WALK_CRIT_TL_DIST_WIDE_0 + dcc_dist_bucket(dist));
+                if (dist > reach_crit_tl)
+                    reach_crit_tl = dist;
+            }
+        }
+
+        /* Per-slice required reach: the distance a walk-distance limit would
+           have to allow for this slice to keep every critical Target Load. */
+        STAT_EVENT(proc_id, ZERECO_WALK_SLICES_MEASURED);
+        INC_STAT_EVENT(proc_id, ZERECO_WALK_ROOM_TOTAL, room);
+        INC_STAT_EVENT(proc_id, ZERECO_WALK_CRIT_SPAN_TOTAL,
+                       trigger_op_idx - oldest_crit);
+        if (trigger_op_idx - oldest_crit >= room && room > 0)
+            STAT_EVENT(proc_id, ZERECO_WALK_SPAN_HIT_WINDOW_EDGE);
+        if (wide) {
+            STAT_EVENT(proc_id, ZERECO_WALK_SLICES_WIDE);
+            INC_STAT_EVENT(proc_id, ZERECO_WALK_CRIT_SPAN_WIDE_TOTAL,
+                           trigger_op_idx - oldest_crit);
+        }
+        if (reach_crit_tl < 0) {
+            STAT_EVENT(proc_id, ZERECO_WALK_SLICE_NO_CRIT_TL);
+        } else {
+            STAT_EVENT(proc_id, ZERECO_WALK_SLICE_REACH_0 + dcc_dist_bucket(reach_crit_tl));
+            if (wide)
+                STAT_EVENT(proc_id,
+                           ZERECO_WALK_SLICE_REACH_WIDE_0 + dcc_dist_bucket(reach_crit_tl));
+        }
         bool is_priority_candidate[FILL_BUFFER_SIZE];
         build_iq_priority_candidate_mask(ordered_ops, first_dep_op_idx,
-                                         trigger_op_idx, is_data_dependent,
+                                         trigger_op_idx,
+                                         ZERECO_IQ_PRIORITY_CRITICAL_ONLY
+                                           ? is_critical
+                                           : is_data_dependent,
                                          is_priority_candidate);
 
         if (first_dep_op_idx < first_union_dep_idx)
@@ -595,7 +879,7 @@ void add_dependency_chain(uns proc_id, Op* ordered_ops, int ordered_op_count) {
 
         commit_dependency_chain_entry(proc_id, ordered_ops, first_dep_op_idx,
                                       trigger_op_idx, is_data_dependent,
-                                      is_priority_candidate,
+                                      is_critical, is_priority_candidate,
                                       block_start_pc_map, block_op_idx_map,
                                       block_total_ops_map);
     }
@@ -646,6 +930,23 @@ void periodically_reset_caches(uns proc_id) {
     if (empty_block_tag_store && empty_block_tag_store[proc_id]) {
         memset(empty_block_tag_store[proc_id], 0, sizeof(Block_Cache_Tag_Entry) * EMPTY_BLOCK_TAG_STORE_SIZE);
     }
+}
+
+/* TEA MICRO'24 SIV-C, "Periodically Resetting the Bit-masks": chains captured
+   under older control flows are removed every ZERECO_BLOCK_MASK_RESET_INTERVAL
+   retired instructions (paper best: 500K).  Ticked from the retire loop next
+   to the HBT decay tick.  Only the Block Cache masks and the empty-block tag
+   store reset, exactly as in the paper; HBT decay and PT utility aging are
+   separate, unchanged mechanisms. */
+void dcc_retire_instruction_tick(uns proc_id) {
+    if (!ZERECO_BLOCK_MASK_RESET_INTERVAL)
+        return;
+    if (!dcc_retired_inst_count || !block_caches || !block_caches[proc_id])
+        return;
+    if (++dcc_retired_inst_count[proc_id] % ZERECO_BLOCK_MASK_RESET_INTERVAL)
+        return;
+    periodically_reset_caches(proc_id);
+    STAT_EVENT(proc_id, ZERECO_BLOCK_MASK_RESETS);
 }
 
 

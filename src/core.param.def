@@ -445,6 +445,38 @@ DEF_PARAM(zereco_piq_dispatch_policy, ZERECO_PIQ_DISPATCH_POLICY, uns, uns, 0, )
 /* [EXPERIMENT: ZERECO_H2P_MISPRED_LATENCY_PROFILE]
    Profile execute-resolved H2P mispred/misfetch latency without changing pipeline behavior. */
 DEF_PARAM(zereco_h2p_mispred_latency_profile, ZERECO_H2P_MISPRED_LATENCY_PROFILE, Flag, Flag, FALSE, )
+/* [EXPERIMENT: ZERECO CRITICAL-PATH SELECTION -- 2026-08-21 direction]
+   TEA-faithful periodic reset of the Block Cache bit-masks (TEA MICRO'24
+   SIV-C: dependence chains from older control flows are removed every 500K
+   retired instructions).  0 disables the reset (pre-260821 behavior, masks
+   accumulate by OR forever). */
+DEF_PARAM(zereco_block_mask_reset_interval, ZERECO_BLOCK_MASK_RESET_INTERVAL, uns, uns, 500000, )
+/* Oracle critical-path selection.  The backward walk always computes, per H2P
+   slice, the last-arriving-source chain using retired timestamps
+   (op->wake_cycle -- the exact quantity map.c uses to set consumer rdy_cycle).
+   The two knobs below pick the consumers independently so each variable can be
+   isolated:
+     zereco_iq_priority_critical_only -- IQ priority candidates come from the
+       critical chain instead of the full backward slice.
+     rfp_target_critical_only -- Target-Load (PT) membership, the slice
+       target-load count, and the RF-coverage judgment are restricted to
+       critical-chain loads. */
+DEF_PARAM(zereco_iq_priority_critical_only, ZERECO_IQ_PRIORITY_CRITICAL_ONLY, Flag, Flag, FALSE, )
+DEF_PARAM(rfp_target_critical_only, RFP_TARGET_CRITICAL_ONLY, Flag, Flag, FALSE, )
+/* A producer whose result arrived within this many cycles of the last-arriving
+   producer is also followed (0 = strict last-arrival; exact ties are always
+   followed).  Guards against criticality oscillation between near-tied
+   sources. */
+DEF_PARAM(zereco_critical_slack_cycles, ZERECO_CRITICAL_SLACK_CYCLES, uns, uns, 0, )
+/* [EXPERIMENT: WALK REACH -- Phase 2, 2026-08-25]
+   Limit the backward walk to ops within this many retired uops BEFORE the H2P
+   branch (0 = unlimited, i.e. the whole RIW snapshot).  The limit is applied to
+   the reachability walk only; the critical walk follows producers exclusively
+   through reachability members, so it is bounded by the same distance without a
+   second knob.  This is the walk's REACH, not the RIW size -- the RIW stays 512
+   so that walk frequency and the gating-induced sampling loss are unchanged and
+   distance is the only variable. */
+DEF_PARAM(zereco_walk_max_distance, ZERECO_WALK_MAX_DISTANCE, uns, uns, 0, )
 /* [EXPERIMENT: ZERECO TIMED RFP] Register File Prefetching (ISCA'22) with real
    launch timing, L1 bandwidth contention, and finite predictor storage.  Unlike
    the h2p_chain_perfect_load oracle -- which predicts and validates in the same

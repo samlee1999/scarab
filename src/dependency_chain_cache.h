@@ -95,6 +95,7 @@ void init_dependency_chain_cache(uns proc_id);
 void reset_dependency_chain_cache(uns proc_id);
 void add_dependency_chain(uns proc_id, Op* snapshot_buffer, int op_count);
 void periodically_reset_caches(uns proc_id);
+void dcc_retire_instruction_tick(uns proc_id);
 void cycle_backward_walk_engine(uns proc_id); 
 Dependency_Chain_Cache_Entry* get_dependency_chain(uns proc_id, Addr pc);
 Dependency_Chain_Cache_Entry* get_dependency_chain_block(uns proc_id, Addr pc);
