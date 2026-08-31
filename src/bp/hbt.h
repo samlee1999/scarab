@@ -11,7 +11,7 @@
 // - H2P if counter > 1 (i.e., >= 2)
 // - Decrement all counters by 1 every 50K instructions
 // ==========================================================
-#define HBT_SIZE 1024         // HBT 테이블의 전체 크기
+#define HBT_SIZE 256          // TEA: 256-entry H2P Branch Table
 #define HBT_CTR_BITS 3        // HBT 카운터의 비트 수 (논문: 3-bit)
 #define HBT_CTR_MAX ((1 << HBT_CTR_BITS) - 1) // HBT 카운터의 최댓값 (7)
 #define HBT_H2P_THRESHOLD 1   // counter > 1이면 H2P (논문 기준)

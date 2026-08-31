@@ -10,7 +10,8 @@
 // 상수 정의
 // =================================================================
 #define DEPENDENCY_CHAIN_CACHE_SIZE 1024
-#define BLOCK_CACHE_SIZE            1024 // 새로 추가된 블록 캐시 크기
+#define BLOCK_CACHE_SIZE            512  // TEA: 512-entry Block Cache
+#define BLOCK_CACHE_MASK_RESET_INTERVAL 500000ULL
 #define EMPTY_BLOCK_TAG_STORE_SIZE    256
 #define MAX_CHAIN_LENGTH            64   // 체인의 최대 길이
 #define MAX_LIVE_INS                32   // Live-in 목록의 최대 크기

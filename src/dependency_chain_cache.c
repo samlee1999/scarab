@@ -340,6 +340,8 @@ void cycle_backward_walk_engine(uns proc_id) {
 }
 
 void periodically_reset_caches(uns proc_id) {
+    ASSERT(proc_id < NUM_CORES, "proc_id out of bounds\n");
+
     if (block_caches && block_caches[proc_id]) {
         for (int i = 0; i < BLOCK_CACHE_SIZE; ++i) {
             if (block_caches[proc_id][i].is_valid) {
@@ -347,9 +349,6 @@ void periodically_reset_caches(uns proc_id) {
                 block_caches[proc_id][i].chain_length = 0;
             }
         }
-    }
-    if (empty_block_tag_store && empty_block_tag_store[proc_id]) {
-        memset(empty_block_tag_store[proc_id], 0, sizeof(Block_Cache_Tag_Entry) * EMPTY_BLOCK_TAG_STORE_SIZE);
     }
 }
 

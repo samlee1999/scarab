@@ -918,6 +918,9 @@ void node_retire() {
        * All other retires are "optional" to release resources in the PIN frontend */
       inst_count[node->proc_id]++;
       hbt_retire_instruction_tick(node->proc_id);
+      if (inst_count[node->proc_id] % BLOCK_CACHE_MASK_RESET_INTERVAL == 0) {
+        periodically_reset_caches(node->proc_id);
+      }
       STAT_EVENT(op->proc_id, NODE_INST_COUNT);
 
       if (op->fetched_instruction) {
