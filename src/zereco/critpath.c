@@ -242,6 +242,20 @@ void critpath_note_retire(Op* op) {
   Critpath_PC_Entry* entry = critpath_pc_lookup(proc_id, pc, TRUE);
   if (!entry)
     return;
+
+  /* Seed before measuring, not after: an H2P branch is the root of its own
+     slice from its very first commit, and taking its slack as non-slice on that
+     first pass would bias the slice histograms against the one instruction that
+     matters most. */
+  Flag is_h2p_branch = (op->table_info->cf_type != NOT_CF) &&
+                       op->oracle_info.hbt_pred_is_hard;
+  if (is_h2p_branch && (!entry->in_slice || entry->owner_pc != pc)) {
+    entry->in_slice = TRUE;
+    entry->depth = 0;
+    entry->owner_pc = pc;
+    STAT_EVENT(proc_id, CRITPATH_SEEDS);
+  }
+
   Flag in_slice = entry->in_slice;
   if (in_slice)
     STAT_EVENT(proc_id, CRITPATH_SLICE_OPS);
@@ -303,21 +317,7 @@ void critpath_note_retire(Op* op) {
     entry->last_producer_pc = op->critpath_last_producer_pc;
   }
 
-  /* ---- 5. seed and propagate one level, as the real mechanism would ---- */
-  Flag is_h2p_branch = (op->table_info->cf_type != NOT_CF) &&
-                       op->oracle_info.hbt_pred_is_hard;
-
-  if (is_h2p_branch) {
-    /* The branch itself is the root of its own slice. */
-    if (!entry->in_slice || entry->owner_pc != pc) {
-      entry->in_slice = TRUE;
-      entry->depth = 0;
-      entry->owner_pc = pc;
-      STAT_EVENT(proc_id, CRITPATH_SEEDS);
-    }
-    in_slice = TRUE;
-  }
-
+  /* ---- 5. propagate one level, as the real mechanism would -------------- */
   if (!in_slice || !has_lpr)
     return;
   STAT_EVENT(proc_id, CRITPATH_SLICE_OPS_WITH_LPR);
@@ -336,6 +336,12 @@ void critpath_note_retire(Op* op) {
   if (op->critpath_last_producer_pc == 0)
     return;
 
+  /* Read what this op contributes before touching the table again.  The lookup
+     below can evict whichever entry shares its index -- including this one --
+     so `entry` must not be dereferenced afterwards. */
+  uns8 my_depth = entry->depth;
+  Addr my_owner = entry->owner_pc;
+
   Critpath_PC_Entry* producer =
     critpath_pc_lookup(proc_id, op->critpath_last_producer_pc, TRUE);
   if (!producer)
@@ -343,25 +349,27 @@ void critpath_note_retire(Op* op) {
 
   if (!producer->in_slice) {
     producer->in_slice = TRUE;
-    producer->depth = entry->depth + 1;
-    producer->owner_pc = entry->owner_pc;
+    producer->depth = my_depth + 1;
+    producer->owner_pc = my_owner;
     STAT_EVENT(proc_id, CRITPATH_PROPAGATIONS);
     return;
   }
 
-  /* Already a member.  Keep the shortest distance seen, and count how often two
-     H2P branches claim the same instruction -- with one owner field per entry
-     they overwrite each other, and a stale owner can cost the other branch its
-     chain member. */
-  if (producer->depth > entry->depth + 1)
-    producer->depth = entry->depth + 1;
+  /* Already a member.  Keep the shortest distance seen -- this also absorbs a
+     self-dependence, where an induction variable is its own last producer and
+     would otherwise deepen by one every iteration. */
+  if (producer->depth > my_depth + 1)
+    producer->depth = my_depth + 1;
 
-  if (producer->owner_pc != entry->owner_pc) {
+  /* Count how often two H2P branches claim the same instruction: with one owner
+     field per entry they overwrite each other, and a stale owner can cost the
+     other branch a member of its chain. */
+  if (producer->owner_pc != my_owner) {
     STAT_EVENT(proc_id, CRITPATH_OWNER_OVERWRITE);
-    if (hbt_is_hard_branch(producer->owner_pc) &&
-        !hbt_is_hard_branch(entry->owner_pc))
+    if (producer->owner_pc && hbt_is_hard_branch(producer->owner_pc) &&
+        !(my_owner && hbt_is_hard_branch(my_owner)))
       STAT_EVENT(proc_id, CRITPATH_OWNER_OVERWRITE_H2P_LOST);
-    producer->owner_pc = entry->owner_pc;
+    producer->owner_pc = my_owner;
   } else {
     STAT_EVENT(proc_id, CRITPATH_PROPAGATION_REFRESHED);
   }
