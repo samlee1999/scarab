@@ -242,6 +242,14 @@ void op_pool_setup_op(uns proc_id, Op* op) {
   op->rfp_pred_va = 0;
   op->rfp_probe_cycle = MAX_CTR;
   op->rfp_data_ready_cycle = MAX_CTR;
+  /* Critical-path observation: 0 means "no source has woken this op yet", which
+     is distinguishable from a real wake because wake cycles are always >= 1. */
+  op->critpath_last_cycle = 0;
+  op->critpath_second_cycle = 0;
+  op->critpath_last_src = 0;
+  op->critpath_last_dep_type = 0;
+  op->critpath_wake_events = 0;
+  op->critpath_last_producer_pc = 0;
   op->off_path = FALSE;  // FIXME: check
   op->state = OS_FETCHED;
   op->fu_num = -1;

@@ -70,6 +70,7 @@
 #include "tea/tea_thread.h"
 #include "tea/tea_rename.h"
 #include "cmp_model.h"
+#include "zereco/critpath.h"
 #include "zereco/rfp.h"
 
 /* Macros */
@@ -1032,6 +1033,9 @@ void node_retire() {
        drops ops while walking, and base_va + stride * inflight only holds if
        no instance is skipped. */
     rfp_retire_train(op);
+    /* Critical-path observation: taken at commit so only on-path, architecturally
+       executed instructions contribute. */
+    critpath_note_retire(op);
     fill_buffer_add(op->proc_id, op);
 
     // free the previous register entries with same architectural destination

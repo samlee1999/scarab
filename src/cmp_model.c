@@ -74,6 +74,7 @@
 #include "tea/tea_thread.h"
 #include "tea/tea_fetch_stage.h"
 #include "tea/tea_rename.h"
+#include "zereco/critpath.h"
 #include "zereco/h2p_mispred_latency.h"
 #include "zereco/rfp.h"
 
@@ -139,6 +140,7 @@ void cmp_init(uns mode) {
     init_dependency_chain_cache(proc_id);
     init_on_off_path_cache(proc_id);
     rfp_init(proc_id);
+    critpath_init(proc_id);
 
     /* TEA Thread initialization */
     if (TEA_ENABLE) {
@@ -204,6 +206,7 @@ void cmp_reset() {
       reset_tea_thread(proc_id);
     }
     rfp_reset(proc_id);
+    critpath_reset(proc_id);
   }
   reset_memory();
   reset_zereco_h2p_mispred_latency_profiler();
@@ -370,6 +373,14 @@ void cmp_wake(Op* src_op, Op* dep_op, uns8 rdy_bit) {
           dep_op->proc_id);
   ASSERTM(dep_op->proc_id, dep_op->proc_id == node->proc_id, "dep id: %i, node id: %i\n", dep_op->proc_id,
           node->proc_id);
+
+  /* Record which source arrives last -- the Last Producer Register.  This is
+     the argmax of the same max the wakeup logic already computes below, so it
+     costs nothing beyond remembering the winner and the runner-up.  It must sit
+     ahead of the early return: a source can wake its consumer before that
+     consumer reaches the RS, and those events are the majority for deep chains.
+     Observation only; nothing downstream reads these fields. */
+  critpath_note_wake(src_op, dep_op, rdy_bit);
 
   /* Only wake up ops that are in RS */
   if (dep_op->state != OS_IN_RS) {

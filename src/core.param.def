@@ -445,6 +445,16 @@ DEF_PARAM(zereco_piq_dispatch_policy, ZERECO_PIQ_DISPATCH_POLICY, uns, uns, 0, )
 /* [EXPERIMENT: ZERECO_H2P_MISPRED_LATENCY_PROFILE]
    Profile execute-resolved H2P mispred/misfetch latency without changing pipeline behavior. */
 DEF_PARAM(zereco_h2p_mispred_latency_profile, ZERECO_H2P_MISPRED_LATENCY_PROFILE, Flag, Flag, FALSE, )
+/* [EXPERIMENT: ZERECO CRITICAL PATH -- Phase A, measurement only]
+   Observe which source operand arrives last at each instruction (the Last
+   Producer Register) and propagate that edge backward from H2P branches one
+   level per dynamic instance.  Measures the slack between the critical operand
+   and the runner-up, how stable the critical edge is per static PC, where a
+   backward walk would naturally terminate, and how far chains reach.  Writes no
+   field that scheduling, renaming, or the memory system reads, so a run with
+   this on must stay cycle-identical to one with it off.
+   See src/zereco/zereco_CRITPATH_DESIGN.md. */
+DEF_PARAM(zereco_critpath_profile, ZERECO_CRITPATH_PROFILE, Flag, Flag, FALSE, )
 /* [EXPERIMENT: ZERECO TIMED RFP] Register File Prefetching (ISCA'22) with real
    launch timing, L1 bandwidth contention, and finite predictor storage.  Unlike
    the h2p_chain_perfect_load oracle -- which predicts and validates in the same

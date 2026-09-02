@@ -307,6 +307,24 @@ struct Op_struct {
   Addr rfp_pred_va;                /* address the prefetch was launched with */
   Counter rfp_probe_cycle;         /* cycle the prefetch accessed the L1 */
   Counter rfp_data_ready_cycle;    /* MAX_CTR until the prefetch holds data */
+
+  /* Critical-path (Last Producer Register) observation.  The wakeup logic
+     already computes rdy_cycle as a max over the source wake cycles; these
+     fields record the argmax -- the source that arrived last, which is the one
+     edge that sets this op's ready time -- plus the runner-up, so the slack
+     between the two is available at commit.  Written only by cmp_wake_op();
+     nothing here feeds scheduling, so timing is unaffected. */
+  Counter critpath_last_cycle;   /* max  of source wake cycles (t_last)   */
+  Counter critpath_second_cycle; /* 2nd max of source wake cycles (t_second) */
+  uns8 critpath_last_src;        /* argmax source index = LPR             */
+  uns8 critpath_last_dep_type;   /* dep type of that source (REG vs MEM)  */
+  uns8 critpath_wake_events;     /* sources that produced a wake event    */
+  /* PC of the producer on the LPR edge.  Captured while that producer is still
+     live, because retire is in order: by the time this op commits its producer
+     has already committed and its pool entry may have been recycled.  Hardware
+     recovers the same PC by reading a scoreboard indexed by the source physical
+     register; the two are equivalent, and the scoreboard is built in Phase B. */
+  Addr critpath_last_producer_pc;
 };
 
 /**************************************************************************************/
