@@ -62,6 +62,12 @@ void critpath_reset(uns proc_id);
 void critpath_note_wake(struct Op_struct* src_op, struct Op_struct* dep_op,
                         uns8 rdy_bit);
 
+/* Is this static PC currently a member of some H2P branch's critical chain?
+   Read-only: it neither allocates nor ages an entry, so the consumption path
+   cannot disturb what the learning path measures.  `max_depth` of 0 accepts any
+   depth; otherwise only members within that distance of their branch qualify. */
+Flag critpath_is_member(uns proc_id, Addr pc, uns max_depth);
+
 /* An op is committing.  Everything is measured here so that only on-path,
    architecturally executed instructions contribute. */
 void critpath_note_retire(struct Op_struct* op);

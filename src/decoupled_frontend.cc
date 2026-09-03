@@ -8,6 +8,7 @@
 
 #include "core.param.h"
 #include "dependency_chain_cache.h"
+#include "zereco/critpath.h"
 #include "memory/memory.param.h"
 #include "prefetcher/pref.param.h"
 
@@ -389,9 +390,26 @@ void Decoupled_FE::apply_main_chain_block_tag(Op* op) {
      and fires counters and nothing else, so this stays timing-neutral. */
   if ((!H2P_CHAIN_PERFECT_LOAD && !H2P_CHAIN_LOAD_PROFILE &&
        !H2P_CHAIN_LOAD_RAW_STREAM_DUMP && !ZERECO_IQ_PRIORITY_POLICY &&
-       !RFP_ENABLE) ||
+       !ZERECO_CRITPATH_PRIORITY && !RFP_ENABLE) ||
       op->thread_id != 0 || op->off_path || !op->inst_info ||
       !op->table_info) {
+    reset_main_chain_block_tracking();
+    return;
+  }
+
+  /* Critical-path priority replaces the Block Cache mask as the source of the
+     priority bit.  Membership is per static PC rather than per block slot, so
+     it needs no block coordinate and no mask -- one lookup answers it. */
+  if (ZERECO_CRITPATH_PRIORITY) {
+    op->zereco_iq_priority_bit = critpath_is_member(
+      proc_id, op->inst_info->addr, ZERECO_CRITPATH_PRIORITY_MAX_DEPTH);
+    op->zereco_iq_priority_candidate_bit = op->zereco_iq_priority_bit;
+    op->chain_bit = op->zereco_iq_priority_bit;
+    STAT_EVENT(proc_id, ZERECO_IQ_MAIN_ONPATH_OPS);
+    if (op->zereco_iq_priority_bit) {
+      STAT_EVENT(proc_id, ZERECO_IQ_PRIORITY_MARKED_OPS);
+      STAT_EVENT(proc_id, ZERECO_IQ_PRIORITY_MARKED_PORTION);
+    }
     reset_main_chain_block_tracking();
     return;
   }

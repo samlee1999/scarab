@@ -469,6 +469,17 @@ DEF_PARAM(zereco_critpath_decay_interval, ZERECO_CRITPATH_DECAY_INTERVAL, uns, u
 /* Which branches may seed a chain: 0 = every branch, 1 = mispredicted at least
    once, 2 = H2P.  Phase A used 2, the strictest. */
 DEF_PARAM(zereco_critpath_insert_gate, ZERECO_CRITPATH_INSERT_GATE, uns, uns, 2, )
+/* [PHASE B] Consume the critical-path chain instead of only observing it.
+   ZERECO_CRITPATH_PRIORITY makes chain membership the source of the IQ priority
+   bit, replacing the Block Cache mask; RFP_TARGET_CRITPATH makes a member load
+   the thing that earns a Prefetch Table entry, replacing the backward walk.
+   Both require ZERECO_CRITPATH_PROFILE, since that is what builds the chain. */
+DEF_PARAM(zereco_critpath_priority, ZERECO_CRITPATH_PRIORITY, Flag, Flag, FALSE, )
+DEF_PARAM(rfp_target_critpath, RFP_TARGET_CRITPATH, Flag, Flag, FALSE, )
+/* Accept only members within this distance of their branch; 0 = any depth.
+   Depth was the one lever in Phase A2 that moved the population, so it is a
+   knob rather than a constant -- but the first runs leave it open. */
+DEF_PARAM(zereco_critpath_priority_max_depth, ZERECO_CRITPATH_PRIORITY_MAX_DEPTH, uns, uns, 0, )
 /* [EXPERIMENT: ZERECO TIMED RFP] Register File Prefetching (ISCA'22) with real
    launch timing, L1 bandwidth contention, and finite predictor storage.  Unlike
    the h2p_chain_perfect_load oracle -- which predicts and validates in the same

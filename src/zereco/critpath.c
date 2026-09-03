@@ -30,6 +30,7 @@
 #include "bp/hbt.h"
 #include "core.param.h"
 #include "op.h"
+#include "zereco/rfp.h"
 #include "statistics.h"
 
 /**************************************************************************************/
@@ -190,6 +191,24 @@ void critpath_reset(uns proc_id) {
   memset(state->pc_table, 0,
          sizeof(Critpath_PC_Entry) * (size_t)state->sets * state->assoc);
   state->retires = 0;
+}
+
+/**************************************************************************************/
+/* Consumption path.
+ *
+ * The frontend asks this whether an instruction belongs to a critical chain, and
+ * a load that does is also the one worth prefetching into the register file.
+ * Both are reads: allocation and aging belong to the commit path alone. */
+
+Flag critpath_is_member(uns proc_id, Addr pc, uns max_depth) {
+  if (!ZERECO_CRITPATH_PROFILE)
+    return FALSE;
+  Critpath_PC_Entry* e = critpath_pc_lookup(proc_id, pc, FALSE);
+  if (!e || !e->in_slice)
+    return FALSE;
+  if (max_depth && e->depth > max_depth)
+    return FALSE;
+  return TRUE;
 }
 
 /**************************************************************************************/
@@ -389,6 +408,15 @@ void critpath_note_retire(Op* op) {
 
   Flag in_slice = entry->in_slice;
   if (in_slice) {
+    /* A load on a critical chain is a Target Load.  Under RFP_TARGET_CRITPATH
+       this commit is what grants it a Prefetch Table entry, replacing the
+       backward walk that used to own that decision. */
+    if (RFP_TARGET_CRITPATH && op->table_info->mem_type == MEM_LD &&
+        (!ZERECO_CRITPATH_PRIORITY_MAX_DEPTH ||
+         entry->depth <= ZERECO_CRITPATH_PRIORITY_MAX_DEPTH)) {
+      rfp_note_target_load(proc_id, pc, op->oracle_info.va);
+      STAT_EVENT(proc_id, CRITPATH_TARGET_LOADS);
+    }
     STAT_EVENT(proc_id, CRITPATH_SLICE_OPS);
     critpath_record_confirm(proc_id, entry->confirm);
     critpath_record_owner_class(proc_id, entry->owner_pc);

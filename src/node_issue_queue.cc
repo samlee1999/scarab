@@ -549,7 +549,7 @@ void node_issue_queue_dispatch() {
     node_issue_queue_allocate_rs_entry(node, op, (uns)rs_id);
     rs->rs_op_count++;
     rs->main_op_count++;
-    if (ZERECO_PIQ_ENABLE) {
+    if (ZERECO_PIQ_ENABLE || ZERECO_CRITPATH_PRIORITY) {
       op->zereco_piq_entry = op->zereco_iq_priority_bit;
       Flag fallback_mismatch =
         op->zereco_piq_fallback &&
@@ -664,7 +664,7 @@ static inline void node_issue_queue_collect_piq_rs_stats(
 }
 
 static void node_issue_queue_collect_zereco_piq_occupancy(void) {
-  if (!ZERECO_PIQ_ENABLE)
+  if (!ZERECO_PIQ_ENABLE && !ZERECO_CRITPATH_PRIORITY)
     return;
 
   Counter priority_capacity = 0;
@@ -676,7 +676,8 @@ static void node_issue_queue_collect_zereco_piq_occupancy(void) {
 
   for (uns rs_id = 0; rs_id < NUM_RS; ++rs_id) {
     Reservation_Station* rs = &node->rs[rs_id];
-    node_issue_queue_check_piq_partition(rs, rs_id, NULL);
+    if (ZERECO_PIQ_ENABLE)
+      node_issue_queue_check_piq_partition(rs, rs_id, NULL);
     priority_capacity += rs->zereco_priority_rs_limit;
     normal_capacity += rs->zereco_normal_rs_limit;
     priority_occupancy += rs->zereco_priority_op_count;

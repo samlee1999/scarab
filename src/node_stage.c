@@ -169,7 +169,10 @@ Flag node_decrement_rs_counters_for_clear(Node_Stage* node_local, Op* op,
       main_decremented = TRUE;
     }
 
-    if (ZERECO_PIQ_ENABLE && main_decremented) {
+    /* Kept even with no partition: the class counters are what report how much
+       of the queue a priority op actually occupies, which is the question an
+       unbounded run exists to answer. */
+    if ((ZERECO_PIQ_ENABLE || ZERECO_CRITPATH_PRIORITY) && main_decremented) {
       if (op->zereco_piq_entry) {
         if (strict)
           ASSERT(node_local->proc_id, rs->zereco_priority_op_count > 0);
