@@ -11,29 +11,32 @@
  * Everything here is instrumentation.  No field written here is read by
  * scheduling, renaming, or the memory system, so a run with
  * ZERECO_CRITPATH_PROFILE on must stay cycle-identical to one with it off.
- * That identity is the acceptance test for Phase A.
+ * That identity is the acceptance test.
  *
- * What it measures, and what each number decides:
+ * Phase A measured the edges themselves: the slack between the critical operand
+ * and the runner-up (which sets the window below which two producers are
+ * co-critical), how stable the critical edge is per static PC, where a walk
+ * naturally terminates, and how far chains reach.  It also showed the problem
+ * Phase A2 exists to solve -- following only critical edges still leaves two
+ * thirds of committed instructions inside some chain, so selectivity has to come
+ * from somewhere else.
  *
- *   slack = t_last - t_second     how much later the critical operand arrived
- *                                 than the runner-up.  Accelerating the winning
- *                                 chain can only pay off up to this many cycles
- *                                 before the sibling becomes binding, so the
- *                                 distribution sets the Delta-window: below it,
- *                                 both producers are co-critical and both must
- *                                 be tracked.
+ * Phase A2 adds the three knobs that can supply it, and measures all of their
+ * settings at once rather than sweeping them:
  *
- *   argmax stability              how often the same static PC picks a different
- *                                 source as its LPR.  Sets how much confirmation
- *                                 a chain member needs before it is trusted.
+ *   confirmation counter   how often a PC has been re-derived as a critical
+ *                          producer.  Bucketing member commits by their counter
+ *                          yields the population for EVERY threshold from one
+ *                          run: population(>=T) is the tail sum above T.
  *
- *   frontier                      instructions that never waited on an operand.
- *                                 Backward propagation has nothing to gain past
- *                                 them, which is where a walk should stop.
+ *   decay                  periodically ages every counter, so a PC that stops
+ *                          being re-confirmed leaves the chain on its own.  This
+ *                          is what adapts membership to a phase change, and the
+ *                          only knob that needs separate runs.
  *
- *   depth                         how many levels a chain reaches, i.e. how long
- *                                 incremental one-level-per-instance learning
- *                                 takes to warm up.
+ *   insertion gate         which branches may seed a chain at all.  Bucketing by
+ *                          the owner's current misprediction counter yields the
+ *                          population under every gate from one run.
  *
  * Design notes live in src/zereco/zereco_CRITPATH_DESIGN.md.
  ***************************************************************************************/
@@ -47,11 +50,7 @@
 extern "C" {
 #endif
 
-/* Observation tables are scaffolding, not modeled hardware, so they are sized
-   generously enough that capacity never distorts a measurement.  Phase B
-   replaces them with the real, budgeted structures. */
-#define CRITPATH_PC_TABLE_ENTRIES (64 * 1024) /* PC -> previous LPR source */
-#define CRITPATH_MAX_DEPTH 63                 /* saturating chain-depth counter */
+#define CRITPATH_MAX_DEPTH 63 /* saturating chain-depth counter */
 
 struct Op_struct;
 

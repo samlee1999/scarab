@@ -35,9 +35,8 @@
 /**************************************************************************************/
 /* Observation table.
  *
- * One direct-mapped, tagged entry per static PC.  It carries three unrelated
- * measurements that all happen to be keyed by PC, so they share a table rather
- * than paying for three:
+ * One tagged, set-associative entry per static PC, carrying measurements that
+ * are all keyed by PC and so share a table rather than paying for several:
  *
  *   last_src / last_producer_pc  previous LPR, to detect how often the critical
  *                                edge of a static instruction changes
@@ -46,6 +45,10 @@
  *                                mechanism would
  *   owner_pc                     which H2P branch claimed this PC, to count how
  *                                often two branches fight over one entry
+ *   confirm                      how often this PC has been re-derived as a
+ *                                critical producer; the histogram of this field
+ *                                over member commits is the population curve for
+ *                                every retention threshold at once
  */
 
 typedef struct Critpath_PC_Entry_struct {
@@ -57,11 +60,17 @@ typedef struct Critpath_PC_Entry_struct {
   Flag in_slice;        /* reached by propagation from some H2P branch */
   uns8 depth;           /* distance from that branch, saturating */
   Addr owner_pc;        /* the H2P branch that claimed it */
+  uns8 confirm;         /* times re-derived as a critical producer, saturating */
+  Counter lru_touch;
 } Critpath_PC_Entry;
 
 typedef struct Critpath_Core_State_struct {
   Flag initialized;
   Critpath_PC_Entry* pc_table;
+  uns sets;
+  uns assoc;
+  uns confirm_max;
+  Counter retires;      /* drives the decay interval */
 } Critpath_Core_State;
 
 static Critpath_Core_State critpath_state[MAX_NUM_PROCS];
@@ -71,25 +80,76 @@ static inline Critpath_Core_State* critpath_get_state(uns proc_id) {
   return &critpath_state[proc_id];
 }
 
-static inline Critpath_PC_Entry* critpath_pc_lookup(uns proc_id, Addr pc,
-                                                    Flag allocate) {
+/* Set-associative rather than direct-mapped: at Phase A's 64K direct-mapped
+   entries, conflict evictions outnumbered the propagations they were supposed
+   to be recording, which distorts any population or depth number read off the
+   table.  Associativity also matches the shape the real structure will have. */
+static Critpath_PC_Entry* critpath_pc_lookup(uns proc_id, Addr pc,
+                                             Flag allocate) {
   Critpath_Core_State* state = critpath_get_state(proc_id);
   if (!state->initialized)
     return NULL;
 
-  Critpath_PC_Entry* e =
-    &state->pc_table[pc % CRITPATH_PC_TABLE_ENTRIES];
-  if (e->valid && e->tag == pc)
-    return e;
+  Critpath_PC_Entry* set =
+    &state->pc_table[(pc % state->sets) * state->assoc];
+  for (uns way = 0; way < state->assoc; ++way) {
+    if (set[way].valid && set[way].tag == pc) {
+      set[way].lru_touch = cycle_count;
+      return &set[way];
+    }
+  }
   if (!allocate)
     return NULL;
 
-  if (e->valid)
+  /* Prefer an invalid way, then the least recently used one.  A chain member
+     is not protected: letting one age out is exactly what the measurement is
+     meant to expose. */
+  Critpath_PC_Entry* victim = NULL;
+  for (uns way = 0; way < state->assoc; ++way) {
+    if (!set[way].valid) {
+      victim = &set[way];
+      break;
+    }
+    if (!victim || set[way].lru_touch < victim->lru_touch)
+      victim = &set[way];
+  }
+  ASSERT(proc_id, victim);
+
+  if (victim->valid) {
     STAT_EVENT(proc_id, CRITPATH_PC_TABLE_CONFLICTS);
-  memset(e, 0, sizeof(*e));
-  e->valid = TRUE;
-  e->tag = pc;
-  return e;
+    if (victim->in_slice)
+      STAT_EVENT(proc_id, CRITPATH_PC_TABLE_EVICT_MEMBER);
+  }
+  memset(victim, 0, sizeof(*victim));
+  victim->valid = TRUE;
+  victim->tag = pc;
+  victim->lru_touch = cycle_count;
+  return victim;
+}
+
+/* Age every counter, and drop the entries that have stopped being re-derived.
+   This is the knob that adapts membership to a program phase change: a chain
+   that no longer carries the critical edge simply stops being refreshed and
+   falls out on its own, without anything having to detect the phase. */
+static void critpath_decay(uns proc_id) {
+  Critpath_Core_State* state = critpath_get_state(proc_id);
+  uns entries = state->sets * state->assoc;
+  STAT_EVENT(proc_id, CRITPATH_DECAY_SWEEPS);
+
+  for (uns ii = 0; ii < entries; ++ii) {
+    Critpath_PC_Entry* e = &state->pc_table[ii];
+    if (!e->valid)
+      continue;
+    if (e->confirm) {
+      e->confirm--;
+    } else if (e->in_slice) {
+      /* Nothing re-confirmed it for a whole interval: it leaves the chain. */
+      e->in_slice = FALSE;
+      e->depth = 0;
+      e->owner_pc = 0;
+      STAT_EVENT(proc_id, CRITPATH_DECAY_DROPPED_MEMBER);
+    }
+  }
 }
 
 /**************************************************************************************/
@@ -103,8 +163,21 @@ void critpath_init(uns proc_id) {
   if (!ZERECO_CRITPATH_PROFILE)
     return;
 
-  state->pc_table = (Critpath_PC_Entry*)calloc(CRITPATH_PC_TABLE_ENTRIES,
-                                               sizeof(Critpath_PC_Entry));
+  ASSERTM(proc_id, ZERECO_CRITPATH_TABLE_SETS > 0 && ZERECO_CRITPATH_TABLE_ASSOC > 0,
+          "critpath table geometry must be non-zero\n");
+  ASSERTM(proc_id, ZERECO_CRITPATH_CONFIRM_BITS > 0 &&
+                     ZERECO_CRITPATH_CONFIRM_BITS <= 8,
+          "zereco_critpath_confirm_bits must be between 1 and 8\n");
+  ASSERTM(proc_id, ZERECO_CRITPATH_INSERT_GATE <= 2,
+          "zereco_critpath_insert_gate must be 0 (all branches), "
+          "1 (mispredicted at least once), or 2 (H2P)\n");
+
+  state->sets = ZERECO_CRITPATH_TABLE_SETS;
+  state->assoc = ZERECO_CRITPATH_TABLE_ASSOC;
+  state->confirm_max = (1u << ZERECO_CRITPATH_CONFIRM_BITS) - 1u;
+  state->retires = 0;
+  state->pc_table = (Critpath_PC_Entry*)calloc(
+    (size_t)state->sets * state->assoc, sizeof(Critpath_PC_Entry));
   ASSERTM(proc_id, state->pc_table,
           "Failed to allocate the critical-path observation table\n");
   state->initialized = TRUE;
@@ -115,7 +188,8 @@ void critpath_reset(uns proc_id) {
   if (!state->initialized)
     return;
   memset(state->pc_table, 0,
-         sizeof(Critpath_PC_Entry) * CRITPATH_PC_TABLE_ENTRIES);
+         sizeof(Critpath_PC_Entry) * (size_t)state->sets * state->assoc);
+  state->retires = 0;
 }
 
 /**************************************************************************************/
@@ -192,6 +266,42 @@ static void critpath_record_slack(uns proc_id, Counter slack, Flag in_slice) {
     STAT_EVENT(proc_id, CRITPATH_SLICE_SLACK_9_PLUS);
 }
 
+/* Member commits bucketed by how often that PC has been re-derived as critical.
+   The tail sum above any T is the population a retention threshold of T would
+   admit, so one run answers the question for every threshold. */
+static void critpath_record_confirm(uns proc_id, uns8 confirm) {
+  if (confirm == 0)
+    STAT_EVENT(proc_id, CRITPATH_CONFIRM_0);
+  else if (confirm == 1)
+    STAT_EVENT(proc_id, CRITPATH_CONFIRM_1);
+  else if (confirm == 2)
+    STAT_EVENT(proc_id, CRITPATH_CONFIRM_2);
+  else if (confirm == 3)
+    STAT_EVENT(proc_id, CRITPATH_CONFIRM_3);
+  else if (confirm <= 5)
+    STAT_EVENT(proc_id, CRITPATH_CONFIRM_4_5);
+  else if (confirm <= 7)
+    STAT_EVENT(proc_id, CRITPATH_CONFIRM_6_7);
+  else
+    STAT_EVENT(proc_id, CRITPATH_CONFIRM_8_PLUS);
+}
+
+/* Member commits bucketed by how hard-to-predict the owning branch is right
+   now.  The tail sums give the population under each insertion gate. */
+static void critpath_record_owner_class(uns proc_id, Addr owner_pc) {
+  if (!owner_pc) {
+    STAT_EVENT(proc_id, CRITPATH_OWNER_UNKNOWN);
+    return;
+  }
+  uns32 c = hbt_get_counter(owner_pc);
+  if (c > 1)
+    STAT_EVENT(proc_id, CRITPATH_OWNER_H2P);
+  else if (c == 1)
+    STAT_EVENT(proc_id, CRITPATH_OWNER_MISP_ONCE);
+  else
+    STAT_EVENT(proc_id, CRITPATH_OWNER_COLD);
+}
+
 static void critpath_record_depth(uns proc_id, uns8 depth) {
   if (depth == 0)
     STAT_EVENT(proc_id, CRITPATH_DEPTH_0);
@@ -225,6 +335,13 @@ void critpath_note_retire(Op* op) {
   Addr pc = op->inst_info->addr;
   STAT_EVENT(proc_id, CRITPATH_OPS);
 
+  /* Decay runs on committed instructions, the same clock the H2P table ages on,
+     so the interval means the same thing in both structures. */
+  state->retires++;
+  if (ZERECO_CRITPATH_DECAY_INTERVAL &&
+      (state->retires % ZERECO_CRITPATH_DECAY_INTERVAL) == 0)
+    critpath_decay(proc_id);
+
   /* ---- 1. did this op ever wait on an operand? ------------------------- */
   /* Sources whose producer had already left the machine never signal a wake,
      so an op with no wake events had all its inputs long since available. */
@@ -247,18 +364,35 @@ void critpath_note_retire(Op* op) {
      slice from its very first commit, and taking its slack as non-slice on that
      first pass would bias the slice histograms against the one instruction that
      matters most. */
-  Flag is_h2p_branch = (op->table_info->cf_type != NOT_CF) &&
-                       op->oracle_info.hbt_pred_is_hard;
-  if (is_h2p_branch && (!entry->in_slice || entry->owner_pc != pc)) {
-    entry->in_slice = TRUE;
-    entry->depth = 0;
-    entry->owner_pc = pc;
-    STAT_EVENT(proc_id, CRITPATH_SEEDS);
+  /* Which branches may start a chain.  Gate 2 is the strictest -- only a branch
+     the H2P table has already convicted -- and gates 1 and 0 loosen it, letting
+     a chain warm up while its branch is still earning that status. */
+  Flag branch = (op->table_info->cf_type != NOT_CF);
+  Flag may_seed = branch &&
+                  ((ZERECO_CRITPATH_INSERT_GATE == 0) ||
+                   (ZERECO_CRITPATH_INSERT_GATE == 1 &&
+                    op->oracle_info.hbt_misp_counter >= 1) ||
+                   (ZERECO_CRITPATH_INSERT_GATE == 2 &&
+                    op->oracle_info.hbt_pred_is_hard));
+
+  if (may_seed) {
+    if (!entry->in_slice || entry->owner_pc != pc) {
+      entry->in_slice = TRUE;
+      entry->depth = 0;
+      entry->owner_pc = pc;
+      STAT_EVENT(proc_id, CRITPATH_SEEDS);
+    }
+    /* A root re-confirms itself every time it commits. */
+    if (entry->confirm < state->confirm_max)
+      entry->confirm++;
   }
 
   Flag in_slice = entry->in_slice;
-  if (in_slice)
+  if (in_slice) {
     STAT_EVENT(proc_id, CRITPATH_SLICE_OPS);
+    critpath_record_confirm(proc_id, entry->confirm);
+    critpath_record_owner_class(proc_id, entry->owner_pc);
+  }
 
   Flag has_lpr = (op->critpath_wake_events > 0);
 
@@ -351,6 +485,7 @@ void critpath_note_retire(Op* op) {
     producer->in_slice = TRUE;
     producer->depth = my_depth + 1;
     producer->owner_pc = my_owner;
+    producer->confirm = 1;
     STAT_EVENT(proc_id, CRITPATH_PROPAGATIONS);
     return;
   }
@@ -364,6 +499,9 @@ void critpath_note_retire(Op* op) {
   /* Count how often two H2P branches claim the same instruction: with one owner
      field per entry they overwrite each other, and a stale owner can cost the
      other branch a member of its chain. */
+  if (producer->confirm < state->confirm_max)
+    producer->confirm++;
+
   if (producer->owner_pc != my_owner) {
     STAT_EVENT(proc_id, CRITPATH_OWNER_OVERWRITE);
     if (producer->owner_pc && hbt_is_hard_branch(producer->owner_pc) &&

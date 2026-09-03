@@ -390,3 +390,27 @@ DEF_STAT(CRITPATH_DEPTH_17_PLUS, COUNT, NO_RATIO)
    overwrite each other.  Measure before deciding whether that needs fixing. */
 DEF_STAT(CRITPATH_OWNER_OVERWRITE, COUNT, NO_RATIO)
 DEF_STAT(CRITPATH_OWNER_OVERWRITE_H2P_LOST, COUNT, NO_RATIO)
+
+/* Phase A2: what supplies selectivity once critical-path filtering alone does
+   not.  Each histogram is read as a tail sum -- the population that survives a
+   given threshold or gate -- so one run covers every setting. */
+DEF_STAT(CRITPATH_PC_TABLE_EVICT_MEMBER, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_DECAY_SWEEPS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_DECAY_DROPPED_MEMBER, COUNT, NO_RATIO)
+
+/* Member commits by retention counter: tail sum above T = population a
+   retention threshold of T admits. */
+DEF_STAT(CRITPATH_CONFIRM_0, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_CONFIRM_1, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_CONFIRM_2, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_CONFIRM_3, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_CONFIRM_4_5, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_CONFIRM_6_7, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_CONFIRM_8_PLUS, COUNT, NO_RATIO)
+
+/* Member commits by how hard-to-predict the owning branch is right now:
+   tail sums give the population under each insertion gate. */
+DEF_STAT(CRITPATH_OWNER_H2P, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_OWNER_MISP_ONCE, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_OWNER_COLD, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_OWNER_UNKNOWN, COUNT, NO_RATIO)

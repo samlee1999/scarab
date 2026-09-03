@@ -455,6 +455,20 @@ DEF_PARAM(zereco_h2p_mispred_latency_profile, ZERECO_H2P_MISPRED_LATENCY_PROFILE
    this on must stay cycle-identical to one with it off.
    See src/zereco/zereco_CRITPATH_DESIGN.md. */
 DEF_PARAM(zereco_critpath_profile, ZERECO_CRITPATH_PROFILE, Flag, Flag, FALSE, )
+/* Observation-table geometry.  Set-associative: at 64K direct-mapped entries the
+   conflict evictions outnumbered the propagations being recorded. */
+DEF_PARAM(zereco_critpath_table_sets, ZERECO_CRITPATH_TABLE_SETS, uns, uns, 4096, )
+DEF_PARAM(zereco_critpath_table_assoc, ZERECO_CRITPATH_TABLE_ASSOC, uns, uns, 8, )
+/* Retention counter width.  Member commits are bucketed by this counter, so one
+   run yields the admitted population for every retention threshold. */
+DEF_PARAM(zereco_critpath_confirm_bits, ZERECO_CRITPATH_CONFIRM_BITS, uns, uns, 4, )
+/* Committed instructions between decay sweeps; 0 disables decay.  This is the
+   knob that adapts chain membership to a program phase change, and the only one
+   that needs separate runs. */
+DEF_PARAM(zereco_critpath_decay_interval, ZERECO_CRITPATH_DECAY_INTERVAL, uns, uns, 0, )
+/* Which branches may seed a chain: 0 = every branch, 1 = mispredicted at least
+   once, 2 = H2P.  Phase A used 2, the strictest. */
+DEF_PARAM(zereco_critpath_insert_gate, ZERECO_CRITPATH_INSERT_GATE, uns, uns, 2, )
 /* [EXPERIMENT: ZERECO TIMED RFP] Register File Prefetching (ISCA'22) with real
    launch timing, L1 bandwidth contention, and finite predictor storage.  Unlike
    the h2p_chain_perfect_load oracle -- which predicts and validates in the same
