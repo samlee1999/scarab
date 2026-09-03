@@ -678,15 +678,24 @@ static void node_issue_queue_collect_zereco_piq_occupancy(void) {
     Reservation_Station* rs = &node->rs[rs_id];
     if (ZERECO_PIQ_ENABLE)
       node_issue_queue_check_piq_partition(rs, rs_id, NULL);
-    priority_capacity += rs->zereco_priority_rs_limit;
-    normal_capacity += rs->zereco_normal_rs_limit;
+    /* With no partition a priority op may sit anywhere, so the capacity it is
+       measured against is the whole main-thread queue.  Reporting the reserved
+       limit here instead would divide by zero and hide the one number an
+       unbounded run is for: how much of the queue priority actually holds. */
+    priority_capacity += ZERECO_PIQ_ENABLE ? rs->zereco_priority_rs_limit
+                                           : rs->main_rs_limit;
+    normal_capacity += ZERECO_PIQ_ENABLE ? rs->zereco_normal_rs_limit
+                                         : rs->main_rs_limit;
     priority_occupancy += rs->zereco_priority_op_count;
     normal_occupancy += rs->zereco_normal_op_count;
     priority_full_rs +=
+      ZERECO_PIQ_ENABLE &&
       rs->zereco_priority_op_count == rs->zereco_priority_rs_limit;
     normal_full_rs +=
+      ZERECO_PIQ_ENABLE &&
       rs->zereco_normal_op_count == rs->zereco_normal_rs_limit;
-    node_issue_queue_collect_piq_rs_stats(rs_id, rs);
+    if (ZERECO_PIQ_ENABLE)
+      node_issue_queue_collect_piq_rs_stats(rs_id, rs);
   }
 
   STAT_EVENT(node->proc_id, ZERECO_PIQ_CYCLES);
