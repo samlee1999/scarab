@@ -35,6 +35,7 @@
 |---|---|---|
 | `RFP_INFLIGHT_UNDERFLOW` (~3.6K, injected의 0.017%) | 무해, 미수정 | PT entry가 축출된 뒤 **같은 PC로 재할당**되면, 축출 전에 rename된 in-flight 인스턴스가 retire할 때 tag가 맞아 0인 카운터를 감소시킨다. validate-then-use가 걸러내므로 correctness 문제는 아니고 예측 정확도의 미세 손실. PT를 키우면 자연히 줄어든다 |
 | ~~`ZERECO_IQ_PRIORITY_OVERTAKES_NORMAL` 등 경합 카운터가 0~~ | **해결 (0de65a7)** | 세 게이트에 `ZERECO_CRITPATH_PRIORITY`를 추가했다. B-2부터 기록된다 |
+| `ZERECO_IQ_PRIORITY_READY_TO_ISSUE_TOTAL` / `NORMAL_*` 가 0 | 계측 공백 | overtakes는 기록되는데 ready→issue 누적은 0. 증분 지점이 옛 policy 경로에만 있을 가능성. B-2 전에 확인 |
 | 관찰 테이블이 Phase B에서도 계측용 크기 | 의도적 | 4096 sets × 8-way. Phase B 확정 후 실제 하드웨어 예산으로 축소하고 민감도를 재야 한다 |
 
 ---
@@ -60,7 +61,7 @@
 | **B-1** | PT 크기 sweep | **완료 — PT는 제약이 아니다.** 1K와 무제한이 모두 +9.1%. §6 참조 |
 | **B-2** | partition 비율 sweep (무한/30/25/20/15/10%), PT 무제한·depth 무제한 | **1차 전량 실패** — §7 참조. 가드 수정 후 재실행 필요 |
 | **B-3** | depth 제한 sweep (무제한/8/4/2/1), PT·partition 비병목 | 대기 |
-| **B-4** | **PT 축소 sweep (128/256/512/1K)** | 대기. B-1이 1K↔무제한 무차별을 보였으므로 아래쪽 무릎이 어디인지 미측정. "값싼 예측기" 논거를 정량화한다. **주의: PT entry는 PC만이 아니라 base_va·stride·confidence를 담으므로 축출은 학습 상태의 소실이다** |
+| **B-4** | **PT 축소 sweep (128/256)** | 512는 재실행에서 측정(−0.07%p). 128/256은 대기. B-1이 1K↔무제한 무차별을 보였으므로 아래쪽 무릎이 어디인지 미측정. "값싼 예측기" 논거를 정량화한다. **주의: PT entry는 PC만이 아니라 base_va·stride·confidence를 담으므로 축출은 학습 상태의 소실이다** |
 | — | 축 간 상호작용이 의심되는 지점만 2차원으로 좁혀 확인 | 필요시 |
 
 ---
@@ -167,5 +168,31 @@ critical-path 구성(TEA off, policy 0, critpath priority/RFP target on)에서 �
 정의 두 건이었고 둘 다 수정했다. `TEA_RS_RESERVATION`은 기계 정의의 일부로 유지하되 논문에
 352로 적어야 한다.
 
-**재실행 필요**: Phase B(`260903`), B-1(`260904_B1`), B-2(`260904_B2`)는 오염된 코드로 돌았다.
-P-IQ 단독 수치는 무관하지만 RFP 계열과 결합 수치가 영향을 받으므로 전량 재실행한다.
+~~**재실행 필요**~~ → **완료 (`260905_critpath_phaseB`, 972 run). 오염 디렉터리 3개 삭제.**
+
+---
+
+## 9. 정제 재실행 결과 (2026-09-05, `260905_critpath_phaseB`)
+
+**walk 차단 증명**: 세 RFP config 모두 `PT 지명 == CRITPATH_TARGET_LOADS` 가 **정확히 일치**
+(diff 0), `DCC_CHAINS_INSERTED = 0`. 옛 walk는 이제 한 번도 돌지 않는다.
+
+| | RFP | P-IQ(무한) | 결합 |
+|---|---:|---:|---:|
+| IPC | +5.13% | +4.89% | **+9.06%** |
+| fetch→resolution | −11.4% | −7.3% | **−17.3%** |
+| dependency | −14.2% | −5.0% | **−18.3%** |
+
+오염 전(+5.17 / +4.89 / +9.09%)과 **0.04%p 이내**. 옛 walk가 지명하던 42.9%는 성능에 기여하지
+않는 cold PC였다 — Target Load가 69.5% → 66.0%로 줄었는데 useful은 20.4% → 20.0%로 거의 그대로.
+
+**B-1 PT sweep (512 / 1K / 4K / 16K / ∞)**: +9.01 / 9.06 / 9.07 / 9.08 / 9.08%.
+**512 entry에서도 −0.07%p**. useful 19.3 → 20.0%. PT는 512까지 내려도 제약이 아니다.
+RFP 상한(PT ∞, priority 없음) = +5.14%, 1K에서 +5.13%.
+
+RS priority 점유 25.3~25.5% (전체 용량 대비 5.7~6.0%) — 이전과 동일.
+경합 카운터 이제 기록됨: overtakes 45~46M. 단 `*_READY_TO_ISSUE_*`가 0 — 그 카운터의
+증분 지점이 옛 policy 경로에만 있는지 확인 필요 (§2 추가).
+
+Target Load 처리(∞ PT): useful 29.2% / low confidence 35.0% / store abstain 18.9% /
+no data in time 13.0% / wrong addr 2.7% / queue full 1.2%. 그림: `analysis/target_load_outcome.pdf`.
