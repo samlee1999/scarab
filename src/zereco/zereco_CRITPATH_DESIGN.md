@@ -71,6 +71,8 @@ chain으로는 계속 전파된다. PUBS도 같은 한계를 갖는다.
 
 ### 미결정 — 측정으로 정할 것
 
+> **관리는 [zereco_TODO.md](zereco_TODO.md) §0에서 한다.** 아래 표는 설계 시점(2026-09-01)의 원안이며 B-2 후 갱신 예정.
+
 | 항목 | 무엇을 정하나 | 근거가 될 측정 |
 |---|---|---|
 | **Δ-window** | `|t_last − t_second| < Δ`면 양쪽 producer 모두 삽입 (공동 critical). Δ=0이면 순수 last-producer, Δ=∞면 PUBS full slice | slack 분포 |

@@ -1,7 +1,27 @@
 # TODO — deferred work
 
-> Last updated: 2026-09-04 · branch `test`
+> Last updated: 2026-09-05 · branch `test`
+> **해야 할 일은 이 파일 하나로 관리한다.** §0~§5가 목록, §6 이후는 [기록].
 > Design: [zereco_CRITPATH_DESIGN.md](zereco_CRITPATH_DESIGN.md) · Papers: [zereco_REFERENCE_NOTES.md](zereco_REFERENCE_NOTES.md)
+
+---
+
+## 0. 설계 대비 미구현 · 미결정 항목 (단일 관리 목록)
+
+> 설계(`zereco_CRITPATH_DESIGN.md`)에는 있으나 코드에 없거나, 측정으로 결정해야 하는 것 전부.
+> DESIGN.md의 "미결정" 표는 이 절을 가리키며, 여기서만 관리한다.
+
+| # | 항목 | 현재 코드 | 상태 · 결정 | 비고 |
+|---|---|---|---|---|
+| D-1 | **wrong-path 명령어의 priority** | frontend 태깅 게이트가 `op->off_path`면 조기 반환 → chain 멤버라도 off-path면 priority bit **없음** | **알면서 보류 (2026-09-05)**. 하드웨어는 fetch 시점에 on/off-path를 모르므로 wrong-path 멤버도 priority entry를 점유·경쟁해야 함. 현재 시뮬레이터는 그 경쟁이 빠져 **낙관적**, partition 용량 압박이 과소평가됨(baseline off-path 비율 ~59%). B-2는 이 상태로 돌리고, 이후 `decoupled_frontend.cc`의 critpath 분기에서 `off_path` 조건 제거 → 낙관 폭을 보고 | 옛 Block-Cache 태깅도 같은 게이트였으므로 이전 결과 전부 같은 낙관 포함 |
+| D-2 | **Δ-window** (`\|t_last − t_second\| < Δ`면 양쪽 producer 삽입) | Δ=0 — last producer만 삽입 | 원안 유지 중. Phase A: slice 노드의 25~27%가 slack ≤ 2 (공동 critical). 넣을지 결정 필요 | tie가 comparator 지터를 학습 신호로 aliasing시키는 문제의 guard band |
+| D-3 | **retention threshold** | `confirm` 카운터는 유지·decay되지만 `critpath_is_member`가 **읽지 않음** (binary 멤버십) | Phase A2: threshold 0→8+에 인구 68.1→67.2%로 평평 → **설계에서 제거 후보** | decay(100K)는 적용 중 |
+| D-4 | **depth 제한** | 파라미터만 존재, 0(무제한) | B-3에서 sweep | Phase A2에서 유일하게 인구를 움직인 지렛대 (≤2면 31%) |
+| D-5 | **owner 충돌** | 단일 owner pointer, overwrite | 전파의 ~30%가 overwrite, H2P-lost 5%. 미해결 — 2-slot 승격 여부 결정 | |
+| D-6 | **관찰 테이블 하드웨어 예산** | 4096 sets × 8-way (계측 크기) | Phase B 확정 후 실제 예산(예: PUBS 128×8)으로 축소해 민감도 측정 | |
+| D-7 | 삽입 게이트 | H2P-only (gate 2) | **확정** — 전 branch 삽입은 81.7%로 악화 (A2) | |
+| D-8 | store→load memory dependence | 추적 안 함 | **확정(한계로 서술)** — critical edge의 2.3% | |
+| D-9 | RS 크기 | `TEA_RS_RESERVATION=192` → main 352 | **확정(유지)** — 논문 RS·partition % 분모는 352 | |
 
 ---
 
@@ -59,7 +79,7 @@
 | # | 내용 | 상태 |
 |---|---|---|
 | **B-1** | PT 크기 sweep | **완료 — PT는 제약이 아니다.** 1K와 무제한이 모두 +9.1%. §6 참조 |
-| **B-2** | partition 비율 sweep (무한/30/25/20/15/10%), PT 무제한·depth 무제한 | **1차 전량 실패** — §7 참조. 가드 수정 후 재실행 필요 |
+| **B-2** | partition 비율 sweep (무한/30/25/20/15/10%), PT 무제한·depth 무제한 | **준비 완료** (`260906_critpath_B2_partition`, 756 run). D-1 낙관을 안고 실행 |
 | **B-3** | depth 제한 sweep (무제한/8/4/2/1), PT·partition 비병목 | 대기 |
 | **B-4** | **PT 축소 sweep (128/256)** | 512는 재실행에서 측정(−0.07%p). 128/256은 대기. B-1이 1K↔무제한 무차별을 보였으므로 아래쪽 무릎이 어디인지 미측정. "값싼 예측기" 논거를 정량화한다. **주의: PT entry는 PC만이 아니라 base_va·stride·confidence를 담으므로 축출은 학습 상태의 소실이다** |
 | — | 축 간 상호작용이 의심되는 지점만 2차원으로 좁혀 확인 | 필요시 |
@@ -82,7 +102,7 @@ decay 20K에도 59.3%. 원인은 refresh:new = 1792:1 — 재확인이 노화를
 
 ---
 
-## 6. B-1 결과 — PT 크기는 제약이 아니다 (2026-09-04)
+## 6. [기록] B-1 결과 — PT 크기는 제약이 아니다 (2026-09-04)
 
 | PT | IPC | alloc | evict/alloc | 포화/alloc | eligible | useful |
 |---|---:|---:|---:|---:|---:|---:|
@@ -105,7 +125,7 @@ eligible이 31.9%뿐이고, 그 격차는 confidence가 서지 않는 load들이
 
 ---
 
-## 7. B-2 1차 실패와 그 과정에서 드러난 오염 (2026-09-04)
+## 7. [기록] B-2 1차 실패와 그 과정에서 드러난 오염 (2026-09-04)
 
 **증상.** partition config 5개가 전부 0/108. `b2_unbounded`(piq_enable=0)만 완주.
 
@@ -141,7 +161,7 @@ P-IQ 쪽은 priority bit를 critpath에서만 받으므로 무관하다. 방향�
 
 ---
 
-## 8. TEA 잔여 코드 전수 감사 (2026-09-04)
+## 8. [기록] TEA 잔여 코드 전수 감사 (2026-09-04)
 
 critical-path 구성(TEA off, policy 0, critpath priority/RFP target on)에서 옛 코드가
 **타이밍**이나 **우리 로직이 읽는 상태**에 영향을 주는지 경로별로 확인했다.
@@ -172,7 +192,7 @@ critical-path 구성(TEA off, policy 0, critpath priority/RFP target on)에서 �
 
 ---
 
-## 9. 정제 재실행 결과 (2026-09-05, `260905_critpath_phaseB`)
+## 9. [기록] 정제 재실행 결과 (2026-09-05, `260905_critpath_phaseB`)
 
 **walk 차단 증명**: 세 RFP config 모두 `PT 지명 == CRITPATH_TARGET_LOADS` 가 **정확히 일치**
 (diff 0), `DCC_CHAINS_INSERTED = 0`. 옛 walk는 이제 한 번도 돌지 않는다.
