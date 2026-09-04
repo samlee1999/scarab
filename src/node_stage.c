@@ -931,7 +931,11 @@ void node_retire() {
     ASSERT(node->proc_id, op->in_node_list);
     ASSERT(node->proc_id, !op->off_path);
     STAT_EVENT(op->proc_id, OP_WAIT_0 + MIN2(op->sched_cycle - real_rdy_cycle, 31));
-    if (ZERECO_IQ_PRIORITY_POLICY && op->thread_id == 0) {
+    /* Ready-to-issue accounting reads the priority bit; it does not care which
+       structure set it, so the critical-path source counts too.  Without this the
+       partition sweep would have no per-class issue delay to report. */
+    if ((ZERECO_IQ_PRIORITY_POLICY || ZERECO_CRITPATH_PRIORITY) &&
+        op->thread_id == 0) {
       Counter ready_to_issue = op->sched_cycle - real_rdy_cycle;
       if (op->zereco_iq_priority_bit) {
         STAT_EVENT(op->proc_id, ZERECO_IQ_PRIORITY_ISSUED);
