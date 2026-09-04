@@ -58,8 +58,9 @@
 | # | 내용 | 상태 |
 |---|---|---|
 | **B-1** | PT 크기 sweep | **완료 — PT는 제약이 아니다.** 1K와 무제한이 모두 +9.1%. §6 참조 |
-| **B-2** | partition 비율 sweep (무한/30/25/20/15/10%), PT 무제한·depth 무제한 | 준비 완료 |
+| **B-2** | partition 비율 sweep (무한/30/25/20/15/10%), PT 무제한·depth 무제한 | **1차 전량 실패** — §7 참조. 가드 수정 후 재실행 필요 |
 | **B-3** | depth 제한 sweep (무제한/8/4/2/1), PT·partition 비병목 | 대기 |
+| **B-4** | **PT 축소 sweep (128/256/512/1K)** | 대기. B-1이 1K↔무제한 무차별을 보였으므로 아래쪽 무릎이 어디인지 미측정. "값싼 예측기" 논거를 정량화한다. **주의: PT entry는 PC만이 아니라 base_va·stride·confidence를 담으므로 축출은 학습 상태의 소실이다** |
 | — | 축 간 상호작용이 의심되는 지점만 2차원으로 좁혀 확인 | 필요시 |
 
 ---
@@ -100,3 +101,38 @@ eligible이 31.9%뿐이고, 그 격차는 confidence가 서지 않는 load들이
 
 부수 확인: `RFP_INFLIGHT_UNDERFLOW`가 PT 크기와 함께 3,443 → 296 → 7 → 0으로 사라졌다.
 §2에서 추정한 원인(축출 후 같은 PC로 재할당)이 맞았다.
+
+---
+
+## 7. B-2 1차 실패와 그 과정에서 드러난 오염 (2026-09-04)
+
+**증상.** partition config 5개가 전부 0/108. `b2_unbounded`(piq_enable=0)만 완주.
+
+**원인.** `dependency_chain_cache.c`의 init assert가 `ZERECO_PIQ_ENABLE`일 때
+`ZERECO_IQ_PRIORITY_POLICY == 1 || == 2`를 요구했다. 옛 Block-Cache 시절의 가드이고,
+critical-path 경로로 priority를 넣는 구성을 알지 못한다. **수정**: 특정 policy 값이 아니라
+"유효한 priority source가 정확히 하나"를 요구하도록 바꾸고, 두 source 동시 활성을 잡는
+assert를 추가했다. `ZERECO_PIQ_ENTRY_PERCENT`의 {10,15,20,25,50} 화이트리스트도 1~99로 풀었다.
+
+**그 과정에서 발견한 더 중요한 문제 — 옛 backward walk가 계속 돌고 있었다.**
+
+```
+node_stage.c:1042   fill_buffer_add()              ← 매 retire, 무조건
+cmp_model.c:302     cycle_backward_walk_engine()   ← 매 cycle, 무조건
+  └─ commit_dependency_chain_entry() → rfp_note_target_load()
+```
+
+B-1 `b1_ptinf` 기준 Target Load 지명 82.37M 중 **42.9%(35.32M)가 옛 walk에서** 나왔다
+(critical path는 57.1%). 즉 `rfp_target_critpath 1`이 순수한 critical-path scoping이
+아니었고, full-slice walk가 절반 가까이 섞여 있었다.
+
+**수정**: walk의 `rfp_note_target_load()` 호출을 `!RFP_TARGET_CRITPATH`로 게이트했다.
+
+**영향 범위**: RFP 계열 수치(Phase B `cp_rfp` +5.17%, B-1 전체)가 이 오염을 포함한다.
+P-IQ 쪽은 priority bit를 critpath에서만 받으므로 무관하다. 방향은 "선별이 덜 엄격했다"이므로
+순수화하면 PT 압력이 줄어들 것이고, B-1이 PT 크기 무관을 보였으므로 IPC 변화는 작을 것으로
+예상하나 **재측정 전에는 확정할 수 없다.**
+
+**남은 확인 사항**: walk 자체(Fill Buffer + 500-cycle 엔진)는 여전히 매 cycle 돈다. 지금은
+소비자가 없으므로 결과에 영향이 없지만 시뮬레이션 시간을 쓴다. Phase B 계열이 확정되면
+`ZERECO_IQ_PRIORITY_POLICY`나 TEA가 꺼져 있을 때 walk 전체를 건너뛰도록 게이트할 것.

@@ -29,19 +29,26 @@ void init_dependency_chain_cache(uns proc_id) {
                 "ZERECO IQ priority is a main-thread-only experiment; disable TEA\n");
     }
     if (ZERECO_PIQ_ENABLE) {
+        /* The partition needs a priority bit; it does not care which structure
+           produced one.  The Block Cache masks (policy 1 and 2) and the
+           critical-path chain are both valid sources, so require exactly one of
+           them rather than a particular policy value -- an empty priority class
+           would make the partition measure nothing. */
         ASSERTM(proc_id, ZERECO_IQ_PRIORITY_POLICY == 1 ||
-                         ZERECO_IQ_PRIORITY_POLICY == 2,
-                "ZERECO P-IQ requires all-H2P or online RF-filtered priority\n");
+                         ZERECO_IQ_PRIORITY_POLICY == 2 ||
+                         ZERECO_CRITPATH_PRIORITY,
+                "ZERECO P-IQ needs a priority source: iq_priority_policy 1 or 2, "
+                "or zereco_critpath_priority=1\n");
+        ASSERTM(proc_id, !(ZERECO_IQ_PRIORITY_POLICY && ZERECO_CRITPATH_PRIORITY),
+                "two priority sources are enabled at once; the critical-path bit "
+                "would overwrite the Block Cache mask\n");
         ASSERTM(proc_id, ZERECO_IQ_PRIORITY_SCHEDULE_ENABLE,
                 "ZERECO P-IQ requires priority-first scheduling\n");
         ASSERTM(proc_id, ZERECO_IQ_PRIORITY_SCOPE == 0,
                 "The current P-IQ sweep is defined for the full H2P branch slice\n");
-        ASSERTM(proc_id, ZERECO_PIQ_ENTRY_PERCENT == 10 ||
-                         ZERECO_PIQ_ENTRY_PERCENT == 15 ||
-                         ZERECO_PIQ_ENTRY_PERCENT == 20 ||
-                         ZERECO_PIQ_ENTRY_PERCENT == 25 ||
-                         ZERECO_PIQ_ENTRY_PERCENT == 50,
-                "P-IQ sweep percentage must be 10, 15, 20, 25, or 50\n");
+        ASSERTM(proc_id, ZERECO_PIQ_ENTRY_PERCENT > 0 &&
+                         ZERECO_PIQ_ENTRY_PERCENT < 100,
+                "P-IQ reservation must be between 1 and 99 percent\n");
     }
     if (ZERECO_IQ_PRIORITY_POLICY == 2) {
         /* RF filtering reads op->zereco_rf_covered.  Either RF model may supply
@@ -304,7 +311,12 @@ static void commit_dependency_chain_entry(
            Under RFP_SCOPE 0 that makes it -- and only it -- eligible to own a
            Prefetch Table entry.  Membership is what scopes RFP to the H2P
            chain; the per-instance address tracking happens at retire. */
-        if (ordered_ops[i].inst_info)
+        /* Only when this walk is the Target-Load authority.  Under
+           RFP_TARGET_CRITPATH the critical-path chain nominates instead, and
+           letting both run would silently widen the scope back out to the full
+           backward slice -- which is the thing the critical-path filter exists
+           to narrow. */
+        if (!RFP_TARGET_CRITPATH && ordered_ops[i].inst_info)
             rfp_note_target_load(proc_id, ordered_ops[i].inst_info->addr,
                                  ordered_ops[i].oracle_info.va);
     }
