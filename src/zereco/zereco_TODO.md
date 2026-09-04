@@ -133,6 +133,39 @@ P-IQ 쪽은 priority bit를 critpath에서만 받으므로 무관하다. 방향�
 순수화하면 PT 압력이 줄어들 것이고, B-1이 PT 크기 무관을 보였으므로 IPC 변화는 작을 것으로
 예상하나 **재측정 전에는 확정할 수 없다.**
 
-**남은 확인 사항**: walk 자체(Fill Buffer + 500-cycle 엔진)는 여전히 매 cycle 돈다. 지금은
-소비자가 없으므로 결과에 영향이 없지만 시뮬레이션 시간을 쓴다. Phase B 계열이 확정되면
-`ZERECO_IQ_PRIORITY_POLICY`나 TEA가 꺼져 있을 때 walk 전체를 건너뛰도록 게이트할 것.
+~~**남은 확인 사항**: walk 자체는 여전히 매 cycle 돈다~~ → **해결.** `LEGACY_WALK_NEEDED()`
+(dependency_chain_cache.h)가 소비자 유무를 판정하고, `fill_buffer_add`·node_stage의 buffer-full
+트리거·`cycle_backward_walk_engine` 세 곳을 게이트한다. critical-path 구성에서는 walk가 아예
+돌지 않는다.
+
+---
+
+## 8. TEA 잔여 코드 전수 감사 (2026-09-04)
+
+critical-path 구성(TEA off, policy 0, critpath priority/RFP target on)에서 옛 코드가
+**타이밍**이나 **우리 로직이 읽는 상태**에 영향을 주는지 경로별로 확인했다.
+
+| 경로 | 판정 | 근거 |
+|---|---|---|
+| Fill Buffer + backward walk | **오염 → 수정** | PT 지명의 42.9%가 walk에서 옴 (§7). 지명 게이트 + walk 전체 게이트 |
+| Frontend Block-Cache 태깅 (`cp_rfp`처럼 priority off·RFP on) | **stat 오염 → 수정** | `chain_bit`이 옛 slice 기준이라 `RFP_COVERED_FEEDS_H2P_BRANCH` 등이 다른 slice 정의로 측정됨. `RFP_TARGET_CRITPATH`면 chain_bit도 chain 멤버십에서 받도록 변경 |
+| **`TEA_RS_RESERVATION=192`** | **의도된 것, 유지** — 단 논문 수치 주의 | TEA off에서도 `main_rs_limit = size − 192`. rs_sizes 285/204/55(544)는 TEA용으로 키운 값이고 main은 **352**를 쓴다. 모든 config 공통이라 비교는 공정하나, **논문의 RS 크기와 P-IQ 예약 %의 분모는 352** |
+| `TEA_PREG_RESERVATION=192` | 영향 없음 | TEA 풀은 `init_tea_preg_pools`(TEA_ENABLE 게이트)에서만 분리. main PRF는 592 전부 사용 |
+| SRT checkpoint (`reg_file_snapshot_srt`) | baseline 기능 | 모든 on-path branch에서 찍는 Scarab 기본 recovery 체크포인트. `exec_stage_tea_pending_flush_at_rename`은 `!TEA_ENABLE` 즉시 반환 |
+| `reg_renaming_scheme_realistic_recover` | baseline 기능 | stat 이름(`TEA_RECOVER_CALLS_*`)만 TEA 흔적. 로직은 표준 rollback |
+| HBT (`hbt_update` at retire, `hbt_pred_is_hard` at predict/retire) | **우리 설계 A1** | TEA 의존 없음 |
+| `dcache_stage_try_main_chain_load_oracle` | 무효 | `H2P_CHAIN_PERFECT_LOAD=0`이면 첫 줄에서 FALSE |
+| `tea_record_load_cache_access_order` | 무효 | 내부 첫 검사 `!TEA_ENABLE` 반환. stat 전용 |
+| `cmp_wake` TEA stale-dep 정리 | 무효 | `!TEA_ENABLE \|\| !tea_is_active` 게이트 |
+| exec/dcache/node/issue-queue의 `thread_id==1` 분기 | 무효 | 전부 `TEA_ENABLE &&` 게이트 |
+| `record_on_off_path` | 무해 | 읽는 곳이 log 전용. walk 게이트로 이제 호출도 안 됨 |
+| `zereco_rf_covered` | stat 전용 | walk의 policy-2 통계에서만 읽음 |
+| `periodically_reset_caches` | 미호출 | `tea-random-queue` 브랜치의 미커밋 변경. `test`에는 없음 |
+| dependency-chain / fill-buffer 로그 | 무효 | 로그 파일 핸들이 없으면 즉시 반환 |
+
+**결론**: 타이밍에 개입하는 잔여 경로는 없다. 오염은 (1) walk의 PT 지명, (2) chain_bit의 slice
+정의 두 건이었고 둘 다 수정했다. `TEA_RS_RESERVATION`은 기계 정의의 일부로 유지하되 논문에
+352로 적어야 한다.
+
+**재실행 필요**: Phase B(`260903`), B-1(`260904_B1`), B-2(`260904_B2`)는 오염된 코드로 돌았다.
+P-IQ 단독 수치는 무관하지만 RFP 계열과 결합 수치가 영향을 받으므로 전량 재실행한다.

@@ -1039,7 +1039,8 @@ void node_retire() {
     /* Critical-path observation: taken at commit so only on-path, architecturally
        executed instructions contribute. */
     critpath_note_retire(op);
-    fill_buffer_add(op->proc_id, op);
+    if (LEGACY_WALK_NEEDED())
+      fill_buffer_add(op->proc_id, op);
 
     // free the previous register entries with same architectural destination
     reg_file_commit(op);
@@ -1069,7 +1070,7 @@ void node_retire() {
     op = next;
   }
 
-  if (ret_count > 0) {
+  if (ret_count > 0 && LEGACY_WALK_NEEDED()) {
     Fill_Buffer* fb = retired_fill_buffers[node->proc_id];
     Backward_Walk_Engine* engine = bw_engines[node->proc_id];
     

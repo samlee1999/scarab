@@ -11,6 +11,17 @@
 // 상수 정의
 // =================================================================
 #define DEPENDENCY_CHAIN_CACHE_SIZE 1024
+
+/* Does anything still consume the legacy Fill-Buffer backward walk?  Its
+   outputs feed the TEA thread, the Block Cache masks behind the old priority
+   policies and load oracles, and Prefetch-Table nomination when the walk is
+   still the Target-Load authority.  Under the critical-path scheme none of those
+   are live, and running the walk anyway costs host time and -- as the
+   Target-Load leak showed -- invites its state to reach places it should not. */
+#define LEGACY_WALK_NEEDED()                                                   \
+  (TEA_ENABLE || ZERECO_IQ_PRIORITY_POLICY || H2P_CHAIN_PERFECT_LOAD ||        \
+   H2P_CHAIN_LOAD_PROFILE || H2P_CHAIN_LOAD_RAW_STREAM_DUMP ||                 \
+   (RFP_ENABLE && !RFP_TARGET_CRITPATH))
 #define BLOCK_CACHE_SIZE            1024 // 새로 추가된 블록 캐시 크기
 #define EMPTY_BLOCK_TAG_STORE_SIZE    256
 #define MAX_CHAIN_LENGTH            64   // 체인의 최대 길이

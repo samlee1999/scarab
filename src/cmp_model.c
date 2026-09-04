@@ -298,8 +298,9 @@ void cmp_cores(void) {
       }
 
       cmp_measure_chip_util();
-      // 매 사이클 Backward Walk 엔진 구동
-      cycle_backward_walk_engine(proc_id);
+      // 매 사이클 Backward Walk 엔진 구동 -- 소비자가 있을 때만
+      if (LEGACY_WALK_NEEDED())
+        cycle_backward_walk_engine(proc_id);
     }
   }
 }

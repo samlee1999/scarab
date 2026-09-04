@@ -400,15 +400,22 @@ void Decoupled_FE::apply_main_chain_block_tag(Op* op) {
   /* Critical-path priority replaces the Block Cache mask as the source of the
      priority bit.  Membership is per static PC rather than per block slot, so
      it needs no block coordinate and no mask -- one lookup answers it. */
-  if (ZERECO_CRITPATH_PRIORITY) {
-    op->zereco_iq_priority_bit = critpath_is_member(
+  if (ZERECO_CRITPATH_PRIORITY || RFP_TARGET_CRITPATH) {
+    Flag member = critpath_is_member(
       proc_id, op->inst_info->addr, ZERECO_CRITPATH_PRIORITY_MAX_DEPTH);
-    op->zereco_iq_priority_candidate_bit = op->zereco_iq_priority_bit;
-    op->chain_bit = op->zereco_iq_priority_bit;
-    STAT_EVENT(proc_id, ZERECO_IQ_MAIN_ONPATH_OPS);
-    if (op->zereco_iq_priority_bit) {
-      STAT_EVENT(proc_id, ZERECO_IQ_PRIORITY_MARKED_OPS);
-      STAT_EVENT(proc_id, ZERECO_IQ_PRIORITY_MARKED_PORTION);
+    /* chain_bit follows the chain whenever the chain is what selected Target
+       Loads, so the RFP counters that split coverage by slice membership use the
+       same slice definition that did the selecting.  The priority bit is granted
+       only when priority is actually enabled. */
+    op->chain_bit = member;
+    if (ZERECO_CRITPATH_PRIORITY) {
+      op->zereco_iq_priority_bit = member;
+      op->zereco_iq_priority_candidate_bit = member;
+      STAT_EVENT(proc_id, ZERECO_IQ_MAIN_ONPATH_OPS);
+      if (member) {
+        STAT_EVENT(proc_id, ZERECO_IQ_PRIORITY_MARKED_OPS);
+        STAT_EVENT(proc_id, ZERECO_IQ_PRIORITY_MARKED_PORTION);
+      }
     }
     reset_main_chain_block_tracking();
     return;
