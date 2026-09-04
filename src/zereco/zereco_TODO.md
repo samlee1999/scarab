@@ -34,7 +34,7 @@
 | 항목 | 상태 | 비고 |
 |---|---|---|
 | `RFP_INFLIGHT_UNDERFLOW` (~3.6K, injected의 0.017%) | 무해, 미수정 | PT entry가 축출된 뒤 **같은 PC로 재할당**되면, 축출 전에 rename된 in-flight 인스턴스가 retire할 때 tag가 맞아 0인 카운터를 감소시킨다. validate-then-use가 걸러내므로 correctness 문제는 아니고 예측 정확도의 미세 손실. PT를 키우면 자연히 줄어든다 |
-| `ZERECO_IQ_PRIORITY_OVERTAKES_NORMAL` 등 경합 카운터가 0 | 계측 공백 | `node_issue_queue.cc` 829·897·913행의 `if (!ZERECO_IQ_PRIORITY_POLICY) return;` 가드 때문. Phase B는 policy=0으로 두고 critpath 경로로 priority를 넣으므로 통계만 조기 반환한다. 기능은 정상 (scheduler 대기 2.68→0.06cy). 경합 세부가 필요해지면 게이트에 `ZERECO_CRITPATH_PRIORITY`를 추가 |
+| ~~`ZERECO_IQ_PRIORITY_OVERTAKES_NORMAL` 등 경합 카운터가 0~~ | **해결 (0de65a7)** | 세 게이트에 `ZERECO_CRITPATH_PRIORITY`를 추가했다. B-2부터 기록된다 |
 | 관찰 테이블이 Phase B에서도 계측용 크기 | 의도적 | 4096 sets × 8-way. Phase B 확정 후 실제 하드웨어 예산으로 축소하고 민감도를 재야 한다 |
 
 ---
@@ -57,9 +57,9 @@
 
 | # | 내용 | 상태 |
 |---|---|---|
-| **B-1** | PT 크기 sweep (1K/4K/16K/무제한), partition·depth 비병목 | 진행 중 |
-| **B-2** | partition 비율 sweep (무한/30/25/20/15%), PT·depth 비병목 | B-1 확정 후 |
-| **B-3** | depth 제한 sweep (무제한/8/4/2/1), PT·partition 비병목 | B-1 확정 후 |
+| **B-1** | PT 크기 sweep | **완료 — PT는 제약이 아니다.** 1K와 무제한이 모두 +9.1%. §6 참조 |
+| **B-2** | partition 비율 sweep (무한/30/25/20/15/10%), PT 무제한·depth 무제한 | 준비 완료 |
+| **B-3** | depth 제한 sweep (무제한/8/4/2/1), PT·partition 비병목 | 대기 |
 | — | 축 간 상호작용이 의심되는 지점만 2차원으로 좁혀 확인 | 필요시 |
 
 ---
@@ -77,3 +77,26 @@ decay 20K에도 59.3%. 원인은 refresh:new = 1792:1 — 재확인이 노화를
 ⇒ 인구 축소가 그 자체로 목표인지는 재검토 대상이다. depth 제한(B-3)이 성능에 어떤 영향인지
 본 뒤에 판단한다. 인구를 줄여도 성능이 유지되면 하드웨어 비용 절감 논거가 되고, 떨어지면
 "critical path는 넓지만 그래서 유효하다"는 서술로 간다.
+
+---
+
+## 6. B-1 결과 — PT 크기는 제약이 아니다 (2026-09-04)
+
+| PT | IPC | alloc | evict/alloc | 포화/alloc | eligible | useful |
+|---|---:|---:|---:|---:|---:|---:|
+| 1K | +9.09% | 1,120,402 | 1.00 | 0.33 | 31.6% | 20.1% |
+| 4K | +9.12% | 138,950 | 0.93 | 2.75 | 31.9% | 20.4% |
+| 16K | +9.10% | 25,231 | 0.31 | 15.30 | 31.9% | 20.4% |
+| 무제한 | +9.11% | 20,524 | 0.00 | 18.83 | 31.9% | 20.4% |
+
+**스래싱은 실재했지만 성능과 무관했다.** 축출을 완전히 없애도 IPC는 +0.02%p 움직인다.
+confidence 포화 **건수**가 크기와 무관하게 거의 같다(365K → 386K, +5.7%)는 것이 이유다.
+1K에서의 112만 할당은 **한 번도 포화하지 못할 cold PC들의 회전**이고, 실제로 포화하는 hot PC
+집합은 1K 안에 이미 상주한다. RFP 논문이 1K를 기본값으로 고른 것과 같은 결론.
+
+**RFP의 상한은 5.19%** (PT 무제한, priority 없음). 1K에서의 5.17%와 사실상 같다.
+따라서 RFP를 묶는 것은 테이블 용량이 아니라 **주소 예측 가능성**이다 — PT-hit 69.5% 중
+eligible이 31.9%뿐이고, 그 격차는 confidence가 서지 않는 load들이다.
+
+부수 확인: `RFP_INFLIGHT_UNDERFLOW`가 PT 크기와 함께 3,443 → 296 → 7 → 0으로 사라졌다.
+§2에서 추정한 원인(축출 후 같은 PC로 재할당)이 맞았다.
