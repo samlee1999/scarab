@@ -826,7 +826,10 @@ static void node_issue_queue_shadow_consider_baseline(
 }
 
 static void node_issue_queue_collect_zereco_shadow_stats(void) {
-  if (!ZERECO_IQ_PRIORITY_POLICY)
+  /* Also active when the priority bit comes from the critical-path chain: the
+     bit is what these counters read, and where it was set does not change what
+     they mean. */
+  if (!ZERECO_IQ_PRIORITY_POLICY && !ZERECO_CRITPATH_PRIORITY)
     return;
 
   ASSERTM(node->proc_id, node->sd.max_op_count <= 64,
@@ -894,7 +897,7 @@ static void node_issue_queue_collect_zereco_shadow_stats(void) {
 }
 
 static inline void node_issue_queue_collect_zereco_ready_stats(void) {
-  if (!ZERECO_IQ_PRIORITY_POLICY)
+  if (!ZERECO_IQ_PRIORITY_POLICY && !ZERECO_CRITPATH_PRIORITY)
     return;
   Counter ready_priority = 0;
   for (Op* op = node->rdy_head; op; op = op->next_rdy) {
@@ -910,7 +913,7 @@ static inline void node_issue_queue_collect_zereco_ready_stats(void) {
 }
 
 static inline void node_issue_queue_collect_zereco_contention_stats(void) {
-  if (!ZERECO_IQ_PRIORITY_POLICY ||
+  if ((!ZERECO_IQ_PRIORITY_POLICY && !ZERECO_CRITPATH_PRIORITY) ||
       !ZERECO_IQ_PRIORITY_SCHEDULE_ENABLE)
     return;
 
