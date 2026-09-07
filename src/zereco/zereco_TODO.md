@@ -16,7 +16,7 @@
 | D-6 | brslice_tab 하드웨어 예산 | 4096 × 8-way (계측 크기) | 실제 예산(예: PUBS 128×8)으로 축소해 민감도 측정 |
 | D-10 | partition 예약률 확정 | 무한 | B-2(옛 352 머신) 20% → 상한의 92%, fallback 14%. RS 186에서는 20% = 37 entry로 절대량이 절반 — GC 재측정 후 **값 선택** — 사용자 결정 |
 
-(D-3 retention threshold, D-7 삽입 게이트, D-8 memory dep, D-9 RS 352 → 확정, DESIGN.md로 이동)
+(D-3 retention threshold, D-7 삽입 게이트, D-8 memory dep, D-9 RS 크기(→ Golden Cove 186, 2026-09-07) → 확정, DESIGN.md로 이동)
 
 ## 1. Address-generation slice statistics (급하지 않음)
 
