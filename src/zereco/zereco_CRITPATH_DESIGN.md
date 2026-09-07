@@ -158,6 +158,13 @@ priority op의 ready→issue는 어느 비율에서도 0.4~0.6 cy로 normal(2.2~
 partition이 우선권을 실제로 전달한다. pr은 전 구간 평탄(bandwidth-bound), xgboost는 비단조
 (지배 phase 결손 표본의 잡음).
 
+### C6. 코드 감사 (2026-09-04)
+
+TEA 잔여 코드 중 타이밍이나 우리 상태에 닿는 경로를 전수 확인. 오염 2건(walk의 PT 지명,
+Block-Cache 기준 chain_bit)을 수정하고 walk를 완전 차단했다. 정제 후 재실행 결과는 오염 전과
+0.04%p 이내 — 오염분(지명의 42.9%)은 성능에 기여하지 않던 cold PC였다. 알면서 보류한 낙관
+1건(wrong-path 명령어에 priority 미부여)은 TODO D-1.
+
 ### C7. Golden Cove 실측 머신(RS 186)에서의 동향 확인 (`260907_critpath_gc_phaseB`, 105 simpoint, 양쪽 머신 같은 표본)
 
 | config | 352 머신 | 186 머신 |
@@ -172,10 +179,3 @@ partition이 우선권을 실제로 전달한다. pr은 전 구간 평탄(bandwi
 - part20(37 entry)의 fallback 15→24%. baseline IPC 자체는 geomean −5.0%(pr −21%, sssp −15%: memory-bound 워크로드가 PRF 축소에 민감).
 - chain 인구 60%, tie 7%, producer flip 22% — 352 머신과 1%p 이내로 같아 A/A2 결론은 머신 무관.
 - 186 머신에서는 clang 1358, gcc 414, gcc 939가 frontend watchdog으로 죽음(baseline 포함, 같은 op 번호). 352 머신에서는 완주.
-
-### C6. 코드 감사 (2026-09-04)
-
-TEA 잔여 코드 중 타이밍이나 우리 상태에 닿는 경로를 전수 확인. 오염 2건(walk의 PT 지명,
-Block-Cache 기준 chain_bit)을 수정하고 walk를 완전 차단했다. 정제 후 재실행 결과는 오염 전과
-0.04%p 이내 — 오염분(지명의 42.9%)은 성능에 기여하지 않던 cold PC였다. 알면서 보류한 낙관
-1건(wrong-path 명령어에 priority 미부여)은 TODO D-1.
