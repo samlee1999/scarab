@@ -72,7 +72,7 @@ critical edge의 **2.3%**만 store→load라 손실은 미미하다 (확정, 한
 | Prefetch Table | **1K entry** (512도 −0.07%p) | B-1: 크기 무관, 병목은 주소 예측 가능성 |
 | L1-miss 정책 | 하위 계층 fill 진행 | fill path가 RFP 이득의 지배 성분 |
 | 옛 Fill-Buffer walk | **완전 배제** (`LEGACY_WALK_NEEDED()`) | 걸려 있을 때 Target Load 지명의 42.9%를 오염시켰음 |
-| 백엔드 머신 | **Golden Cove 실측치** (`PARAMS.golden_cove`, 2026-09-07 개정) — RS 97/70/19 = **186** (wikichips 97/70/38; Scarab이 ST-AGU 포트 4·9를 하나로 합쳐 RS3는 19), dcache **1 read port × 8 bank**, PRF int 280 / vec 332, LLC 8 bank, MSHR 32, `tea_rs_reservation 0`. **이전 실험과 동일하게 유지**(사용자 결정): issue 8 / retire 16, LQ 256 / SQ 192, BTB 8K | TEA 평가용 확대 머신(RS 544−192 = 352, 2 port × 1 bank, PRF 592, 8-wide)은 현실성이 부족해 폐기. 모든 config 공통. **논문 RS·partition % 분모 = 186** |
+| 백엔드 머신 | **Golden Cove 실측치** (`PARAMS.golden_cove`, 2026-09-07 개정) — RS 97/70/19 = **186** (wikichips 97/70/38; Scarab이 ST-AGU 포트 4·9를 하나로 합쳐 RS3는 19), dcache **1 read port × 8 bank**, PRF int 280 / vec 332, LLC 8 bank, `tea_rs_reservation 0`. **이전 실험과 동일하게 유지**(사용자 결정): issue 8 / retire 16, LQ 256 / SQ 192, BTB 8K, MSHR 64 | TEA 평가용 확대 머신(RS 544−192 = 352, 2 port × 1 bank, PRF 592, 8-wide)은 현실성이 부족해 폐기. 모든 config 공통. **논문 RS·partition % 분모 = 186** |
 
 ---
 
