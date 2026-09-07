@@ -939,12 +939,16 @@ void node_retire() {
       Counter ready_to_issue = op->sched_cycle - real_rdy_cycle;
       if (op->zereco_iq_priority_bit) {
         STAT_EVENT(op->proc_id, ZERECO_IQ_PRIORITY_ISSUED);
+        if (ready_to_issue == 0)
+          STAT_EVENT(op->proc_id, ZERECO_IQ_PRIORITY_ISSUED_ZERO_WAIT);
         INC_STAT_EVENT(op->proc_id, ZERECO_IQ_PRIORITY_READY_TO_ISSUE_TOTAL,
                        ready_to_issue);
         INC_STAT_EVENT(op->proc_id, ZERECO_IQ_PRIORITY_READY_TO_ISSUE_AVG,
                        ready_to_issue);
       } else {
         STAT_EVENT(op->proc_id, ZERECO_IQ_NORMAL_ISSUED);
+        if (ready_to_issue == 0)
+          STAT_EVENT(op->proc_id, ZERECO_IQ_NORMAL_ISSUED_ZERO_WAIT);
         INC_STAT_EVENT(op->proc_id, ZERECO_IQ_NORMAL_READY_TO_ISSUE_TOTAL,
                        ready_to_issue);
         INC_STAT_EVENT(op->proc_id, ZERECO_IQ_NORMAL_READY_TO_ISSUE_AVG,

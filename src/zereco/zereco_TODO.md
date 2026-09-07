@@ -58,7 +58,9 @@
 | **B-5** | D-1 수정 후 재측정 (wrong-path priority) | 대기 — 낙관 폭 보고용 |
 | **GC-1** | Golden Cove(RS 186) 머신에서 Phase B 사다리 재측정 (`260907_critpath_gc_phaseB`) | **완료** → 결과는 DESIGN.md C7. 비교 스크립트 `analysis/compare_old.py` |
 | **GC-2** | Golden Cove sweep: PT 256/512/4K/∞ + partition 10/15/30/40% | **보류(2026-09-08 방향 전환).** 디스크립터는 `json/zereco_dbg_gc186_sweep.json`(105 simpoint)에 보관 |
-| **CMP** | **성능 비교** (`260908_critpath_comparison`, 352 머신, random queue, 108 simpoint): {P-IQ only, RFP only, P-IQ+RFP} × {critical slice, **full slice**}. P-IQ = PUBS식 20% 예약(70 entry) non-stall | 코드(`zereco_critpath_full_slice`)·빌드·디스크립터 완료, **실행 대기(사용자)**. 재사용: baseline = `260905_critpath_phaseB/baseline_randq`(108), TEA = `260827_tea_baseline/tea_random_queue`(**67 simpoint만**, gitrev e058150 — 108 weight 집계에 넣으려면 41개 추가 실행 필요, 아니면 TEA 비교는 67개로 한정) |
+| **CMP** | **성능 비교** (`260908_critpath_comparison`, 352 머신, random queue, 108 simpoint): {P-IQ only, RFP only, P-IQ+RFP} × {critical slice, **full slice**}. P-IQ = PUBS식 **25%** 예약(88 entry; 옛 머신 평균 RS 점유율 ≈25%) non-stall | 코드(`zereco_critpath_full_slice` + shadow critical table)·빌드·디스크립터 완료, **실행 대기(사용자)**. 재사용: baseline = `260905_critpath_phaseB/baseline_randq`(108), TEA = `260827_tea_baseline/tea_random_queue`(67 simpoint, **그대로 사용** — 사용자 결정; TEA 행은 67개 공통 표본으로 집계) |
+| — | **cycle-identity 확인**: `piq_rfp_critical_slice`(25%)는 `260905_critpath_B2_partition/b2_part25`와 같은 설정이므로 simpoint별 cycle이 일치해야 함 — full-slice 코드가 critical 경로를 건드리지 않았다는 증거 | CMP 결과 도착 시 첫 번째로 확인 |
+| — | filtering 효과 통계(CMP에서 자동 수집): full 모드에서 shadow critical table로 멤버/priority op/Target Load를 critical·noncritical로 분류(`CRITPATH_FULL_MEMBER_*`, `CRITPATH_PRIORITY_OP_*`, `CRITPATH_TARGET_LOAD_*`), chain size(`CRITPATH_SLICE_OPS`/`CRITPATH_ROOT_COMMITS`), 테이블 상주 멤버 수(`CRITPATH_LIVE_MEMBERS_AT_SWEEP`/sweeps), zero-wait issue(`ZERECO_IQ_*_ISSUED_ZERO_WAIT`) | 분석 스크립트에 반영 |
 | — | full slice 모드는 멤버 load 전부가 PT를 지명하므로 PT 1K가 thrash할 수 있음. 결과에서 `RFP_PT_EVICTIONS`/PT hit를 critical 대비 확인 | CMP 분석 시 |
 | — | 축 간 상호작용 의심 지점만 2차원 확인 | 필요시 |
 | — | `LEGACY_WALK_NEEDED()`가 false일 때 Fill Buffer/walk 메모리 할당 자체도 생략 (host 메모리) | 선택 |

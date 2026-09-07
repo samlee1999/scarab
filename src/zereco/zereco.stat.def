@@ -417,3 +417,23 @@ DEF_STAT(CRITPATH_OWNER_UNKNOWN, COUNT, NO_RATIO)
 
 /* Phase B: loads the chain handed to the Prefetch Table. */
 DEF_STAT(CRITPATH_TARGET_LOADS, COUNT, NO_RATIO)
+
+/* ---- critical-vs-full slice filtering (2026-09-08) ------------------------ */
+/* H2P branch commits that may seed a chain: members / roots = chain size */
+DEF_STAT(CRITPATH_ROOT_COMMITS, COUNT, NO_RATIO)
+/* Member PCs alive after each decay sweep (divide by CRITPATH_DECAY_SWEEPS) */
+DEF_STAT(CRITPATH_LIVE_MEMBERS_AT_SWEEP, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_SHADOW_LIVE_MEMBERS_AT_SWEEP, COUNT, NO_RATIO)
+/* Full-slice mode: committed full-slice members split by whether the critical
+   rule (shadow table) would also have kept them */
+DEF_STAT(CRITPATH_FULL_MEMBER_CRITICAL, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_FULL_MEMBER_NONCRITICAL, COUNT, NO_RATIO)
+/* Full-slice mode: committed ops that carried the priority bit, split the same way */
+DEF_STAT(CRITPATH_PRIORITY_OP_CRITICAL, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PRIORITY_OP_NONCRITICAL, COUNT, NO_RATIO)
+/* Full-slice mode: Target Loads handed to the Prefetch Table, split the same way */
+DEF_STAT(CRITPATH_TARGET_LOAD_CRITICAL, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_TARGET_LOAD_NONCRITICAL, COUNT, NO_RATIO)
+/* Issued with no ready-to-issue wait: priority bought nothing for these */
+DEF_STAT(ZERECO_IQ_PRIORITY_ISSUED_ZERO_WAIT, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_IQ_NORMAL_ISSUED_ZERO_WAIT, COUNT, NO_RATIO)

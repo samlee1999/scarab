@@ -68,6 +68,11 @@ typedef struct Critpath_PC_Entry_struct {
 typedef struct Critpath_Core_State_struct {
   Flag initialized;
   Critpath_PC_Entry* pc_table;
+  /* Full-slice mode only: a second table that applies the critical-path rule
+     to the same commit stream, so every committed op can be classified as
+     "full-slice member that the critical rule would / would not have kept".
+     It is never consulted by the frontend; it only measures the filtering. */
+  Critpath_PC_Entry* shadow_table;
   uns sets;
   uns assoc;
   uns confirm_max;
@@ -85,14 +90,12 @@ static inline Critpath_Core_State* critpath_get_state(uns proc_id) {
    entries, conflict evictions outnumbered the propagations they were supposed
    to be recording, which distorts any population or depth number read off the
    table.  Associativity also matches the shape the real structure will have. */
-static Critpath_PC_Entry* critpath_pc_lookup(uns proc_id, Addr pc,
-                                             Flag allocate) {
-  Critpath_Core_State* state = critpath_get_state(proc_id);
-  if (!state->initialized)
-    return NULL;
-
-  Critpath_PC_Entry* set =
-    &state->pc_table[(pc % state->sets) * state->assoc];
+static Critpath_PC_Entry* critpath_table_lookup(uns proc_id,
+                                                Critpath_Core_State* state,
+                                                Critpath_PC_Entry* table,
+                                                Addr pc, Flag allocate,
+                                                Flag is_main) {
+  Critpath_PC_Entry* set = &table[(pc % state->sets) * state->assoc];
   for (uns way = 0; way < state->assoc; ++way) {
     if (set[way].valid && set[way].tag == pc) {
       set[way].lru_touch = cycle_count;
@@ -116,7 +119,7 @@ static Critpath_PC_Entry* critpath_pc_lookup(uns proc_id, Addr pc,
   }
   ASSERT(proc_id, victim);
 
-  if (victim->valid) {
+  if (victim->valid && is_main) {
     STAT_EVENT(proc_id, CRITPATH_PC_TABLE_CONFLICTS);
     if (victim->in_slice)
       STAT_EVENT(proc_id, CRITPATH_PC_TABLE_EVICT_MEMBER);
@@ -128,17 +131,25 @@ static Critpath_PC_Entry* critpath_pc_lookup(uns proc_id, Addr pc,
   return victim;
 }
 
+static Critpath_PC_Entry* critpath_pc_lookup(uns proc_id, Addr pc,
+                                             Flag allocate) {
+  Critpath_Core_State* state = critpath_get_state(proc_id);
+  if (!state->initialized)
+    return NULL;
+  return critpath_table_lookup(proc_id, state, state->pc_table, pc, allocate,
+                               TRUE);
+}
+
 /* Age every counter, and drop the entries that have stopped being re-derived.
    This is the knob that adapts membership to a program phase change: a chain
    that no longer carries the critical edge simply stops being refreshed and
    falls out on its own, without anything having to detect the phase. */
-static void critpath_decay(uns proc_id) {
-  Critpath_Core_State* state = critpath_get_state(proc_id);
+static void critpath_decay_table(uns proc_id, Critpath_Core_State* state,
+                                 Critpath_PC_Entry* table, Flag is_main) {
   uns entries = state->sets * state->assoc;
-  STAT_EVENT(proc_id, CRITPATH_DECAY_SWEEPS);
-
+  Counter live = 0;
   for (uns ii = 0; ii < entries; ++ii) {
-    Critpath_PC_Entry* e = &state->pc_table[ii];
+    Critpath_PC_Entry* e = &table[ii];
     if (!e->valid)
       continue;
     if (e->confirm) {
@@ -148,9 +159,25 @@ static void critpath_decay(uns proc_id) {
       e->in_slice = FALSE;
       e->depth = 0;
       e->owner_pc = 0;
-      STAT_EVENT(proc_id, CRITPATH_DECAY_DROPPED_MEMBER);
+      if (is_main)
+        STAT_EVENT(proc_id, CRITPATH_DECAY_DROPPED_MEMBER);
     }
+    if (e->in_slice)
+      live++;
   }
+  /* Live member PCs after the sweep: averaged over sweeps this is the table
+     population the real structure must hold (hardware budget, TODO D-6). */
+  INC_STAT_EVENT(proc_id, is_main ? CRITPATH_LIVE_MEMBERS_AT_SWEEP
+                                  : CRITPATH_SHADOW_LIVE_MEMBERS_AT_SWEEP,
+                 live);
+}
+
+static void critpath_decay(uns proc_id) {
+  Critpath_Core_State* state = critpath_get_state(proc_id);
+  STAT_EVENT(proc_id, CRITPATH_DECAY_SWEEPS);
+  critpath_decay_table(proc_id, state, state->pc_table, TRUE);
+  if (state->shadow_table)
+    critpath_decay_table(proc_id, state, state->shadow_table, FALSE);
 }
 
 /**************************************************************************************/
@@ -181,6 +208,12 @@ void critpath_init(uns proc_id) {
     (size_t)state->sets * state->assoc, sizeof(Critpath_PC_Entry));
   ASSERTM(proc_id, state->pc_table,
           "Failed to allocate the critical-path observation table\n");
+  if (ZERECO_CRITPATH_FULL_SLICE) {
+    state->shadow_table = (Critpath_PC_Entry*)calloc(
+      (size_t)state->sets * state->assoc, sizeof(Critpath_PC_Entry));
+    ASSERTM(proc_id, state->shadow_table,
+            "Failed to allocate the critical-path shadow table\n");
+  }
   state->initialized = TRUE;
 }
 
@@ -190,6 +223,9 @@ void critpath_reset(uns proc_id) {
     return;
   memset(state->pc_table, 0,
          sizeof(Critpath_PC_Entry) * (size_t)state->sets * state->assoc);
+  if (state->shadow_table)
+    memset(state->shadow_table, 0,
+           sizeof(Critpath_PC_Entry) * (size_t)state->sets * state->assoc);
   state->retires = 0;
 }
 
@@ -342,10 +378,11 @@ static void critpath_record_depth(uns proc_id, uns8 depth) {
    lookup may evict any entry that shares its set, so callers must have copied
    whatever they still need out of their own entry before calling this. */
 static void critpath_propagate_to(uns proc_id, Critpath_Core_State* state,
+                                  Critpath_PC_Entry* table, Flag is_main,
                                   Addr producer_pc, uns8 my_depth,
                                   Addr my_owner) {
   Critpath_PC_Entry* producer =
-    critpath_pc_lookup(proc_id, producer_pc, TRUE);
+    critpath_table_lookup(proc_id, state, table, producer_pc, TRUE, is_main);
   if (!producer)
     return;
   if (!producer->in_slice) {
@@ -353,7 +390,8 @@ static void critpath_propagate_to(uns proc_id, Critpath_Core_State* state,
     producer->depth = my_depth + 1;
     producer->owner_pc = my_owner;
     producer->confirm = 1;
-    STAT_EVENT(proc_id, CRITPATH_PROPAGATIONS);
+    if (is_main)
+      STAT_EVENT(proc_id, CRITPATH_PROPAGATIONS);
     return;
   }
   /* Already a member.  Keep the shortest distance seen -- this also absorbs a
@@ -367,12 +405,14 @@ static void critpath_propagate_to(uns proc_id, Critpath_Core_State* state,
   if (producer->confirm < state->confirm_max)
     producer->confirm++;
   if (producer->owner_pc != my_owner) {
-    STAT_EVENT(proc_id, CRITPATH_OWNER_OVERWRITE);
-    if (producer->owner_pc && hbt_is_hard_branch(producer->owner_pc) &&
-        !(my_owner && hbt_is_hard_branch(my_owner)))
-      STAT_EVENT(proc_id, CRITPATH_OWNER_OVERWRITE_H2P_LOST);
+    if (is_main) {
+      STAT_EVENT(proc_id, CRITPATH_OWNER_OVERWRITE);
+      if (producer->owner_pc && hbt_is_hard_branch(producer->owner_pc) &&
+          !(my_owner && hbt_is_hard_branch(my_owner)))
+        STAT_EVENT(proc_id, CRITPATH_OWNER_OVERWRITE_H2P_LOST);
+    }
     producer->owner_pc = my_owner;
-  } else {
+  } else if (is_main) {
     STAT_EVENT(proc_id, CRITPATH_PROPAGATION_REFRESHED);
   }
 }
@@ -433,6 +473,24 @@ void critpath_note_retire(Op* op) {
                    (ZERECO_CRITPATH_INSERT_GATE == 2 &&
                     op->oracle_info.hbt_pred_is_hard));
 
+  if (may_seed)
+    STAT_EVENT(proc_id, CRITPATH_ROOT_COMMITS);
+  /* Shadow (critical rule) entry, full-slice mode only.  Seeded and aged
+     exactly like the main table; differs only in how it propagates. */
+  Critpath_PC_Entry* shadow = NULL;
+  if (state->shadow_table) {
+    shadow = critpath_table_lookup(proc_id, state, state->shadow_table, pc,
+                                   TRUE, FALSE);
+    if (may_seed) {
+      if (!shadow->in_slice || shadow->owner_pc != pc) {
+        shadow->in_slice = TRUE;
+        shadow->depth = 0;
+        shadow->owner_pc = pc;
+      }
+      if (shadow->confirm < state->confirm_max)
+        shadow->confirm++;
+    }
+  }
   if (may_seed) {
     if (!entry->in_slice || entry->owner_pc != pc) {
       entry->in_slice = TRUE;
@@ -455,12 +513,21 @@ void critpath_note_retire(Op* op) {
          entry->depth <= ZERECO_CRITPATH_PRIORITY_MAX_DEPTH)) {
       rfp_note_target_load(proc_id, pc, op->oracle_info.va);
       STAT_EVENT(proc_id, CRITPATH_TARGET_LOADS);
+      if (shadow)
+        STAT_EVENT(proc_id, shadow->in_slice ? CRITPATH_TARGET_LOAD_CRITICAL
+                                             : CRITPATH_TARGET_LOAD_NONCRITICAL);
     }
     STAT_EVENT(proc_id, CRITPATH_SLICE_OPS);
+    if (shadow)
+      STAT_EVENT(proc_id, shadow->in_slice ? CRITPATH_FULL_MEMBER_CRITICAL
+                                           : CRITPATH_FULL_MEMBER_NONCRITICAL);
     critpath_record_confirm(proc_id, entry->confirm);
     critpath_record_owner_class(proc_id, entry->owner_pc);
   }
 
+  if (shadow && op->zereco_iq_priority_bit)
+    STAT_EVENT(proc_id, shadow->in_slice ? CRITPATH_PRIORITY_OP_CRITICAL
+                                         : CRITPATH_PRIORITY_OP_NONCRITICAL);
   Flag has_lpr = (op->critpath_wake_events > 0);
 
   /* ---- 2. slack between the critical operand and the runner-up --------- */
@@ -519,6 +586,17 @@ void critpath_note_retire(Op* op) {
   }
 
   /* ---- 5. propagate one level, as the real mechanism would -------------- */
+  /* Shadow table (full-slice mode): apply the critical rule regardless of what
+     the main table says, so the two memberships stay independent.  Read its
+     fields before the lookup inside the helper can evict them. */
+  if (shadow && shadow->in_slice && has_lpr && !frontier &&
+      shadow->depth < CRITPATH_MAX_DEPTH &&
+      op->critpath_last_producer_pc != 0) {
+    uns8 sh_depth = shadow->depth;
+    Addr sh_owner = shadow->owner_pc;
+    critpath_propagate_to(proc_id, state, state->shadow_table, FALSE,
+                          op->critpath_last_producer_pc, sh_depth, sh_owner);
+  }
   if (!in_slice)
     return;
 
@@ -533,13 +611,24 @@ void critpath_note_retire(Op* op) {
     uns8 my_depth = entry->depth;
     Addr my_owner = entry->owner_pc;
     uns num_srcs = op->oracle_info.num_srcs;
+    Addr seen[MAX_DEPS];
+    uns num_seen = 0;
     for (uns ii = 0; ii < num_srcs; ++ii) {
       if (op->oracle_info.src_info[ii].type != REG_DATA_DEP)
         continue;
       Addr producer_pc = op->critpath_src_producer_pc[ii];
       if (producer_pc == 0)
         continue;
-      critpath_propagate_to(proc_id, state, producer_pc, my_depth, my_owner);
+      /* One propagation per distinct producer: two operands from the same
+         instruction must not confirm it twice per instance. */
+      Flag dup = FALSE;
+      for (uns jj = 0; jj < num_seen && !dup; ++jj)
+        dup = (seen[jj] == producer_pc);
+      if (dup)
+        continue;
+      seen[num_seen++] = producer_pc;
+      critpath_propagate_to(proc_id, state, state->pc_table, TRUE,
+                            producer_pc, my_depth, my_owner);
     }
     return;
   }
@@ -563,6 +652,7 @@ void critpath_note_retire(Op* op) {
   /* Read what this op contributes before touching the table again.  The lookup
      inside the helper can evict whichever entry shares its index -- including
      this one -- so `entry` must not be dereferenced afterwards. */
-  critpath_propagate_to(proc_id, state, op->critpath_last_producer_pc,
-                        entry->depth, entry->owner_pc);
+  critpath_propagate_to(proc_id, state, state->pc_table, TRUE,
+                        op->critpath_last_producer_pc, entry->depth,
+                        entry->owner_pc);
 }
