@@ -14,6 +14,7 @@
 | D-4 | depth 제한 | 파라미터만 존재(0=무제한) | **B-3**에서 sweep — 인구를 줄이는 유일한 지렛대 |
 | D-5 | owner 충돌 | 단일 owner pointer, overwrite | 전파의 ~30%가 overwrite, H2P-lost 5%. 2-slot 승격 여부 결정 |
 | D-6 | brslice_tab 하드웨어 예산 | 4096 × 8-way (계측 크기) | 실제 예산(예: PUBS 128×8)으로 축소해 민감도 측정 |
+| **D-11** | **store→load forwarding wake의 LPR 추적** | 시뮬레이터는 forwarding store의 wake도 LPR 후보로 삼아 store가 마지막 도착이면 **store PC로 전파**(critical edge의 2.3%, Phase A부터 모든 실험 동일) | 그림의 PRF scoreboard 구조로는 불가능(LPR 필드가 preg만 가리킴). 선택지: (a) 유지하고 하드웨어에 "LPR = SQ entry" 확장 + commit 때 SQ/ROB에서 store PC 읽기를 설계에 추가, (b) register-only로 한정하고 2.3%를 한계로 서술. **사용자 결정 대기.** (b)의 구현은 커밋 4253b3c에 있었고 되돌림(`git show 4253b3c -- src/zereco/critpath.c`) |
 | D-10 | partition 예약률 확정 | 무한 | B-2(옛 352 머신) 20% → 상한의 92%, fallback 14%. RS 186에서는 20% = 37 entry로 절대량이 절반 — GC 재측정 후 **값 선택** — 사용자 결정 |
 
 (D-3 retention threshold, D-7 삽입 게이트, D-8 memory dep, D-9 RS 크기(→ Golden Cove 186, 2026-09-07) → 확정, DESIGN.md로 이동)
@@ -58,8 +59,8 @@
 | **B-5** | D-1 수정 후 재측정 (wrong-path priority) | 대기 — 낙관 폭 보고용 |
 | **GC-1** | Golden Cove(RS 186) 머신에서 Phase B 사다리 재측정 (`260907_critpath_gc_phaseB`) | **완료** → 결과는 DESIGN.md C7. 비교 스크립트 `analysis/compare_old.py` |
 | **GC-2** | Golden Cove sweep: PT 256/512/4K/∞ + partition 10/15/30/40% | **보류(2026-09-08 방향 전환).** 디스크립터는 `json/zereco_dbg_gc186_sweep.json`(105 simpoint)에 보관 |
-| **CMP** | **성능 비교** (`260908_critpath_comparison`, 352 머신, random queue, 108 simpoint): {P-IQ only, RFP only, P-IQ+RFP} × {critical slice, **full slice**}. P-IQ = PUBS식 **25%** 예약(88 entry; 옛 머신 평균 RS 점유율 ≈25%) non-stall | 코드(`zereco_critpath_full_slice` + shadow critical table, LPR register-only, `rfp_store_forward 1`)·빌드·디스크립터 완료. decay 100K·depth 무제한은 phaseB와 동일, **실행 대기(사용자)**. 재사용: baseline = `260905_critpath_phaseB/baseline_randq`(108), TEA = `260827_tea_baseline/tea_random_queue`(67 simpoint, **그대로 사용** — 사용자 결정; TEA 행은 67개 공통 표본으로 집계) |
-| — | `piq_rfp_critical_slice`(25%) vs `260905_critpath_B2_partition/b2_part25`: 이제 **의도된 차이 2건**(LPR register-only, RFP store forwarding 1)이 있어 cycle 동일성은 기대하지 않음. 대신 차이가 작고(critical edge 2.3% + store-abstain 18.9% 회수) 방향이 맞는지 확인 | CMP 결과 도착 시 |
+| **CMP** | **성능 비교** (`260908_critpath_comparison`, 352 머신, random queue, 108 simpoint): {P-IQ only, RFP only, P-IQ+RFP} × {critical slice, **full slice**}. P-IQ = PUBS식 **25%** 예약(88 entry; 옛 머신 평균 RS 점유율 ≈25%) non-stall | 코드(`zereco_critpath_full_slice` + shadow critical table, `rfp_store_forward 1`)·빌드·디스크립터 완료. decay 100K·depth 무제한은 phaseB와 동일, **실행 대기(사용자)**. 재사용: baseline = `260905_critpath_phaseB/baseline_randq`(108), TEA = `260827_tea_baseline/tea_random_queue`(67 simpoint, **그대로 사용** — 사용자 결정; TEA 행은 67개 공통 표본으로 집계) |
+| — | `piq_rfp_critical_slice`(25%) vs `260905_critpath_B2_partition/b2_part25`: 의도된 차이 1건(RFP store forwarding 1)만 있음. `piq_only_critical_slice`는 B-2에 대응 config가 없어 동일성 검증 불가(B-2는 전부 RFP 포함) | CMP 결과 도착 시 방향 확인 |
 | — | filtering 효과 통계(CMP에서 자동 수집): full 모드에서 shadow critical table로 멤버/priority op/Target Load를 critical·noncritical로 분류(`CRITPATH_FULL_MEMBER_*`, `CRITPATH_PRIORITY_OP_*`, `CRITPATH_TARGET_LOAD_*`), chain size(`CRITPATH_SLICE_OPS`/`CRITPATH_ROOT_COMMITS`), 테이블 상주 멤버 수(`CRITPATH_LIVE_MEMBERS_AT_SWEEP`/sweeps), zero-wait issue(`ZERECO_IQ_*_ISSUED_ZERO_WAIT`) | 분석 스크립트에 반영 |
 | — | full slice 모드는 멤버 load 전부가 PT를 지명하므로 PT 1K가 thrash할 수 있음. 결과에서 `RFP_PT_EVICTIONS`/PT hit를 critical 대비 확인 | CMP 분석 시 |
 | — | 축 간 상호작용 의심 지점만 2차원 확인 | 필요시 |

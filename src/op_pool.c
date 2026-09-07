@@ -250,8 +250,6 @@ void op_pool_setup_op(uns proc_id, Op* op) {
   op->critpath_last_src = 0;
   op->critpath_last_dep_type = 0;
   op->critpath_wake_events = 0;
-  op->critpath_mem_last_cycle = 0;
-  op->critpath_mem_wake_events = 0;
   op->critpath_last_producer_pc = 0;
   op->off_path = FALSE;  // FIXME: check
   op->state = OS_FETCHED;

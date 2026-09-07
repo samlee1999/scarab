@@ -60,10 +60,9 @@ dynamic producer), ② decode-time → **commit-time** 학습 (on-path만, wrong
 
 **store→load memory dependence는 추적 불가.** PRF 기반이라 register edge만 따라간다. 실측
 critical edge의 **2.3%**만 store→load라 손실은 미미하다 (확정, 한계로 서술).
-**[2026-09-08 정정]** Phase A~B-2와 186 머신 실험까지의 코드는 wakeup 훅이 store→load forwarding
-wake도 LPR 후보로 넣어, 그 2.3%에서는 store PC로 전파하고 있었다(문서와 불일치). 지금은 RSE LPR mux처럼
-**register source만** LPR이 되고, "사실은 store가 마지막"인 경우는 `CRITPATH_LPR_MEM_DEP` 통계로만 남긴다
-(그때의 LPR은 register 중 차순위). 이후 실험(`260908_critpath_comparison`~)은 이 규칙으로 측정.
+**[2026-09-08 확인]** 실제 코드는 wakeup 훅이 store→load forwarding wake도 LPR 후보로 넣으므로, 그 2.3%에서는
+store PC로 전파한다(Phase A부터 지금까지 동일, 모든 실험에 포함). 하드웨어로는 RSE의 LPR 필드가 preg 대신
+"SQ entry"를 가리키고 commit 때 store PC를 SQ/ROB에서 읽는 확장이 필요하다 — 이 상태를 유지하고 설계 반영 여부는 TODO D-11.
 
 ### 확정된 설계 결정
 
