@@ -79,6 +79,17 @@ store PC로 전파한다(Phase A부터 지금까지 동일, 모든 실험에 포
 
 ---
 
+### 아키텍처 그림 (논문용)
+
+`figures/draw_arch.py`가 생성 (`python3 figures/draw_arch.py`; svg·pdf·png). 그림 2·3(LPR, 멤버십 전파)은 사용자 원본 그림.
+
+| 로직 | 파일 | 내용 |
+|---|---|---|
+| 1. H2P 판별 | `figures/fig1_h2p_hbt.*` | HBT 갱신(resolve)·조회(fetch)·decay·commit 때 chain root 삽입 |
+| 4. Target Load + 주소 예측 | `figures/fig4_target_load_pt.*` | commit: 멤버십 → PT 할당·stride 학습; rename: 예측 주소 생성 |
+| 5. priority scheduling | `figures/fig5_priority_iq.*` | 분할 RS(priority/normal free list), non-stall fallback, select 우선권 |
+| 6. RF prefetch | `figures/fig6_rfp.*` | rename 직후 launch, store scan(forwarding), spare-port L1 probe, AGU 검증 |
+
 ## B. 코드 ↔ 아키텍처 매핑
 
 | 아키텍처 요소 | 상태 | 코드 |
