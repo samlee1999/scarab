@@ -307,6 +307,7 @@ struct Op_struct {
   Addr rfp_pred_va;                /* address the prefetch was launched with */
   Counter rfp_probe_cycle;         /* cycle the prefetch accessed the L1 */
   Counter rfp_data_ready_cycle;    /* MAX_CTR until the prefetch holds data */
+  Flag rfp_forwarded;              /* prefetch is fed by the forwarding store, not the L1 */
 
   /* Critical-path (Last Producer Register) observation.  The wakeup logic
      already computes rdy_cycle as a max over the source wake cycles; these
@@ -318,7 +319,12 @@ struct Op_struct {
   Counter critpath_second_cycle; /* 2nd max of source wake cycles (t_second) */
   uns8 critpath_last_src;        /* argmax source index = LPR             */
   uns8 critpath_last_dep_type;   /* dep type of that source (REG vs MEM)  */
-  uns8 critpath_wake_events;     /* sources that produced a wake event    */
+  uns8 critpath_wake_events;     /* REGISTER sources that produced a wake event */
+  /* Store->load forwarding wakes are kept apart: the RSE's LPR field can only
+     name a physical register, so they never become the LPR.  They are recorded
+     only to count how often the true last arrival was a store. */
+  Counter critpath_mem_last_cycle;
+  uns8 critpath_mem_wake_events;
   /* PC of the producer on the LPR edge.  Captured while that producer is still
      live, because retire is in order: by the time this op commits its producer
      has already committed and its pool entry may have been recycled.  Hardware

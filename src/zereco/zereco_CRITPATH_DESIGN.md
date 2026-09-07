@@ -60,6 +60,10 @@ dynamic producer), ② decode-time → **commit-time** 학습 (on-path만, wrong
 
 **store→load memory dependence는 추적 불가.** PRF 기반이라 register edge만 따라간다. 실측
 critical edge의 **2.3%**만 store→load라 손실은 미미하다 (확정, 한계로 서술).
+**[2026-09-08 정정]** Phase A~B-2와 186 머신 실험까지의 코드는 wakeup 훅이 store→load forwarding
+wake도 LPR 후보로 넣어, 그 2.3%에서는 store PC로 전파하고 있었다(문서와 불일치). 지금은 RSE LPR mux처럼
+**register source만** LPR이 되고, "사실은 store가 마지막"인 경우는 `CRITPATH_LPR_MEM_DEP` 통계로만 남긴다
+(그때의 LPR은 register 중 차순위). 이후 실험(`260908_critpath_comparison`~)은 이 규칙으로 측정.
 
 ### 확정된 설계 결정
 
@@ -85,7 +89,7 @@ critical edge의 **2.3%**만 store→load라 손실은 미미하다 (확정, 한
 | **A3** brslice_tab | **구현** (관찰 테이블 형태) | `zereco/critpath.c` — 4096 sets × 8-way LRU, `{in_slice, depth, owner_pc, confirm}`; commit 훅에서 seed·전파·decay |
 | **A4** Target Load → PT | 구현 | `critpath_note_retire()` → `rfp_note_target_load()`; walk 경로는 `!RFP_TARGET_CRITPATH`로 차단 |
 | **A5** P-IQ | 재사용, 입력만 교체 | `decoupled_frontend.cc`가 PC 조회로 priority bit 부착 → `node_issue_queue.cc`/`exec_ports.c` |
-| **A6** RFP | 재사용 | `zereco/rfp.c` |
+| **A6** RFP | 재사용 + store forwarding | `zereco/rfp.c`. `rfp_store_forward`: 0 = forwarding store가 있는 load는 prefetch 포기(옛 보수 모델), **1 = 논문 §3.2.1처럼 store 완료 시 store data를 RF로 forwarding**(시뮬레이터의 정확한 store→load 의존을 씀 = 완벽한 memory disambiguation; queue·L1 port 사용 없음, validation의 older-store/stale 검사 생략), 2 = launch 시 이미 실행된 store만. 비교 실험은 1 |
 | H2P resolution profiler | 재사용 | `zereco/h2p_mispred_latency.c` |
 | **full-slice 비교 모드** (PUBS식) | 구현 (2026-09-08) | `zereco_critpath_full_slice`: 전파만 다름 — 모든 register source의 producer로 전파, frontier 종료 없음. producer PC는 rename map(`Map_Entry.pc`, PUBS의 def_tab)에서 source별로 op에 복사(`critpath_src_producer_pc[]`) — producer가 먼저 commit해도 PC는 남는다. seed·table·decay·소비자는 공통 |
 | 옛 identification (Fill Buffer + batch walk + Block Cache) | **비활성** | `LEGACY_WALK_NEEDED()` 가 false면 fill·trigger·엔진 모두 skip |

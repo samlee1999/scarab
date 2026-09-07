@@ -437,3 +437,14 @@ DEF_STAT(CRITPATH_TARGET_LOAD_NONCRITICAL, COUNT, NO_RATIO)
 /* Issued with no ready-to-issue wait: priority bought nothing for these */
 DEF_STAT(ZERECO_IQ_PRIORITY_ISSUED_ZERO_WAIT, COUNT, NO_RATIO)
 DEF_STAT(ZERECO_IQ_NORMAL_ISSUED_ZERO_WAIT, COUNT, NO_RATIO)
+
+/* ---- RFP store->load forwarding (rfp_store_forward, 2026-09-08) ---------- */
+DEF_STAT(RFP_FORWARDED, COUNT, NO_RATIO)                 /* launched as a forwarding packet (subset of RFP_INJECTED) */
+DEF_STAT(RFP_FORWARDED_STORE_DONE, COUNT, NO_RATIO)      /* store had completed at launch */
+DEF_STAT(RFP_FORWARDED_STORE_PENDING, COUNT, NO_RATIO)   /* store still executing at launch */
+DEF_STAT(RFP_FORWARDED_VALIDATED, COUNT, NO_RATIO)       /* reached validation with the right address */
+DEF_STAT(RFP_FORWARDED_USEFUL, COUNT, NO_RATIO)          /* subset of RFP_USEFUL */
+DEF_STAT(RFP_FWD_ABSTAIN_MULTI_STORE, COUNT, NO_RATIO)   /* more than one forwarding store: not modelled */
+DEF_STAT(RFP_FWD_ABSTAIN_ADDR_MISMATCH, COUNT, NO_RATIO) /* predicted address != store address */
+DEF_STAT(RFP_FWD_ABSTAIN_STORE_NOT_DONE, COUNT, NO_RATIO)/* mode 2 only */
+

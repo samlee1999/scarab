@@ -150,6 +150,8 @@ void rfp_init(uns proc_id) {
           "rfp_covered_min_saved_cycles must be between 1 and dcache_cycles\n");
   ASSERTM(proc_id, RFP_PORT_FAIL_POLICY <= 2,
           "rfp_port_fail_policy must be 0 (wait), 1 (drop), or 2 (skip)\n");
+  ASSERTM(proc_id, RFP_STORE_FORWARD <= 2,
+          "rfp_store_forward must be 0 (abstain), 1 (oracle forward), or 2 (executed stores only)\n");
   ASSERTM(proc_id, RFP_PORT_PRIORITY <= 2,
           "rfp_port_priority must be 0 (spare), 1 (dedicated), or 2 (prefetch first)\n");
   ASSERTM(proc_id, RFP_PORT_PRIORITY != 1 || RFP_DEDICATED_READ_PORTS > 0,
@@ -252,15 +254,23 @@ static inline Flag rfp_entry_eligible(RFP_PT_Entry* entry) {
    this population is what the conservative model gives up -- report it rather
    than hide it.  `all_data_ready` separates the store whose data is already
    available (case a, forwarding possible now) from one still executing. */
-static Flag rfp_has_store_dependence(Op* op, Flag* all_data_ready) {
+static Flag rfp_has_store_dependence(Op* op, Flag* all_data_ready,
+                                     Op** single_store) {
   Flag found = FALSE;
   Flag ready = TRUE;
+  uns count = 0;
+  if (single_store)
+    *single_store = NULL;
 
   for (uns ii = 0; ii < op->oracle_info.num_srcs; ++ii) {
     Src_Info* src = &op->oracle_info.src_info[ii];
     if (src->type != MEM_DATA_DEP)
       continue;
     found = TRUE;
+    count++;
+    if (single_store && count == 1 && src->op && src->op->op_pool_valid &&
+        src->op->unique_num == src->unique_num)
+      *single_store = src->op;
 
     /* The op pool recycles entries, so the producer pointer is only meaningful
        when its identity still matches -- the same guard wake_up_ops() uses. */
@@ -274,6 +284,8 @@ static Flag rfp_has_store_dependence(Op* op, Flag* all_data_ready) {
   }
 
   *all_data_ready = found && ready;
+  if (single_store && count != 1)
+    *single_store = NULL; /* several forwarding stores: not modelled */
   return found;
 }
 
@@ -406,7 +418,10 @@ void rfp_rename_launch(Op* op) {
   }
 
   Flag store_data_ready = FALSE;
-  if (rfp_has_store_dependence(op, &store_data_ready)) {
+  Op* fwd_store = NULL;
+  Flag store_dep = rfp_has_store_dependence(op, &store_data_ready, &fwd_store);
+  if (store_dep && RFP_STORE_FORWARD == 0) {
+    /* Conservative model: the load stays entirely on the demand path. */
     if (on_path) {
       STAT_EVENT(proc_id, RFP_ABSTAIN_STORE_DEP);
       STAT_EVENT(proc_id, RFP_ABSTAIN_STORE_DEP_PCT);
@@ -427,6 +442,48 @@ void rfp_rename_launch(Op* op) {
      compute -- if the stride held (paper §3.1). */
   Addr pred_va = (Addr)((int64)entry->base_va +
                         entry->stride * (int64)entry->inflight);
+
+  /* Paper §3.2.1: the prefetch scans the older stores with its predicted
+     address; on a match it waits for that store and takes its data instead of
+     touching the L1.  The simulator knows the exact forwarding store, so the
+     match is oracle-precise (mode 1 = perfect disambiguation).  Mode 2 only
+     forwards from a store that had already executed at launch. */
+  if (store_dep) {
+    Flag can_forward = fwd_store != NULL &&
+                       fwd_store->oracle_info.va == pred_va &&
+                       (RFP_STORE_FORWARD == 1 ||
+                        (RFP_STORE_FORWARD == 2 && store_data_ready));
+    if (!can_forward) {
+      if (on_path) {
+        STAT_EVENT(proc_id, RFP_ABSTAIN_STORE_DEP);
+        STAT_EVENT(proc_id, RFP_ABSTAIN_STORE_DEP_PCT);
+        STAT_EVENT(proc_id, !fwd_store ? RFP_FWD_ABSTAIN_MULTI_STORE
+                            : fwd_store->oracle_info.va != pred_va
+                                ? RFP_FWD_ABSTAIN_ADDR_MISMATCH
+                                : RFP_FWD_ABSTAIN_STORE_NOT_DONE);
+      }
+      return;
+    }
+    if (!on_path && !RFP_LAUNCH_OFFPATH) {
+      STAT_EVENT(proc_id, RFP_OFFPATH_LAUNCH_SUPPRESSED);
+      return;
+    }
+    /* No queue slot, no L1 port: the data arrives from the store queue the
+       moment the store completes (one cycle to land in the register file). */
+    op->rfp_pred_va = pred_va;
+    op->rfp_launched = TRUE;
+    op->rfp_forwarded = TRUE;
+    if (store_data_ready)
+      op->rfp_data_ready_cycle = cycle_count + RFP_HIT_LATENCY;
+    if (on_path) {
+      STAT_EVENT(proc_id, RFP_INJECTED);
+      STAT_EVENT(proc_id, RFP_INJECTED_PCT);
+      STAT_EVENT(proc_id, RFP_FORWARDED);
+      STAT_EVENT(proc_id, store_data_ready ? RFP_FORWARDED_STORE_DONE
+                                           : RFP_FORWARDED_STORE_PENDING);
+    }
+    return;
+  }
 
   /* Oracle that bounds what a confidence-based launch gate could recover.  It
      suppresses only the request, never the in-flight bookkeeping above: real
@@ -827,9 +884,26 @@ Flag rfp_try_validate(Op* op) {
     return FALSE;
   }
 
-  /* An older store still draining to memory can hold data this address needs,
-     and the prefetch read the cache instead.  Same rule the oracle path uses. */
-  if (scan_stores(op->oracle_info.va, op->oracle_info.mem_size)) {
+  if (op->rfp_forwarded) {
+    /* The data came from the forwarding store itself, so the older-store
+       conflict and stale-line checks do not apply.  The load reached this
+       stage only after that store's wakeup, so the value is already in the
+       register file: it landed one cycle after the store completed. */
+    if (op->rfp_data_ready_cycle == MAX_CTR) {
+      Counter store_done = cycle_count;
+      Flag dummy;
+      Op* store = NULL;
+      rfp_has_store_dependence(op, &dummy, &store);
+      if (store && store->done_cycle != MAX_CTR &&
+          store->done_cycle < cycle_count)
+        store_done = store->done_cycle;
+      op->rfp_data_ready_cycle = store_done + RFP_HIT_LATENCY;
+    }
+    STAT_EVENT(proc_id, RFP_FORWARDED_VALIDATED);
+  } else if (scan_stores(op->oracle_info.va, op->oracle_info.mem_size)) {
+    /* An older store still draining to memory can hold data this address
+       needs, and the prefetch read the cache instead.  Same rule the oracle
+       path uses. */
     STAT_EVENT(proc_id, RFP_VAL_STORE_CONFLICT);
     return FALSE;
   }
@@ -874,7 +948,9 @@ Flag rfp_try_validate(Op* op) {
      this line after the probe read it, real hardware would have been using
      stale data here -- count it, and separately count the case that matters to
      us, where the load feeds an H2P branch's dependence chain. */
-  if (rfp_prefetch_went_stale(proc_id, op)) {
+  if (op->rfp_forwarded)
+    STAT_EVENT(proc_id, RFP_FORWARDED_USEFUL);
+  if (!op->rfp_forwarded && rfp_prefetch_went_stale(proc_id, op)) {
     STAT_EVENT(proc_id, RFP_STALE_VALUE_WINDOW);
     STAT_EVENT(proc_id, RFP_STALE_VALUE_WINDOW_PCT);
     if (op->chain_bit)
