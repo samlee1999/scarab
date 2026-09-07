@@ -472,6 +472,12 @@ DEF_PARAM(zereco_critpath_decay_interval, ZERECO_CRITPATH_DECAY_INTERVAL, uns, u
 /* Which branches may seed a chain: 0 = every branch, 1 = mispredicted at least
    once, 2 = H2P.  Phase A used 2, the strictest. */
 DEF_PARAM(zereco_critpath_insert_gate, ZERECO_CRITPATH_INSERT_GATE, uns, uns, 2, )
+/* [COMPARISON] PUBS-style full backward slice instead of the critical path.
+   Same commit-time, one-level-per-instance propagation and the same seed gate,
+   table, decay and consumers -- but a member propagates to the producer of
+   EVERY register source (not only the last-arriving one) and never stops at
+   an op with no upstream delay.  Isolates "critical only" as the single axis. */
+DEF_PARAM(zereco_critpath_full_slice, ZERECO_CRITPATH_FULL_SLICE, Flag, Flag, FALSE, )
 /* [PHASE B] Consume the critical-path chain instead of only observing it.
    ZERECO_CRITPATH_PRIORITY makes chain membership the source of the IQ priority
    bit, replacing the Block Cache mask; RFP_TARGET_CRITPATH makes a member load

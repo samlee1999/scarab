@@ -325,6 +325,10 @@ struct Op_struct {
      recovers the same PC by reading a scoreboard indexed by the source physical
      register; the two are equivalent, and the scoreboard is built in Phase B. */
   Addr critpath_last_producer_pc;
+  /* Producer PC of every source, filled at rename from the register map
+     (register deps only; 0 otherwise).  Valid for indices < num_srcs of the
+     current instance, so it needs no reset.  Read by the full-slice mode. */
+  Addr critpath_src_producer_pc[MAX_DEPS];
 };
 
 /**************************************************************************************/

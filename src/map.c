@@ -149,6 +149,7 @@ void init_map(uns8 proc_id) {
   for (ii = 0; ii < NUM_REG_IDS * 2; ii++) {
     map_data->reg_map[ii].op = &invalid_op;
     map_data->reg_map[ii].op_num = 0;
+    map_data->reg_map[ii].pc = 0;
   }
   for (ii = 0; ii < NUM_REG_IDS; ii++)
     map_data->map_flags[ii] = FALSE;
@@ -316,6 +317,7 @@ static inline void update_map(Op* op) {
     map_entry->op = op;
     map_entry->op_num = op->op_num;
     map_entry->unique_num = op->unique_num;
+    map_entry->pc = op->inst_info ? op->inst_info->addr : 0;
     map_data->map_flags[id] = op->off_path;
   }
 
@@ -343,6 +345,7 @@ inline void update_map_entry(Op* op, Map_Entry* map_entry) {
   map_entry->op = op;
   map_entry->op_num = op->op_num;
   map_entry->unique_num = op->unique_num;
+  map_entry->pc = op->inst_info ? op->inst_info->addr : 0;
 }
 
 /**************************************************************************************/
@@ -694,6 +697,8 @@ void add_src_from_op(Op* op, Op* src_op, Dep_Type type) {
   info->op = src_op;
   info->op_num = src_op->op_num;
   info->unique_num = src_op->unique_num;
+  op->critpath_src_producer_pc[src_num] =
+    (type == REG_DATA_DEP && src_op->inst_info) ? src_op->inst_info->addr : 0;
 
   /* for memory dependencies, derived_from_prog_input incremented in track_addr */
   set_not_rdy_bit(op, src_num);
@@ -726,6 +731,9 @@ void add_src_from_map_entry(Op* op, Map_Entry* map_entry, Dep_Type type) {
   info->op = map_entry->op;
   info->op_num = map_entry->op_num;
   info->unique_num = map_entry->unique_num;
+  /* Producer PC survives the producer's commit, unlike `op` above. */
+  op->critpath_src_producer_pc[src_num] =
+    (type == REG_DATA_DEP) ? map_entry->pc : 0;
 
   /* always start with the not ready bit set */
   set_not_rdy_bit(op, src_num);
@@ -789,6 +797,7 @@ void reset_map() {
   for (ii = 0; ii < NUM_REG_IDS * 2; ii++) {
     map_data->reg_map[ii].op = &invalid_op;
     map_data->reg_map[ii].op_num = 0;
+    map_data->reg_map[ii].pc = 0;
   }
   for (ii = 0; ii < NUM_REG_IDS; ii++)
     map_data->map_flags[ii] = FALSE;

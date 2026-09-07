@@ -87,6 +87,7 @@ critical edge의 **2.3%**만 store→load라 손실은 미미하다 (확정, 한
 | **A5** P-IQ | 재사용, 입력만 교체 | `decoupled_frontend.cc`가 PC 조회로 priority bit 부착 → `node_issue_queue.cc`/`exec_ports.c` |
 | **A6** RFP | 재사용 | `zereco/rfp.c` |
 | H2P resolution profiler | 재사용 | `zereco/h2p_mispred_latency.c` |
+| **full-slice 비교 모드** (PUBS식) | 구현 (2026-09-08) | `zereco_critpath_full_slice`: 전파만 다름 — 모든 register source의 producer로 전파, frontier 종료 없음. producer PC는 rename map(`Map_Entry.pc`, PUBS의 def_tab)에서 source별로 op에 복사(`critpath_src_producer_pc[]`) — producer가 먼저 commit해도 PC는 남는다. seed·table·decay·소비자는 공통 |
 | 옛 identification (Fill Buffer + batch walk + Block Cache) | **비활성** | `LEGACY_WALK_NEEDED()` 가 false면 fill·trigger·엔진 모두 skip |
 
 파라미터: `zereco_critpath_profile`(관측), `_priority`(A5 입력), `rfp_target_critpath`(A4 입력),

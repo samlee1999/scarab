@@ -58,7 +58,8 @@
 | **B-5** | D-1 수정 후 재측정 (wrong-path priority) | 대기 — 낙관 폭 보고용 |
 | **GC-1** | Golden Cove(RS 186) 머신에서 Phase B 사다리 재측정 (`260907_critpath_gc_phaseB`) | **완료** → 결과는 DESIGN.md C7. 비교 스크립트 `analysis/compare_old.py` |
 | **GC-2** | Golden Cove sweep: PT 256/512/4K/∞ + partition 10/15/30/40% | **보류(2026-09-08 방향 전환).** 디스크립터는 `json/zereco_dbg_gc186_sweep.json`(105 simpoint)에 보관 |
-| **RS352 재개** | 352 머신으로 복귀: `zereco_dbg.json` = `260905_critpath_phaseB`와 동일한 9 config × 108 (architecture `golden_cove_rs352`) | 세팅 완료, **실행 대기(사용자)**. 코드는 phaseB 시점 대비 stat 게이트 1건(ready→issue 집계)만 추가라 되돌릴 것 없음 |
+| **CMP** | **성능 비교** (`260908_critpath_comparison`, 352 머신, random queue, 108 simpoint): {P-IQ only, RFP only, P-IQ+RFP} × {critical slice, **full slice**}. P-IQ = PUBS식 20% 예약(70 entry) non-stall | 코드(`zereco_critpath_full_slice`)·빌드·디스크립터 완료, **실행 대기(사용자)**. 재사용: baseline = `260905_critpath_phaseB/baseline_randq`(108), TEA = `260827_tea_baseline/tea_random_queue`(**67 simpoint만**, gitrev e058150 — 108 weight 집계에 넣으려면 41개 추가 실행 필요, 아니면 TEA 비교는 67개로 한정) |
+| — | full slice 모드는 멤버 load 전부가 PT를 지명하므로 PT 1K가 thrash할 수 있음. 결과에서 `RFP_PT_EVICTIONS`/PT hit를 critical 대비 확인 | CMP 분석 시 |
 | — | 축 간 상호작용 의심 지점만 2차원 확인 | 필요시 |
 | — | `LEGACY_WALK_NEEDED()`가 false일 때 Fill Buffer/walk 메모리 할당 자체도 생략 (host 메모리) | 선택 |
 

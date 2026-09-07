@@ -338,6 +338,45 @@ static void critpath_record_depth(uns proc_id, uns8 depth) {
     STAT_EVENT(proc_id, CRITPATH_DEPTH_17_PLUS);
 }
 
+/* Make `producer_pc` a member one level below (`my_depth`, `my_owner`).  The
+   lookup may evict any entry that shares its set, so callers must have copied
+   whatever they still need out of their own entry before calling this. */
+static void critpath_propagate_to(uns proc_id, Critpath_Core_State* state,
+                                  Addr producer_pc, uns8 my_depth,
+                                  Addr my_owner) {
+  Critpath_PC_Entry* producer =
+    critpath_pc_lookup(proc_id, producer_pc, TRUE);
+  if (!producer)
+    return;
+  if (!producer->in_slice) {
+    producer->in_slice = TRUE;
+    producer->depth = my_depth + 1;
+    producer->owner_pc = my_owner;
+    producer->confirm = 1;
+    STAT_EVENT(proc_id, CRITPATH_PROPAGATIONS);
+    return;
+  }
+  /* Already a member.  Keep the shortest distance seen -- this also absorbs a
+     self-dependence, where an induction variable is its own last producer and
+     would otherwise deepen by one every iteration. */
+  if (producer->depth > my_depth + 1)
+    producer->depth = my_depth + 1;
+  /* Count how often two H2P branches claim the same instruction: with one owner
+     field per entry they overwrite each other, and a stale owner can cost the
+     other branch a member of its chain. */
+  if (producer->confirm < state->confirm_max)
+    producer->confirm++;
+  if (producer->owner_pc != my_owner) {
+    STAT_EVENT(proc_id, CRITPATH_OWNER_OVERWRITE);
+    if (producer->owner_pc && hbt_is_hard_branch(producer->owner_pc) &&
+        !(my_owner && hbt_is_hard_branch(my_owner)))
+      STAT_EVENT(proc_id, CRITPATH_OWNER_OVERWRITE_H2P_LOST);
+    producer->owner_pc = my_owner;
+  } else {
+    STAT_EVENT(proc_id, CRITPATH_PROPAGATION_REFRESHED);
+  }
+}
+
 void critpath_note_retire(Op* op) {
   if (!ZERECO_CRITPATH_PROFILE)
     return;
@@ -480,11 +519,35 @@ void critpath_note_retire(Op* op) {
   }
 
   /* ---- 5. propagate one level, as the real mechanism would -------------- */
-  if (!in_slice || !has_lpr)
+  if (!in_slice)
+    return;
+
+  if (ZERECO_CRITPATH_FULL_SLICE) {
+    /* PUBS-style: every register producer joins, no frontier stop, no LPR
+       needed.  Depth is still bounded and still the shortest distance seen. */
+    critpath_record_depth(proc_id, entry->depth);
+    if (entry->depth >= CRITPATH_MAX_DEPTH) {
+      STAT_EVENT(proc_id, CRITPATH_PROPAGATION_STOPPED_DEPTH);
+      return;
+    }
+    uns8 my_depth = entry->depth;
+    Addr my_owner = entry->owner_pc;
+    uns num_srcs = op->oracle_info.num_srcs;
+    for (uns ii = 0; ii < num_srcs; ++ii) {
+      if (op->oracle_info.src_info[ii].type != REG_DATA_DEP)
+        continue;
+      Addr producer_pc = op->critpath_src_producer_pc[ii];
+      if (producer_pc == 0)
+        continue;
+      critpath_propagate_to(proc_id, state, producer_pc, my_depth, my_owner);
+    }
+    return;
+  }
+
+  if (!has_lpr)
     return;
   STAT_EVENT(proc_id, CRITPATH_SLICE_OPS_WITH_LPR);
   critpath_record_depth(proc_id, entry->depth);
-
   if (frontier) {
     /* Nothing upstream of this op is delaying it, so a backward walk has
        nothing left to gain here.  This is where propagation should stop. */
@@ -497,46 +560,9 @@ void critpath_note_retire(Op* op) {
   }
   if (op->critpath_last_producer_pc == 0)
     return;
-
   /* Read what this op contributes before touching the table again.  The lookup
-     below can evict whichever entry shares its index -- including this one --
-     so `entry` must not be dereferenced afterwards. */
-  uns8 my_depth = entry->depth;
-  Addr my_owner = entry->owner_pc;
-
-  Critpath_PC_Entry* producer =
-    critpath_pc_lookup(proc_id, op->critpath_last_producer_pc, TRUE);
-  if (!producer)
-    return;
-
-  if (!producer->in_slice) {
-    producer->in_slice = TRUE;
-    producer->depth = my_depth + 1;
-    producer->owner_pc = my_owner;
-    producer->confirm = 1;
-    STAT_EVENT(proc_id, CRITPATH_PROPAGATIONS);
-    return;
-  }
-
-  /* Already a member.  Keep the shortest distance seen -- this also absorbs a
-     self-dependence, where an induction variable is its own last producer and
-     would otherwise deepen by one every iteration. */
-  if (producer->depth > my_depth + 1)
-    producer->depth = my_depth + 1;
-
-  /* Count how often two H2P branches claim the same instruction: with one owner
-     field per entry they overwrite each other, and a stale owner can cost the
-     other branch a member of its chain. */
-  if (producer->confirm < state->confirm_max)
-    producer->confirm++;
-
-  if (producer->owner_pc != my_owner) {
-    STAT_EVENT(proc_id, CRITPATH_OWNER_OVERWRITE);
-    if (producer->owner_pc && hbt_is_hard_branch(producer->owner_pc) &&
-        !(my_owner && hbt_is_hard_branch(my_owner)))
-      STAT_EVENT(proc_id, CRITPATH_OWNER_OVERWRITE_H2P_LOST);
-    producer->owner_pc = my_owner;
-  } else {
-    STAT_EVENT(proc_id, CRITPATH_PROPAGATION_REFRESHED);
-  }
+     inside the helper can evict whichever entry shares its index -- including
+     this one -- so `entry` must not be dereferenced afterwards. */
+  critpath_propagate_to(proc_id, state, op->critpath_last_producer_pc,
+                        entry->depth, entry->owner_pc);
 }

@@ -42,6 +42,10 @@ typedef struct Map_Entry_struct {
   Op* op;             /* last op to write (invalid when committed) */
   Counter op_num;     /* op number of the last op to write (not cleared, only overwritten) */
   Counter unique_num; /* unique number of the last op to write (not cleared, only overwritten) */
+  Addr pc;            /* PC of the last op to write (not cleared, only overwritten).
+                         This is PUBS's def_tab: a consumer can name every
+                         producer at rename even after the producer has left
+                         the machine.  Read only by the ZERECO full-slice mode. */
 } Map_Entry;
 
 typedef struct Map_Data_struct {
