@@ -1,6 +1,6 @@
 # TODO — 할 일
 
-> Last updated: 2026-09-07 · branch `test`
+> Last updated: 2026-09-08 · branch `test`
 > **이 문서 = 할 일만.** 설계와 확정된 결과는 [zereco_CRITPATH_DESIGN.md](zereco_CRITPATH_DESIGN.md).
 
 ---
@@ -41,7 +41,10 @@
 
 ## 3. 워크로드 · 방법론
 
-- **clang 4개(1270/1305/2249/62), xgboost 1개(3311)**: `decoupled_frontend.cc:518` watchdog assert — 순정 Scarab에서도 실패, 우리 코드와 무관. 제외하고 top-8. clang은 원래 weight의 45%, **xgboost는 23%**(지배 phase 0.759 결손 → xgboost 결과는 "지배 phase 뺀 나머지", B-2에서 비단조 잡음)
+- **frontend forward-progress watchdog**(`decoupled_frontend.cc:525`, fetch 100K cycle 정지 → assert)으로 죽는 simpoint는 **제외하고 진행**(사용자 결정 2026-09-08, 원인 추적 안 함). baseline에서도 같은 op 번호에서 죽으므로 우리 로직과 무관
+  - 옛 352 머신에서 제외: clang 1270/1305/2249/62, xgboost 3311 → clang은 원래 weight의 45%, **xgboost는 23%**(지배 phase 0.759 결손 → xgboost 결과는 "지배 phase 뺀 나머지", B-2에서 비단조 잡음)
+  - Golden Cove 머신에서 추가 제외: **clang 1358, gcc 414, gcc 939** (옛 머신에서는 완주했음). 남은 것: clang 7개(41%), **gcc 2개(원래 weight의 15%)** — gcc 결과는 표본이 매우 얇다
+  - 현재 실험 목록 = **105 simpoint**. 1단계(`260907_critpath_gc_phaseB`) 결과도 이 105개로 집계
 - **tc**: 255개 중 8개(weight 7%). 균등 분포라 표본으로 타당하나 수가 적음. 최종 논문 전 전체와 대조
 - **gcc**: 4개 유지 (느린 simpoint)
 - Simpoint 확대 시 weight 가중 집계 유지. 효과 기준 선별 금지
@@ -50,10 +53,12 @@
 
 | # | 내용 | 상태 |
 |---|---|---|
-| **B-3** | depth 제한 sweep (∞/8/4/2/1), PT ∞·partition ∞ | 대기 — D-4 |
-| **B-4** | PT 축소 (128/256) | 대기. 512는 −0.07%p 확인 |
+| **B-3** | depth 제한 sweep (∞/8/4/2/1), PT ∞·partition ∞ | 대기 — D-4. GC-2 후 |
+| **B-4** | PT 축소 (128/256) | GC-2의 PT sweep에 256 포함 → 흡수 |
 | **B-5** | D-1 수정 후 재측정 (wrong-path priority) | 대기 — 낙관 폭 보고용 |
-| **GC** | Golden Cove 머신에서 Phase B 사다리 재측정 (`260907_critpath_gc186`, 5 config × 108) — baseline_randq / cp_rfp / cp_piq_unbdd / cp_rfp_piq_unbdd / cp_rfp_piq_part20 | 빌드 완료, **실행 대기(사용자)**. 끝나면 weight 가중 집계 + 그림을 `analysis/`에, C3·C5 수치 교체. 20%가 RS 186에서도 적정한지(D-10) 재판단 |
+| **GC-1** | Golden Cove 머신에서 Phase B 사다리 재측정 (`260907_critpath_gc_phaseB`, 5 config) | **완료.** 동향 재현(rfp +4.5, piq +2.8, 둘 +6.9, part20 +6.1%; 옛 머신 5.2/4.9/9.1/8.3). P-IQ 이득 반감(PRF 280이 창을 먼저 묶음), part20 fallback 15→24%. 비교 스크립트 `analysis/compare_old.py`. 그림·문서 반영은 GC-2 후 |
+| **GC-2** | sweep: PT 256/512/4K/∞ (rfp+piq unbounded 위) + partition 10/15/30/40% (RS3 기준 2/3/6/8 entry) | 디스크립터 세팅 완료(`zereco_dbg.json`, 9 config × 105), **실행 대기(사용자)**. PT 1K·20%·사다리 점은 GC-1 재사용(같은 바이너리 81e28f8) |
+| **GC-3** | GC-1 + GC-2로 DESIGN.md C3·C5 교체, D-10(예약률) 확정, 그림 재생성 | GC-2 후 |
 | — | 축 간 상호작용 의심 지점만 2차원 확인 | 필요시 |
 | — | `LEGACY_WALK_NEEDED()`가 false일 때 Fill Buffer/walk 메모리 할당 자체도 생략 (host 메모리) | 선택 |
 
