@@ -63,7 +63,7 @@
 # roughly 2x8192 for now
 # BTB model to use.
 --btb_mech                      generic
---btb_entries                   8192
+--btb_entries                     12288   # Golden Cove 12K BTB (single-level here)
 --btb_assoc                     4
 
 # Allow the BTB to be updated by off path ops.
@@ -107,14 +107,13 @@
 ### TEA Thread
 ### Runtime active chain count. C arrays are compiled with a higher fixed capacity.
 ### tea_preg_reservation is split evenly across active chains in the current per-chain pool design.
---tea_max_chains                4
---tea_preg_reservation          192
 
 ### Issue Stage
 
 # Max number of instructions to be renamed, and issued per cycle.
 --issue_width                   6
 
+--tea_rs_reservation            0   # no TEA carve-out: main thread owns the whole 186-entry scheduler
 --rs_fill_width                 0
 # rs_sizes ~205 in total, and they are split into three different reservation stations (RS1, RS2, RS3) where each has 97, 70, 38 entries respectively
 # original architecture
@@ -130,7 +129,7 @@
 # --rs_sizes                      184 132 36    # for TEA_Off (342 total)
 ### RS total 544: original golden cove RS (352) + TEA reservation (192) added on top
 ### proportional from original 97:70:19 → 285:204:55, main thread retains full 352 slots
---rs_sizes                      285 204 55
+--rs_sizes                        97 70 19   # Golden Cove 97/70/38, ST-AGU ports 4,9 merged by Scarab -> RS3 19 (186 total)
 --rs_connections                b0100110011 b1000001100 b0011000000
 --fu_types                      b00100100111111100111001001111110010010011111110011100100111111 b10010000110111100011111001110111001000011011110001111100111011 b00000001000000001000000010000010000000100000000100000001000001 b00000001000000001000000010000010000000100000000100000001000001 b00000000110111100011011001110110000000011011110001101100111011 b01001000000000000111001001111110100100000000000011100100111111 b00000010000000010000000100000010000001000000001000000010000001 b00000010000000010000000100000010000001000000001000000010000001 b00000000000000000011001001110110000000000000000001100100111011 b00000001000000001000000010000010000000100000000100000001000001
 
@@ -138,9 +137,9 @@
 
 ### DCache
 --dcache_size 	 	        49152
---dcache_read_ports             2
+--dcache_read_ports               1   # per bank
 --dcache_write_ports            1
---dcache_banks                  1
+--dcache_banks                    8
 --dcache_assoc		            12
 --dcache_line_size              64
 --dcache_cycles                 5
@@ -149,6 +148,8 @@
 
 # Max number of instructions to be retired per cycle.
 --node_ret_width                8
+--load_queue_entry_num          192   # Golden Cove load buffer (wikichips); added, was Scarab default 128
+--store_queue_entry_num         114   # Golden Cove store buffer (wikichips); added, was Scarab default 72
 --node_table_size               512
 
 # Do not keep stores in RSVs on cache misses; TODO: confirm what this knob does
@@ -174,7 +175,7 @@
 ### LLC
 # 3 MiB per core, 16-way
 --l1_size                       3145728
---l1_banks                      1           // not sure
+--l1_banks                        8
 --l1_cycles		                36          // just a guess
 --l1_assoc                      16
 --l1_line_size                  64
@@ -219,7 +220,7 @@
 --mem_priority_wb            5
 --mem_priority_wb_nodirty    5
 
---mem_req_buffer_entries        64
+--mem_req_buffer_entries          32
 --bus_width_in_bytes            8
 
 --ramulator_standard		DDR4
@@ -233,8 +234,8 @@
 --ramulator_rows		65536
 --ramulator_cols		1024
 --ramulator_scheduling_policy	FRFCFS_Cap
---ramulator_readq_entries	64
---ramulator_writeq_entries	64
+--ramulator_readq_entries         32
+--ramulator_writeq_entries        32
 --ramulator_record_cmd_trace	FALSE
 --ramulator_print_cmd_trace	FALSE
 --ramulator_tCK			833333

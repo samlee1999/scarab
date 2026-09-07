@@ -381,7 +381,10 @@ DEF_PARAM(fill_buffer_size, FILL_BUFFER_SIZE, uns, uns, 512, )
 // TEA Thread Parameters
 DEF_PARAM(tea_enable, TEA_ENABLE, Flag, Flag, FALSE, )
 DEF_PARAM(tea_fetch_width, TEA_FETCH_WIDTH, uns, uns, 2, )
-DEF_PARAM(tea_rs_reservation, TEA_RS_RESERVATION, uns, uns, 192, )
+/* RS entries carved out of the main thread for the TEA thread.  Default 0: the
+   carve-out is a TEA-evaluation setting, and a stale 192 on a realistically
+   sized 186-entry scheduler would leave the main thread almost nothing. */
+DEF_PARAM(tea_rs_reservation, TEA_RS_RESERVATION, uns, uns, 0, )
 DEF_PARAM(tea_preg_reservation, TEA_PREG_RESERVATION, uns, uns, 192, )
 DEF_PARAM(tea_store_buffer_size, TEA_STORE_BUFFER_SIZE, uns, uns, 64, )
 DEF_PARAM(tea_max_chains, TEA_MAX_CHAINS, uns, uns, 4, )

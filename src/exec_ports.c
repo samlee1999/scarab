@@ -252,8 +252,8 @@ void init_exec_ports_rs_list(uns proc_id, Reservation_Station* rs, Func_Unit* lo
     }
 
     /* TEA RS partitioning: allocate proportional to each RS's share of total.
-     * Main keeps the same partition limit even when TEA is disabled, so a
-     * TEA-off run does not get to use the enlarged TEA-reserved RS capacity. */
+     * The carve-out applies whether or not TEA runs, so it must be 0 (the
+     * default) unless TEA itself is being evaluated on an enlarged scheduler. */
     rs[i].main_op_count = 0;
     rs[i].tea_op_count = 0;
     tea_per_rs = 0;
