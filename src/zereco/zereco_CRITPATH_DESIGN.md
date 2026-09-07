@@ -72,7 +72,7 @@ critical edge의 **2.3%**만 store→load라 손실은 미미하다 (확정, 한
 | Prefetch Table | **1K entry** (512도 −0.07%p) | B-1: 크기 무관, 병목은 주소 예측 가능성 |
 | L1-miss 정책 | 하위 계층 fill 진행 | fill path가 RFP 이득의 지배 성분 |
 | 옛 Fill-Buffer walk | **완전 배제** (`LEGACY_WALK_NEEDED()`) | 걸려 있을 때 Target Load 지명의 42.9%를 오염시켰음 |
-| 백엔드 머신 | **Golden Cove 실측치** (`PARAMS.golden_cove`, 2026-09-07 개정) — RS 97/70/19 = **186** (wikichips 97/70/38; Scarab이 ST-AGU 포트 4·9를 하나로 합쳐 RS3는 19), dcache **1 read port × 8 bank**, PRF int 280 / vec 332, LLC 8 bank, `tea_rs_reservation 0`. **이전 실험과 동일하게 유지**(사용자 결정): issue 8 / retire 16, LQ 256 / SQ 192, BTB 8K, MSHR 64 | TEA 평가용 확대 머신(RS 544−192 = 352, 2 port × 1 bank, PRF 592, LLC 1 bank)은 현실성이 부족해 폐기 — 재현용으로 `PARAMS.golden_cove_rs352` + `scarab-infra/json/zereco_dbg_rs352.json`에 보존. 모든 config 공통. **논문 RS·partition % 분모 = 186** |
+| 백엔드 머신 | **352-entry 머신**(`PARAMS.golden_cove_rs352`): RS 285/204/55 = 544 − TEA 예약 192 → main 352, dcache 2 read port × 1 bank, PRF 592, issue 8 / retire 16, LQ 256 / SQ 192, BTB 8K, MSHR 64. 모든 config 공통, **논문 RS·partition % 분모 = 352** | Golden Cove 실측 머신(RS 97/70/19 = 186, 1 port × 8 bank, PRF 280/332; `PARAMS.golden_cove`)으로 2026-09-07 옮겨 사다리를 재측정(C7)했으나 2026-09-08 352 머신으로 복귀(사용자 결정). 186 sweep 계획은 TODO GC-2에 보류 |
 
 ---
 
@@ -96,9 +96,7 @@ critical edge의 **2.3%**만 store→load라 손실은 미미하다 (확정, 한
 
 ## C. 확정된 결과
 
-> **주의 — C1~C6은 전부 옛 확대 머신(RS 352, 2 port × 1 bank, PRF 592, LLC 1 bank)에서 측정한 값이다.**
-> 2026-09-07에 백엔드를 Golden Cove 실측치(RS 186, 1 port × 8 bank, PRF 280/332)로 바꿨고,
-> 같은 사다리를 `260907_critpath_gc186`에서 다시 돌린다. 아래 수치는 그 결과로 대체될 때까지 **정성적 결론**(어떤 축이 효과가 있고 없는가)으로만 쓴다.
+> C1~C6은 352-entry 머신(현재 머신) 측정값. C7만 Golden Cove 186 머신.
 
 108 simpoint(workload당 top-8 weight, gcc 4), random-queue IQ, weight 가중 → workload 간 geomean.
 분석 스크립트·그림은 각 실험 디렉터리의 `analysis/`.
@@ -155,10 +153,25 @@ RFP 상한(∞, priority 없음) +5.14%. **RFP를 묶는 것은 용량이 아니
 | branch select 대기 (cy) | 0.06 | 0.21 | 0.28 | 0.35 | 0.47 | 0.72 |
 
 손실은 완만하고 단조롭다 — 예약 5%p당 약 0.15~0.35%p. **무릎이 없다**: 예약을 줄이면 fallback이
-선형으로 늘고 그만큼 잃는다. 20%(= 옛 352의 70 entry)면 상한의 92%를 14% fallback으로 얻는다.
+선형으로 늘고 그만큼 잃는다. 20%(= 352의 70 entry)면 상한의 92%를 14% fallback으로 얻는다.
 priority op의 ready→issue는 어느 비율에서도 0.4~0.6 cy로 normal(2.2~2.8 cy)보다 훨씬 짧다 —
 partition이 우선권을 실제로 전달한다. pr은 전 구간 평탄(bandwidth-bound), xgboost는 비단조
 (지배 phase 결손 표본의 잡음).
+
+### C7. Golden Cove 실측 머신(RS 186)에서의 동향 확인 (`260907_critpath_gc_phaseB`, 105 simpoint, 양쪽 머신 같은 표본)
+
+| config | 352 머신 | 186 머신 |
+|---|---|---|
+| RFP | +5.16% | +4.53% |
+| P-IQ unbounded | +4.85% | +2.78% |
+| RFP + P-IQ unbounded | +9.05% | +6.89% |
+| RFP + P-IQ 20% partition | +8.34% | +6.13% |
+
+- 순서·상보성·워크로드 순위 모두 재현. RFP는 거의 유지(funnel 동일: PT hit 66%, injected 32%, useful 20→24%, 정확도 95%).
+- **P-IQ 이득은 반감.** RS가 186으로 줄어도 RS 점유율은 24→27%로 그대로 — PRF 280이 in-flight 창을 먼저 묶어 RS에 대기하는 명령어가 적고, priority로 앞당길 여지가 준다. H2P resolution latency 감소도 P-IQ 단독 −8.6→−4.6%.
+- part20(37 entry)의 fallback 15→24%. baseline IPC 자체는 geomean −5.0%(pr −21%, sssp −15%: memory-bound 워크로드가 PRF 축소에 민감).
+- chain 인구 60%, tie 7%, producer flip 22% — 352 머신과 1%p 이내로 같아 A/A2 결론은 머신 무관.
+- 186 머신에서는 clang 1358, gcc 414, gcc 939가 frontend watchdog으로 죽음(baseline 포함, 같은 op 번호). 352 머신에서는 완주.
 
 ### C6. 코드 감사 (2026-09-04)
 
