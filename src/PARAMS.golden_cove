@@ -63,7 +63,7 @@
 # roughly 2x8192 for now
 # BTB model to use.
 --btb_mech                      generic
---btb_entries                     12288   # Golden Cove 12K BTB (single-level here)
+--btb_entries                   8192    # kept from previous experiments (12288 is not a power of two: LOG2 truncates to 2048 sets x 4 = 8192 anyway)
 --btb_assoc                     4
 
 # Allow the BTB to be updated by off path ops.
@@ -111,7 +111,7 @@
 ### Issue Stage
 
 # Max number of instructions to be renamed, and issued per cycle.
---issue_width                   6
+--issue_width                   8   # kept from previous experiments (was a descriptor override)
 
 --tea_rs_reservation            0   # no TEA carve-out: main thread owns the whole 186-entry scheduler
 --rs_fill_width                 0
@@ -147,9 +147,9 @@
 ### Reorder/Retire Stage
 
 # Max number of instructions to be retired per cycle.
---node_ret_width                8
---load_queue_entry_num          192   # Golden Cove load buffer (wikichips); added, was Scarab default 128
---store_queue_entry_num         114   # Golden Cove store buffer (wikichips); added, was Scarab default 72
+--node_ret_width                16  # kept from previous experiments (was a descriptor override)
+--load_queue_entry_num          256   # kept from previous experiments (was a descriptor override)
+--store_queue_entry_num         192   # kept from previous experiments (was a descriptor override)
 --node_table_size               512
 
 # Do not keep stores in RSVs on cache misses; TODO: confirm what this knob does

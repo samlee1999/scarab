@@ -59,7 +59,7 @@
 
 ## 5. 논문 서술 시 유의
 
-- 백엔드는 Golden Cove 실측치(RS 186 = 97/70/19, 1 read port × 8 bank, PRF 280/332, 6-wide issue). partition %의 분모 **186**. 옛 352 머신 수치(C1~C6)는 논문에 쓰지 않는다
+- 백엔드는 Golden Cove 실측치(RS 186 = 97/70/19, 1 read port × 8 bank, PRF 280/332, LLC 8 bank, MSHR 32) + 이전과 동일한 issue 8 / retire 16 / LQ 256 / SQ 192 / BTB 8K. partition %의 분모 **186**. 옛 352 머신 수치(C1~C6)는 논문에 쓰지 않는다
 - Scarab이 ST-AGU 포트 두 개를 하나로 합치므로 RS3가 38이 아니라 19 — 구조 설명 시 "총 186"으로만 적고 포트 병합은 부록/주석
 - 1차 지표는 H2P resolution latency (IPC 실현률 낮음)
 - xgboost·tc 표본 성격은 methodology에 적지 않음(사용자 방침) — 결과 해석에서만 유의
