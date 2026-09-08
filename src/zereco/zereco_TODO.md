@@ -49,7 +49,8 @@
   - 186 머신 실험 목록 = 105 simpoint(`zereco_dbg_gc186_sweep.json`). **352 머신으로 복귀한 현재 `zereco_dbg.json`은 108 simpoint**(이 3개는 352 머신에서 완주)
 - **tc**: 255개 중 8개(weight 7%). 균등 분포라 표본으로 타당하나 수가 적음. 최종 논문 전 전체와 대조
 - **gcc**: 4개 유지 (느린 simpoint)
-- Simpoint 확대 시 weight 가중 집계 유지. 효과 기준 선별 금지
+- **2026-09-08 결정: 앞으로 67 simpoint로 통일**(벤치마크당 5, clang 4, gcc 3 — `260827_tea_baseline` 이후 모든 실험이 공유하는 원래 목록; `zereco_dbg.json` 갱신). 108 목록은 `zereco_dbg_rs352.json`에 보관. 논문 methodology에는 "TEA 비교와 동일 표본"으로 서술 — 67 표본의 geomean이 108보다 0.15%p 높지만 그것을 선택 이유로 적지 않는다
+- weight 가중 집계 유지. 효과 기준 선별 금지
 
 ## 4. 남은 실험
 
