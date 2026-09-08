@@ -19,6 +19,7 @@
 
 #include "zereco/critpath.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -76,7 +77,12 @@ typedef struct Critpath_Core_State_struct {
   uns sets;
   uns assoc;
   uns confirm_max;
-  Counter retires;      /* drives the decay interval */
+  Counter retires;      /* drives the decay interval; also the timeline x-axis */
+  /* Timeline dump (ZERECO_CRITPATH_TIMELINE_INTERVAL).  Own counters, so that
+     the warm-up stat reset does not zero them. */
+  FILE* timeline;
+  Counter tl_members;
+  Counter tl_roots;
 } Critpath_Core_State;
 
 static Critpath_Core_State critpath_state[MAX_NUM_PROCS];
@@ -170,6 +176,40 @@ static void critpath_decay_table(uns proc_id, Critpath_Core_State* state,
   INC_STAT_EVENT(proc_id, is_main ? CRITPATH_LIVE_MEMBERS_AT_SWEEP
                                   : CRITPATH_SHADOW_LIVE_MEMBERS_AT_SWEEP,
                  live);
+}
+
+static Counter critpath_live_members(Critpath_Core_State* state,
+                                     Critpath_PC_Entry* table) {
+  Counter live = 0;
+  uns entries = state->sets * state->assoc;
+  for (uns ii = 0; ii < entries; ++ii)
+    if (table[ii].valid && table[ii].in_slice)
+      live++;
+  return live;
+}
+
+/* One timeline row.  Called on the main thread's commit stream only. */
+static void critpath_timeline_tick(uns proc_id, Critpath_Core_State* state) {
+  if (proc_id != 0)
+    return;
+  if (!state->timeline) {
+    state->timeline = fopen("critpath_timeline.csv", "w");
+    ASSERTM(proc_id, state->timeline, "cannot open critpath_timeline.csv\n");
+    fprintf(state->timeline,
+            "committed_ops,committed_insts,cycle,member_commits,root_commits,"
+            "live_member_pcs,live_member_pcs_shadow\n");
+  }
+  fprintf(state->timeline, "%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+          (unsigned long long)state->retires,
+          (unsigned long long)inst_count[proc_id],
+          (unsigned long long)cycle_count,
+          (unsigned long long)state->tl_members,
+          (unsigned long long)state->tl_roots,
+          (unsigned long long)critpath_live_members(state, state->pc_table),
+          (unsigned long long)(state->shadow_table
+                                 ? critpath_live_members(state, state->shadow_table)
+                                 : 0));
+  fflush(state->timeline);
 }
 
 static void critpath_decay(uns proc_id) {
@@ -439,6 +479,9 @@ void critpath_note_retire(Op* op) {
   if (ZERECO_CRITPATH_DECAY_INTERVAL &&
       (state->retires % ZERECO_CRITPATH_DECAY_INTERVAL) == 0)
     critpath_decay(proc_id);
+  if (ZERECO_CRITPATH_TIMELINE_INTERVAL &&
+      (state->retires % ZERECO_CRITPATH_TIMELINE_INTERVAL) == 0)
+    critpath_timeline_tick(proc_id, state);
 
   /* ---- 1. did this op ever wait on an operand? ------------------------- */
   /* Sources whose producer had already left the machine never signal a wake,
@@ -473,8 +516,10 @@ void critpath_note_retire(Op* op) {
                    (ZERECO_CRITPATH_INSERT_GATE == 2 &&
                     op->oracle_info.hbt_pred_is_hard));
 
-  if (may_seed)
+  if (may_seed) {
     STAT_EVENT(proc_id, CRITPATH_ROOT_COMMITS);
+    state->tl_roots++;
+  }
   /* Shadow (critical rule) entry, full-slice mode only.  Seeded and aged
      exactly like the main table; differs only in how it propagates. */
   Critpath_PC_Entry* shadow = NULL;
@@ -518,6 +563,7 @@ void critpath_note_retire(Op* op) {
                                              : CRITPATH_TARGET_LOAD_NONCRITICAL);
     }
     STAT_EVENT(proc_id, CRITPATH_SLICE_OPS);
+    state->tl_members++;
     if (shadow)
       STAT_EVENT(proc_id, shadow->in_slice ? CRITPATH_FULL_MEMBER_CRITICAL
                                            : CRITPATH_FULL_MEMBER_NONCRITICAL);

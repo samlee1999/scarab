@@ -478,6 +478,12 @@ DEF_PARAM(zereco_critpath_insert_gate, ZERECO_CRITPATH_INSERT_GATE, uns, uns, 2,
    EVERY register source (not only the last-arriving one) and never stops at
    an op with no upstream delay.  Isolates "critical only" as the single axis. */
 DEF_PARAM(zereco_critpath_full_slice, ZERECO_CRITPATH_FULL_SLICE, Flag, Flag, FALSE, )
+/* Every N committed main-thread ops, append one line to critpath_timeline.csv in
+   the run directory: committed ops / instructions / cycle, cumulative chain-member
+   commits and H2P root commits, and the member PCs resident in brslice_tab (and
+   in the shadow table under full-slice mode).  Counts from cycle 0 -- warm-up
+   included -- so the membership build-up is visible.  0 disables. */
+DEF_PARAM(zereco_critpath_timeline_interval, ZERECO_CRITPATH_TIMELINE_INTERVAL, uns, uns, 0, )
 /* [PHASE B] Consume the critical-path chain instead of only observing it.
    ZERECO_CRITPATH_PRIORITY makes chain membership the source of the IQ priority
    bit, replacing the Block Cache mask; RFP_TARGET_CRITPATH makes a member load

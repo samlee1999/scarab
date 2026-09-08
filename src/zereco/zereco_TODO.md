@@ -51,11 +51,17 @@
 
 | # | 내용 | 상태 |
 |---|---|---|
+| **TL** | **멤버십 누적 타임라인** (`260909_critpath_timeline`): both/crit vs both/full, `--zereco_critpath_timeline_interval 100000` → 각 run의 `critpath_timeline.csv`(100K commit마다 누적 op/inst/cycle, 멤버 commit, root commit, 상주 멤버 PC; warm-up 포함 cycle 0부터) | 코드·빌드·디스크립터 완료, **실행 대기(사용자)**. 그림: ① 누적 멤버 op 수, ② 구간별 멤버 비율, ③ 상주 멤버 PC 수 — full vs critical, workload/suite별 weight 평균. D-12·교수님 피드백 2(필터링 20%)의 판단 근거 |
 | **B-3** | depth 제한 sweep (∞/8/4/2/1) — D-4, D-12(b) | 대기 |
 | **B-5** | D-1 수정 후 재측정 (wrong-path priority) — 낙관 폭 보고용 | 대기 |
 | — | partition 15/20% 재확인 — D-10 | 사용자 결정 후 |
 | — | Golden Cove 186 머신 sweep (`zereco_dbg_gc186_sweep.json`) | 보류 |
 | — | `LEGACY_WALK_NEEDED()`가 false일 때 Fill Buffer/walk 메모리 할당 자체도 생략 (host 메모리) | 선택 |
+
+## 4b. 교수님 피드백 (2026-09-09)
+
+1. **SPEC17에서 TEA와의 IPC 격차**(TEA +22% vs both/crit +6.6%, 특히 leela/mcf/omnetpp/xz)를 줄일 것.
+2. **criticality-aware라 부르려면 critical op 필터링이 실제로 보여야** — 지금은 full slice 대비 6%도 못 거름. 20% 내외를 목표로. → 먼저 TL 실험으로 누적 양상 확인 후 D-12 선택.
 
 ## 5. 논문 서술 시 유의
 
