@@ -194,3 +194,22 @@ Block-Cache 기준 chain_bit)을 수정하고 walk를 완전 차단했다. 정�
 - part20(37 entry)의 fallback 15→24%. baseline IPC 자체는 geomean −5.0%(pr −21%, sssp −15%: memory-bound 워크로드가 PRF 축소에 민감).
 - chain 인구 60%, tie 7%, producer flip 22% — 352 머신과 1%p 이내로 같아 A/A2 결론은 머신 무관.
 - 186 머신에서는 clang 1358, gcc 414, gcc 939가 frontend watchdog으로 죽음(baseline 포함, 같은 op 번호). 352 머신에서는 완주.
+
+### C8. 성능 비교 — critical slice vs full slice, TEA (`260908_critpath_comparison`, 352 머신, random queue, 108 simpoint)
+
+설정: P-IQ = 25% partition(88 entry) non-stall, RFP = PT 1K + store forwarding(모드 1), decay 100K, depth 무제한.
+baseline은 `260905_critpath_phaseB/baseline_randq` 재사용, TEA는 `260827_tea_baseline/tea_random_queue`(67 simpoint, 옛 빌드, TEA thread용 RS 192·PRF 192 추가 보유).
+
+| | piq/crit | piq/full | rfp/crit | rfp/full | both/crit | both/full | TEA (67) |
+|---|---|---|---|---|---|---|---|
+| IPC geomean (108) | +4.20% | +4.06% | +6.06% | +5.99% | **+9.93%** | +9.53% | — |
+| IPC geomean (67, TEA 표본) | +4.20% | +4.06% | +6.20% | +6.11% | +10.08% | +9.66% | **+14.21%** |
+| H2P fetch→resolution | −7.2% | −6.9% | −11.2% | −11.2% | −17.2% | −16.8% | — |
+| H2P dependency wait | −4.6% | −4.3% | −14.0% | −14.0% | −18.6% | −17.9% | — |
+| H2P scheduler wait | −87% | −88% | −20% | −20% | −90% | −90% | — |
+
+- **full slice ≈ critical slice.** 멤버 인구 58.8 vs 59.8%, chain size 8.9 vs 9.1, brslice_tab 상주 PC 1160 vs 1070. full 멤버 중 critical 규칙이 버릴 것은 **5.0%**, priority bit op의 5.2%, Target Load의 2.9%. 성능 차 0.1~0.4%p. 이유: 멤버십이 정적 PC 단위로 누적되고(propagation의 99.9%가 refresh, 신규 멤버는 0.1%), 한 PC의 critical producer가 instance마다 바뀌므로(flip 22%) LPR 규칙도 결국 모든 producer를 방문한다. 정적 PC 단위에서는 critical 필터가 사실상 작동하지 않는다 → TODO D-12.
+- **P-IQ 25%**: partition 점유 15~16%/용량, priority-full cycle 6~7%, fallback 8~12%. priority ready→issue 0.5 cy vs normal 2.7 cy, priority op의 76%가 zero-wait(normal 57%). 예약이 남아돈다 → D-10.
+- **RFP + store forwarding**: injected의 18.7%가 forwarding 패킷이고 전부 useful. useful/load 20.0 → 27.6%, RFP 단독 이득 5.16 → 6.06%. b2_part25 대비 simpoint별 +0.86% 평균(−1.0 ~ +5.9%).
+- **TEA 대비**: 같은 67 simpoint에서 TEA +14.2% vs both/crit +10.1%. TEA는 leela/mcf/omnetpp/deepsjeng/xz에서 크게 앞서고(precompute + early flush), pr에서 −9.9%. 단 TEA는 TEA thread용 RS 192·PRF 192를 추가로 갖는 544-entry 머신이라 자원이 동일하지 않다.
+- 분석: `260908_critpath_comparison/analysis/analyze.py` → `results.txt`, `cmp_data.json`.
