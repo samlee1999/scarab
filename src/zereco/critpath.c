@@ -508,14 +508,6 @@ void critpath_note_retire(Op* op) {
   else
     STAT_EVENT(proc_id, CRITPATH_OPS_MULTI_WAKE);
 
-  Critpath_PC_Entry* entry = critpath_pc_lookup(proc_id, pc, TRUE);
-  if (!entry)
-    return;
-
-  /* Seed before measuring, not after: an H2P branch is the root of its own
-     slice from its very first commit, and taking its slack as non-slice on that
-     first pass would bias the slice histograms against the one instruction that
-     matters most. */
   /* Which branches may start a chain.  Gate 2 is the strictest -- only a branch
      the H2P table has already convicted -- and gates 1 and 0 loosen it, letting
      a chain warm up while its branch is still earning that status. */
@@ -526,18 +518,39 @@ void critpath_note_retire(Op* op) {
                     op->oracle_info.hbt_misp_counter >= 1) ||
                    (ZERECO_CRITPATH_INSERT_GATE == 2 &&
                     op->oracle_info.hbt_pred_is_hard));
+  Flag has_lpr = (op->critpath_wake_events > 0);
 
+  /* Allocate for a member, not for every PC that commits: a miss simply means
+     "not a chain member", which is all any consumer asks of this table. */
+  Flag allocate = may_seed || !ZERECO_CRITPATH_MEMBER_ONLY_ALLOC;
+  Critpath_PC_Entry* entry = critpath_pc_lookup(proc_id, pc, allocate);
+  /* Shadow (critical rule) entry, full-slice mode only.  Allocated, seeded and
+     aged exactly like the main table; only its propagation rule differs. */
+  Critpath_PC_Entry* shadow =
+    state->shadow_table
+      ? critpath_table_lookup(proc_id, state, state->shadow_table, pc, allocate,
+                              FALSE)
+      : NULL;
+
+  /* Seed before measuring, not after: an H2P branch is the root of its own
+     slice from its very first commit, and taking its slack as non-slice on that
+     first pass would bias the slice histograms against the one instruction that
+     matters most. */
   if (may_seed) {
     STAT_EVENT(proc_id, CRITPATH_ROOT_COMMITS);
     state->tl_roots++;
-  }
-  /* Shadow (critical rule) entry, full-slice mode only.  Seeded and aged
-     exactly like the main table; differs only in how it propagates. */
-  Critpath_PC_Entry* shadow = NULL;
-  if (state->shadow_table) {
-    shadow = critpath_table_lookup(proc_id, state, state->shadow_table, pc,
-                                   TRUE, FALSE);
-    if (may_seed) {
+    if (entry) {
+      if (!entry->in_slice || entry->owner_pc != pc) {
+        entry->in_slice = TRUE;
+        entry->depth = 0;
+        entry->owner_pc = pc;
+        STAT_EVENT(proc_id, CRITPATH_SEEDS);
+      }
+      /* A root re-confirms itself every time it commits. */
+      if (entry->confirm < state->confirm_max)
+        entry->confirm++;
+    }
+    if (shadow) {
       if (!shadow->in_slice || shadow->owner_pc != pc) {
         shadow->in_slice = TRUE;
         shadow->depth = 0;
@@ -547,17 +560,30 @@ void critpath_note_retire(Op* op) {
         shadow->confirm++;
     }
   }
-  if (may_seed) {
-    if (!entry->in_slice || entry->owner_pc != pc) {
-      entry->in_slice = TRUE;
-      entry->depth = 0;
-      entry->owner_pc = pc;
-      STAT_EVENT(proc_id, CRITPATH_SEEDS);
-    }
-    /* A root re-confirms itself every time it commits. */
-    if (entry->confirm < state->confirm_max)
-      entry->confirm++;
+  Flag shadow_member = shadow && shadow->in_slice;
+
+  /* Ops that actually held a priority RS entry -- the bit is cleared when the
+     non-stall fallback sends a candidate to a normal entry -- split by whether
+     the critical rule would have kept them.  Taken before the main table can
+     turn this op away, so a miss there does not silently drop the sample. */
+  if (state->shadow_table && op->zereco_iq_priority_bit)
+    STAT_EVENT(proc_id, shadow_member ? CRITPATH_PRIORITY_OP_CRITICAL
+                                      : CRITPATH_PRIORITY_OP_NONCRITICAL);
+
+  /* The shadow applies the critical rule independently of what the main table
+     holds.  Read its fields first: the lookup inside the helper can evict any
+     entry sharing the set, including this one. */
+  if (shadow_member && has_lpr && !frontier &&
+      shadow->depth < CRITPATH_MAX_DEPTH &&
+      op->critpath_last_producer_pc != 0) {
+    uns8 sh_depth = shadow->depth;
+    Addr sh_owner = shadow->owner_pc;
+    critpath_propagate_to(proc_id, state, state->shadow_table, FALSE,
+                          op->critpath_last_producer_pc, sh_depth, sh_owner);
   }
+
+  if (!entry)
+    return;
 
   Flag in_slice = entry->in_slice;
   if (in_slice) {
@@ -569,25 +595,20 @@ void critpath_note_retire(Op* op) {
          entry->depth <= ZERECO_CRITPATH_PRIORITY_MAX_DEPTH)) {
       rfp_note_target_load(proc_id, pc, op->oracle_info.va);
       STAT_EVENT(proc_id, CRITPATH_TARGET_LOADS);
-      if (shadow)
-        STAT_EVENT(proc_id, shadow->in_slice ? CRITPATH_TARGET_LOAD_CRITICAL
-                                             : CRITPATH_TARGET_LOAD_NONCRITICAL);
+      if (state->shadow_table)
+        STAT_EVENT(proc_id, shadow_member ? CRITPATH_TARGET_LOAD_CRITICAL
+                                          : CRITPATH_TARGET_LOAD_NONCRITICAL);
     }
     STAT_EVENT(proc_id, CRITPATH_SLICE_OPS);
     state->tl_members++;
     if (op->table_info->mem_type == MEM_ST)
       STAT_EVENT(proc_id, CRITPATH_SLICE_OPS_STORE);
-    if (shadow)
-      STAT_EVENT(proc_id, shadow->in_slice ? CRITPATH_FULL_MEMBER_CRITICAL
-                                           : CRITPATH_FULL_MEMBER_NONCRITICAL);
+    if (state->shadow_table)
+      STAT_EVENT(proc_id, shadow_member ? CRITPATH_FULL_MEMBER_CRITICAL
+                                        : CRITPATH_FULL_MEMBER_NONCRITICAL);
     critpath_record_confirm(proc_id, entry->confirm);
     critpath_record_owner_class(proc_id, entry->owner_pc);
   }
-
-  if (shadow && op->zereco_iq_priority_bit)
-    STAT_EVENT(proc_id, shadow->in_slice ? CRITPATH_PRIORITY_OP_CRITICAL
-                                         : CRITPATH_PRIORITY_OP_NONCRITICAL);
-  Flag has_lpr = (op->critpath_wake_events > 0);
 
   /* ---- 2. slack between the critical operand and the runner-up --------- */
   /* Only meaningful with two competing arrivals.  With a single wake event the
@@ -650,17 +671,6 @@ void critpath_note_retire(Op* op) {
   }
 
   /* ---- 5. propagate one level, as the real mechanism would -------------- */
-  /* Shadow table (full-slice mode): apply the critical rule regardless of what
-     the main table says, so the two memberships stay independent.  Read its
-     fields before the lookup inside the helper can evict them. */
-  if (shadow && shadow->in_slice && has_lpr && !frontier &&
-      shadow->depth < CRITPATH_MAX_DEPTH &&
-      op->critpath_last_producer_pc != 0) {
-    uns8 sh_depth = shadow->depth;
-    Addr sh_owner = shadow->owner_pc;
-    critpath_propagate_to(proc_id, state, state->shadow_table, FALSE,
-                          op->critpath_last_producer_pc, sh_depth, sh_owner);
-  }
   if (!in_slice)
     return;
 

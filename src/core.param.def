@@ -491,6 +491,12 @@ DEF_PARAM(zereco_critpath_timeline_interval, ZERECO_CRITPATH_TIMELINE_INTERVAL, 
    then never a chain member.  Same value for both rules keeps critical a subset
    of full. */
 DEF_PARAM(zereco_critpath_mem_edge, ZERECO_CRITPATH_MEM_EDGE, Flag, Flag, TRUE, )
+/* A real brslice_tab holds chain members only.  With this FALSE the commit hook
+   allocates an entry for every committed PC, so the table's occupancy tracks the
+   program's whole static footprint rather than the chain -- fine for the Phase A
+   histograms it was built for, wrong for a capacity study.  TRUE: an entry
+   appears only when an H2P branch seeds it or propagation reaches it. */
+DEF_PARAM(zereco_critpath_member_only_alloc, ZERECO_CRITPATH_MEMBER_ONLY_ALLOC, Flag, Flag, TRUE, )
 /* [PHASE B] Consume the critical-path chain instead of only observing it.
    ZERECO_CRITPATH_PRIORITY makes chain membership the source of the IQ priority
    bit, replacing the Block Cache mask; RFP_TARGET_CRITPATH makes a member load
