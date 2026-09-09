@@ -301,6 +301,17 @@ void critpath_note_wake(Op* src_op, Op* dep_op, uns8 rdy_bit) {
     return;
 
   Counter arrival = src_op->wake_cycle;
+  /* Register-only edge set: a store->load forwarding wake has no physical
+     register behind it, so the RSE's LPR mux cannot select it.  Keep it aside
+     for the statistics only. */
+  if (!ZERECO_CRITPATH_MEM_EDGE &&
+      dep_op->oracle_info.src_info[rdy_bit].type != REG_DATA_DEP) {
+    if (dep_op->critpath_mem_wake_events < 255)
+      dep_op->critpath_mem_wake_events++;
+    if (arrival > dep_op->critpath_mem_last_cycle)
+      dep_op->critpath_mem_last_cycle = arrival;
+    return;
+  }
   if (dep_op->critpath_wake_events < 255)
     dep_op->critpath_wake_events++;
 
@@ -564,6 +575,8 @@ void critpath_note_retire(Op* op) {
     }
     STAT_EVENT(proc_id, CRITPATH_SLICE_OPS);
     state->tl_members++;
+    if (op->table_info->mem_type == MEM_ST)
+      STAT_EVENT(proc_id, CRITPATH_SLICE_OPS_STORE);
     if (shadow)
       STAT_EVENT(proc_id, shadow->in_slice ? CRITPATH_FULL_MEMBER_CRITICAL
                                            : CRITPATH_FULL_MEMBER_NONCRITICAL);
@@ -592,16 +605,21 @@ void critpath_note_retire(Op* op) {
   /* ---- 3. what kind of edge is critical ------------------------------- */
   /* A register edge can be followed backward by a physical-register scheme; a
      store-to-load edge cannot.  This is the cost of that blindness. */
-  if (has_lpr) {
-    if (op->critpath_last_dep_type == MEM_DATA_DEP) {
-      STAT_EVENT(proc_id, CRITPATH_LPR_MEM_DEP);
-      if (in_slice)
-        STAT_EVENT(proc_id, CRITPATH_SLICE_LPR_MEM_DEP);
-    } else {
-      STAT_EVENT(proc_id, CRITPATH_LPR_REG_DEP);
-      if (in_slice)
-        STAT_EVENT(proc_id, CRITPATH_SLICE_LPR_REG_DEP);
-    }
+  /* "The true last arrival was a store" -- followed when the edge set includes
+     memory edges, counted only when it does not. */
+  Flag mem_was_last =
+    ZERECO_CRITPATH_MEM_EDGE
+      ? (has_lpr && op->critpath_last_dep_type == MEM_DATA_DEP)
+      : (op->critpath_mem_wake_events > 0 &&
+         (!has_lpr || op->critpath_mem_last_cycle > op->critpath_last_cycle));
+  if (mem_was_last) {
+    STAT_EVENT(proc_id, CRITPATH_LPR_MEM_DEP);
+    if (in_slice)
+      STAT_EVENT(proc_id, CRITPATH_SLICE_LPR_MEM_DEP);
+  } else if (has_lpr) {
+    STAT_EVENT(proc_id, CRITPATH_LPR_REG_DEP);
+    if (in_slice)
+      STAT_EVENT(proc_id, CRITPATH_SLICE_LPR_REG_DEP);
   }
 
   /* ---- 4. does the critical edge stay the same across instances? ------- */
@@ -660,7 +678,8 @@ void critpath_note_retire(Op* op) {
     Addr seen[MAX_DEPS];
     uns num_seen = 0;
     for (uns ii = 0; ii < num_srcs; ++ii) {
-      if (op->oracle_info.src_info[ii].type != REG_DATA_DEP)
+      Dep_Type t = op->oracle_info.src_info[ii].type;
+      if (t != REG_DATA_DEP && !(ZERECO_CRITPATH_MEM_EDGE && t == MEM_DATA_DEP))
         continue;
       Addr producer_pc = op->critpath_src_producer_pc[ii];
       if (producer_pc == 0)

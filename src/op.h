@@ -319,7 +319,11 @@ struct Op_struct {
   Counter critpath_second_cycle; /* 2nd max of source wake cycles (t_second) */
   uns8 critpath_last_src;        /* argmax source index = LPR             */
   uns8 critpath_last_dep_type;   /* dep type of that source (REG vs MEM)  */
-  uns8 critpath_wake_events;     /* sources that produced a wake event    */
+  uns8 critpath_wake_events;     /* sources that produced a wake event (LPR candidates) */
+  /* Under zereco_critpath_mem_edge 0 a store->load wake is not an LPR candidate;
+     it is still recorded so "the true last arrival was a store" can be counted. */
+  Counter critpath_mem_last_cycle;
+  uns8 critpath_mem_wake_events;
   /* PC of the producer on the LPR edge.  Captured while that producer is still
      live, because retire is in order: by the time this op commits its producer
      has already committed and its pool entry may have been recycled.  Hardware

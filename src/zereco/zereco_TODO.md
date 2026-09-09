@@ -12,7 +12,7 @@
 |---|---|---|---|
 | **D-12** | **critical 필터의 단위** | 정적 PC별 멤버십(brslice_tab), decay 100K | C3: full slice 멤버 중 critical 규칙이 걸러내는 것은 5.6%, priority op의 5.7%, Target Load의 2.9%뿐이고 성능도 같다(10.08 vs 9.66%). 원인은 정적 PC 멤버십의 누적. 선택지: (a) instance 단위 priority — LPR 정보를 dynamic op에 직접 부착, (b) depth 제한(D-4)으로 인구 축소, (c) confirm threshold를 높여 "자주 critical인 PC"만 유지, (d) 정적 PC 단위 필터는 효과 없음을 인정하고 서술 방향 변경 — **사용자 결정** |
 | **D-10** | partition 예약률 확정 | 25% (88 entry) | C4: 실측 상주 priority op 13.6개 = partition의 15%, fallback 8%, Datacenter만 full cycle 12.5%. 줄일 여지 있음(15~20%) — 축소 시 fallback 증가와 맞바꿈. **사용자 결정** |
-| **D-11** | **store→load forwarding wake의 LPR 추적** | forwarding store의 wake도 LPR 후보 → store가 마지막이면 store PC로 전파(critical edge의 약 2%) | 그림의 PRF scoreboard 구조로는 불가능. (a) 유지하고 "LPR = SQ entry" 확장 + commit 때 SQ/ROB에서 store PC 읽기를 설계에 추가, (b) register-only로 한정하고 2%를 한계로 서술(구현은 `git show 4253b3c -- src/zereco/critpath.c`). **사용자 결정** |
+| **D-11** | **edge 집합** (store→load forwarding edge 포함 여부) | knob `zereco_critpath_mem_edge` (1 = 기존 동작: critical은 store를 LPR로 선택 가능, full도 forwarding store로 전파; 0 = register-only, PRF scoreboard 충실) | 타임라인 실험에서 드러남: 기존 비교는 critical만 store edge를 따라가 **critical ⊄ full**이었음. ES 실험(4 config)으로 두 edge 집합에서 공정 비교 후 **사용자 결정** |
 | **D-1** | wrong-path 명령어의 priority | frontend 태깅이 `op->off_path`면 조기 반환 → off-path 멤버는 priority bit 없음 | 하드웨어는 fetch 시점에 on/off-path를 모르므로 wrong-path 멤버도 priority entry를 점유해야 한다. 현재 결과는 그 경쟁이 빠져 **낙관적**(partition 압박 과소평가). `decoupled_frontend.cc` critpath 분기에서 `off_path` 조건 제거 → 낙관 폭 측정(실험 B-5) |
 | D-2 | Δ-window (`\|t_last − t_second\| < Δ`면 양쪽 producer 삽입) | Δ=0 | 원안 유지. 후순위 |
 | D-4 | depth 제한 | 파라미터만 존재(`zereco_critpath_priority_max_depth` 0 = 무제한) | 인구를 줄이는 유일한 지렛대. D-12 (b)와 연결 — 실험 B-3 |
@@ -51,7 +51,8 @@
 
 | # | 내용 | 상태 |
 |---|---|---|
-| **TL** | **멤버십 누적 타임라인** (`260909_critpath_timeline`): both/crit vs both/full, `--zereco_critpath_timeline_interval 100000` → 각 run의 `critpath_timeline.csv`(100K commit마다 누적 op/inst/cycle, 멤버 commit, root commit, 상주 멤버 PC; warm-up 포함 cycle 0부터) | 코드·빌드·디스크립터 완료, **실행 대기(사용자)**. 그림: ① 누적 멤버 op 수, ② 구간별 멤버 비율, ③ 상주 멤버 PC 수 — full vs critical, workload/suite별 weight 평균. D-12·교수님 피드백 2(필터링 20%)의 판단 근거 |
+| **ES** | **edge 집합 통일 비교** (`260909_critpath_edgeset`): both/{crit,full} × mem_edge {0,1}, 타임라인 포함, 67 simpoint | 코드·빌드·디스크립터 완료, **실행 대기(사용자)**. 볼 것: 두 edge 집합 각각에서 non-critical 비율(멤버/priority op/Target Load), `CRITPATH_SLICE_OPS_STORE`(멤버 store commit), IPC·latency, 타임라인 |
+| **TL** | **멤버십 누적 타임라인** (`260909_critpath_timeline`): both/crit vs both/full, `--zereco_critpath_timeline_interval 100000` → 각 run의 `critpath_timeline.csv`(100K commit마다 누적 op/inst/cycle, 멤버 commit, root commit, 상주 멤버 PC; warm-up 포함 cycle 0부터) | **완료** → DESIGN.md C7. 결론: build-up 구간 없음(첫 200K 명령어부터 동일), critical이 오히려 1~2%p 높음 → edge 집합 불일치 발견(D-11) |
 | **B-3** | depth 제한 sweep (∞/8/4/2/1) — D-4, D-12(b) | 대기 |
 | **B-5** | D-1 수정 후 재측정 (wrong-path priority) — 낙관 폭 보고용 | 대기 |
 | — | partition 15/20% 재확인 — D-10 | 사용자 결정 후 |

@@ -484,6 +484,13 @@ DEF_PARAM(zereco_critpath_full_slice, ZERECO_CRITPATH_FULL_SLICE, Flag, Flag, FA
    in the shadow table under full-slice mode).  Counts from cycle 0 -- warm-up
    included -- so the membership build-up is visible.  0 disables. */
 DEF_PARAM(zereco_critpath_timeline_interval, ZERECO_CRITPATH_TIMELINE_INTERVAL, uns, uns, 0, )
+/* Edge set both slice rules follow.  1 (historical behaviour): a store->load
+   forwarding edge counts -- the critical rule may pick the forwarding store as
+   the LPR, and the full rule propagates to the forwarding store too.  0: register
+   edges only, which is what a PRF-scoreboard implementation can see; a store is
+   then never a chain member.  Same value for both rules keeps critical a subset
+   of full. */
+DEF_PARAM(zereco_critpath_mem_edge, ZERECO_CRITPATH_MEM_EDGE, Flag, Flag, TRUE, )
 /* [PHASE B] Consume the critical-path chain instead of only observing it.
    ZERECO_CRITPATH_PRIORITY makes chain membership the source of the IQ priority
    bit, replacing the Block Cache mask; RFP_TARGET_CRITPATH makes a member load

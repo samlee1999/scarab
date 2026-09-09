@@ -198,3 +198,11 @@ forwarding 없는 이전 설정(`260905_critpath_B2_partition/b2_part25`) 대비
 
 `ZERECO_IQ_*_INTEGRITY_MISMATCHES`, `ZERECO_PIQ_*_INTEGRITY_MISMATCHES`, `RFP_DEMAND_DELAYED_BY_PREFETCH_OPS` 전부 0.
 `RFP_INFLIGHT_UNDERFLOW`만 injected의 0.02% 수준(PT 축출 후 같은 PC 재할당 시 카운터 0에서 감소, 무해).
+
+### C7. 멤버십 누적 타임라인 (`260909_critpath_timeline`, both/crit vs both/full, 100K commit 간격, warm-up 포함)
+
+그림 `analysis/timeline_{share,cum,live}.pdf`. 집계는 simpoint 곡선을 workload 안에서 weight 평균, suite 안에서 산술평균.
+
+- **build-up 구간이 없다.** 첫 200K 명령어에서 이미 두 규칙의 멤버 비율이 같고(GAP 66~69%, SPEC17 67~70%, Datacenter 45~52%), 20M까지 평행하다. 정적 PC 멤버십은 수십만 명령어 안에 포화한다.
+- **critical이 full보다 1~2%p 높다**(deepsjeng 75 vs 66, tc 90 vs 83). seed(H2P root commit)는 두 config에서 동일하므로 전파 규칙의 차이다: 기존 critical 규칙은 store→load forwarding edge를 따라 store와 그 data chain까지 멤버로 만들었고, full 규칙은 register edge만 따라가 store에 닿지 못했다. 즉 **C3의 비교는 edge 집합이 달라 critical ⊆ full이 아니었다** → knob `zereco_critpath_mem_edge`로 통일해 재측정(TODO ES).
+- 상주 멤버 PC 수만 full이 크다(Datacenter 3404 vs 3054). 추가분은 거의 commit되지 않는 cold PC.

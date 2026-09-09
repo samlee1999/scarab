@@ -698,7 +698,8 @@ void add_src_from_op(Op* op, Op* src_op, Dep_Type type) {
   info->op_num = src_op->op_num;
   info->unique_num = src_op->unique_num;
   op->critpath_src_producer_pc[src_num] =
-    (type == REG_DATA_DEP && src_op->inst_info) ? src_op->inst_info->addr : 0;
+    ((type == REG_DATA_DEP || type == MEM_DATA_DEP) && src_op->inst_info)
+      ? src_op->inst_info->addr : 0;
 
   /* for memory dependencies, derived_from_prog_input incremented in track_addr */
   set_not_rdy_bit(op, src_num);
