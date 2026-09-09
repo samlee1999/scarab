@@ -222,3 +222,24 @@ forwarding 없는 이전 설정(`260905_critpath_B2_partition/b2_part25`) 대비
 - **build-up 구간이 없다.** 첫 200K 명령어에서 이미 네 곡선이 최종 수준에 도달하고(GAP 64~69%, SPEC17 61~72%, Datacenter 40~48%), 20M까지 평행하다. 정적 PC 멤버십은 수십만 명령어 안에 포화하므로 "full이 먼저 크고 critical이 따라붙는" 국면은 100K 해상도에서는 보이지 않는다.
 - 같은 edge 집합 안에서는 처음부터 끝까지 full이 critical보다 1.3~3.6%p 위에 있고, store edge를 추가하면 두 규칙이 함께 3~5%p 올라간다.
 - 처음(2 config, edge 불일치) 버전에서는 critical이 full보다 1~2%p **높았다** — critical만 store→load edge를 따라가 store의 data chain을 멤버로 만들었기 때문. 이 발견이 `zereco_critpath_mem_edge` knob의 계기.
+
+### C8. brslice_tab 용량 sweep (`260909_critpath_brslice_tab_size`, {critical, full} × 8-way {512~32K} entry)
+
+register-only edge, 멤버 전용 할당, P-IQ 25%, RFP PT 1K + store forwarding. 스크립트 `analysis/analyze_tabsize.py` → `tabsize_results.txt`, 그림 `analysis/tabsize_ipc.pdf`.
+
+| entry | 512 | 1K | 2K | 4K | 32K |
+|---|---|---|---|---|---|
+| IPC — critical | +9.61% | +9.73% | +9.78% | +9.81% | +9.83% |
+| IPC — full | +9.41% | +9.54% | +9.61% | +9.65% | +9.66% |
+| critical − full | +0.20%p | +0.19%p | +0.18%p | +0.16%p | +0.17%p |
+| 상주 멤버 PC (crit / full) | 256 / 266 | 432 / 458 | 656 / 717 | 866 / 981 | 1079 / 1313 |
+| 멤버 축출 / 신규 멤버 (full) | 1.08 | 1.04 | 0.99 | 0.85 | 0.01 |
+| 커밋 op 중 priority issue (crit / full) | 47.4 / 48.8% | 51.2 / 52.8% | 53.3 / 55.2% | 54.4 / 56.5% | 55.0 / 57.3% |
+| filtering: priority op non-critical | 7.8% | 6.8% | 6.4% | 6.2% | 6.1% |
+
+- **용량은 두 규칙을 가르는 축이 아니다.** 32K → 512로 64배 줄여도 IPC는 critical −0.22%p, full −0.25%p만 잃고, 둘의 격차는 0.17 → 0.20%p로 거의 그대로다(SPEC17만 0.21 → 0.31%p). full이 무너지고 critical이 버티는 예산은 없다.
+- **대신 강한 비용 결과가 나왔다.** 테이블 압박은 실재한다(512 entry에서 축출/신규 = 1.08, 상주 멤버 1313 → 266). 그런데도 성능이 거의 그대로다 — **brslice_tab은 1K entry(PUBS 예산)면 충분하고, 512 entry에서도 −0.2%p뿐**이다. 식별 구조는 싸다.
+- **왜 성능이 안 떨어지나: LRU가 cold PC부터 버리기 때문이다.** 상주 멤버 PC는 4배 줄어드는데(1079 → 256) 실제로 priority를 받는 커밋 op 비율은 55.0 → 47.4%로 밖에 안 준다. C3에서 본 cold/hot 비대칭이 용량 축에서도 그대로 재현된다.
+- **용량 압박이 chain을 얕게 만드는 효과는 약하다.** chain size 8.9 → 7.7, depth ≤ 2 비중 48.8 → 51.0%. 전파가 끊겨 depth 제한처럼 작동하는 효과는 있으나 2%p 수준이다.
+- filtering은 압박이 커질수록 6.1 → 7.8%로 조금 오르지만 20%와는 거리가 멀다. H2P latency(−17.5 → −17.2%), RFP useful/load(26.1 → 25.7%)도 거의 불변.
+- **다음 지렛대는 depth다.** 멤버 commit의 **48.8%가 depth ≤ 2**이므로 `zereco_critpath_priority_max_depth 2`는 가속 대상을 절반으로 잘라 멤버 비율 약 30%를 만든다(유도값). 목표 구간 20~30%대에 직접 닿는 유일한 knob이다 → 실험 B-3.
