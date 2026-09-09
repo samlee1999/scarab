@@ -148,20 +148,25 @@ baseline = `260905_critpath_phaseB/baseline_randq`, TEA = `260827_tea_baseline/t
 P-IQ는 scheduler wait를 없애고, RFP는 dependency wait를 줄인다. RFP 단독으로도 GAP에서 scheduler wait가 38% 주는데,
 load가 일찍 끝나 branch가 RS에 머무는 시간 자체가 줄기 때문이다. 그림 `analysis/cmp67_{f2r,dep,sched}.pdf`.
 
-### C3. critical slice vs full slice — 정적 PC 단위에서는 거의 같다
+### C3. critical slice vs full slice — edge 집합을 맞춰도 정적 PC 단위에서는 6~7%만 거른다 (`260909_critpath_timeline`, edge-set run)
 
-| | critical | full |
-|---|---|---|
-| chain 멤버 (committed op 중) | 63.6% | 62.3% |
-| chain size (멤버 commit / H2P root commit) | 9.5 | 9.3 |
-| brslice_tab 상주 멤버 PC (decay sweep 평균) | 1169 | 1259 |
-| full 멤버 중 critical 규칙이 버릴 것 | — | 5.6% |
-| priority bit op 중 non-critical | — | 5.7% (GAP 5.0 / SPEC17 5.5 / Datacenter 8.0) |
-| Target Load 중 non-critical | — | 2.9% (GAP 0.6 / SPEC17 3.4 / Datacenter 6.5) |
+RFP + P-IQ 25%, 67 simpoint. `zereco_critpath_mem_edge` 0(register edge만) / 1(store→load forwarding edge 포함)을 두 규칙에 같이 적용해
+critical ⊆ full을 보장한 비교. 스크립트 `analysis/analyze_edgeset.py` → `edgeset_results.txt`.
 
-전파 이벤트의 99.9%가 이미 멤버인 PC의 refresh이고 신규 멤버는 0.1%다. 멤버십이 정적 PC 단위로 누적되고 한 PC의
-critical producer가 instance마다 바뀌므로, LPR 규칙도 결국 모든 producer를 방문한다. 성능 차는 0.1~0.4%p.
-critical 필터가 조금이라도 작동하는 곳은 코드가 큰 Datacenter뿐이다. 그림 `analysis/cmp67_noncrit.pdf`. → TODO D-12.
+| | crit/reg | full/reg | crit/mem | full/mem |
+|---|---|---|---|---|
+| IPC geomean | +9.79% | +9.66% | **+10.08%** | +9.96% |
+| H2P fetch→resolution / dependency wait | −17.4% / −18.9% | −17.2% / −18.8% | −17.7% / −19.5% | −17.7% / −19.5% |
+| chain 멤버 (committed op 중) | 59.7% | 62.3% | 63.6% | 67.0% |
+| 멤버 중 store commit | 4.4% (push/call류: register dest가 있는 store) | 4.4% | 6.4% | 7.0% |
+| brslice_tab 상주 멤버 PC | 1037 | 1259 | 1169 | 1489 |
+| full 멤버 중 critical 규칙이 버릴 것 | — | **6.0%** | — | **7.3%** |
+| priority bit op 중 non-critical | — | 6.1% (GAP 5.1 / SPEC17 6.3 / DC 8.4) | — | 7.5% (5.4 / 7.9 / 11.6) |
+| Target Load 중 non-critical | — | 3.5% (0.7 / 4.4 / 6.9) | — | 4.2% (0.6 / 5.4 / 8.1) |
+
+- store edge를 포함하면 두 규칙 모두 멤버가 3.9~4.7%p 늘고(store의 data chain), IPC는 0.3%p 오른다. critical의 우위(+0.1%p)는 어느 edge 집합에서도 잡음 수준.
+- **필터링은 6~7%**(Datacenter 8~12%). 그림 `analysis/edgeset_noncrit.pdf`. 정적 PC 단위 멤버십에서는 critical producer가 instance마다 바뀌어(flip 22%) LPR 규칙도 결국 모든 producer를 방문하므로, 규칙의 차이가 PC 집합 차이로 남지 않는다. 20% 필터링은 필터 단위를 바꿔야 가능하다 → TODO D-12.
+- crit/mem은 `260908_critpath_comparison`의 piq_rfp_critical_slice와 simpoint별 IPC가 **정확히 동일**(타임라인 덤프가 타이밍에 무영향임을 증명). full/mem은 store edge를 새로 따라가므로 260908의 full과 다르다.
 
 ### C4. priority scheduling (25% partition = 88 entry)
 
@@ -199,10 +204,10 @@ forwarding 없는 이전 설정(`260905_critpath_B2_partition/b2_part25`) 대비
 `ZERECO_IQ_*_INTEGRITY_MISMATCHES`, `ZERECO_PIQ_*_INTEGRITY_MISMATCHES`, `RFP_DEMAND_DELAYED_BY_PREFETCH_OPS` 전부 0.
 `RFP_INFLIGHT_UNDERFLOW`만 injected의 0.02% 수준(PT 축출 후 같은 PC 재할당 시 카운터 0에서 감소, 무해).
 
-### C7. 멤버십 누적 타임라인 (`260909_critpath_timeline`, both/crit vs both/full, 100K commit 간격, warm-up 포함)
+### C7. 멤버십 누적 타임라인 (`260909_critpath_timeline`, 4 config, 100K commit 간격, warm-up 포함)
 
-그림 `analysis/timeline_{share,cum,live}.pdf`. 집계는 simpoint 곡선을 workload 안에서 weight 평균, suite 안에서 산술평균.
+그림 `analysis/edgeset_timeline_{share,cum,live}.pdf`. 집계는 simpoint 곡선을 workload 안에서 weight 평균, suite 안에서 산술평균.
 
-- **build-up 구간이 없다.** 첫 200K 명령어에서 이미 두 규칙의 멤버 비율이 같고(GAP 66~69%, SPEC17 67~70%, Datacenter 45~52%), 20M까지 평행하다. 정적 PC 멤버십은 수십만 명령어 안에 포화한다.
-- **critical이 full보다 1~2%p 높다**(deepsjeng 75 vs 66, tc 90 vs 83). seed(H2P root commit)는 두 config에서 동일하므로 전파 규칙의 차이다: 기존 critical 규칙은 store→load forwarding edge를 따라 store와 그 data chain까지 멤버로 만들었고, full 규칙은 register edge만 따라가 store에 닿지 못했다. 즉 **C3의 비교는 edge 집합이 달라 critical ⊆ full이 아니었다** → knob `zereco_critpath_mem_edge`로 통일해 재측정(TODO ES).
-- 상주 멤버 PC 수만 full이 크다(Datacenter 3404 vs 3054). 추가분은 거의 commit되지 않는 cold PC.
+- **build-up 구간이 없다.** 첫 200K 명령어에서 이미 네 곡선이 최종 수준에 도달하고(GAP 64~69%, SPEC17 61~72%, Datacenter 40~48%), 20M까지 평행하다. 정적 PC 멤버십은 수십만 명령어 안에 포화하므로 "full이 먼저 크고 critical이 따라붙는" 국면은 100K 해상도에서는 보이지 않는다.
+- 같은 edge 집합 안에서는 처음부터 끝까지 full이 critical보다 1.3~3.6%p 위에 있고, store edge를 추가하면 두 규칙이 함께 3~5%p 올라간다.
+- 처음(2 config, edge 불일치) 버전에서는 critical이 full보다 1~2%p **높았다** — critical만 store→load edge를 따라가 store의 data chain을 멤버로 만들었기 때문. 이 발견이 `zereco_critpath_mem_edge` knob의 계기.

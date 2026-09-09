@@ -10,9 +10,9 @@
 
 | # | 항목 | 현재 코드 | 상태 · 결정 |
 |---|---|---|---|
-| **D-12** | **critical 필터의 단위** | 정적 PC별 멤버십(brslice_tab), decay 100K | C3: full slice 멤버 중 critical 규칙이 걸러내는 것은 5.6%, priority op의 5.7%, Target Load의 2.9%뿐이고 성능도 같다(10.08 vs 9.66%). 원인은 정적 PC 멤버십의 누적. 선택지: (a) instance 단위 priority — LPR 정보를 dynamic op에 직접 부착, (b) depth 제한(D-4)으로 인구 축소, (c) confirm threshold를 높여 "자주 critical인 PC"만 유지, (d) 정적 PC 단위 필터는 효과 없음을 인정하고 서술 방향 변경 — **사용자 결정** |
+| **D-12** | **critical 필터의 단위** | 정적 PC별 멤버십(brslice_tab), decay 100K | ES(edge 통일 후): full 멤버 중 critical이 거르는 것 **6~7%**(priority op 6.1~7.5%, Target Load 3.5~4.2%; Datacenter 8~12%). 교수님 목표 20%에 못 미침. 원인은 정적 PC 멤버십의 누적(producer flip 22%, 전파의 99.9%가 refresh). 선택지: (a) **instance 단위 priority** — commit 때가 아니라 dispatch/issue 시점에 LPR 정보를 dynamic op에 직접 부착해 그 instance의 critical producer만 우대, (b) depth 제한(D-4), (c) confirm threshold를 높여 "자주 critical인 PC"만 유지, (d) 정적 PC 필터의 한계를 인정하고 서술 변경 — **사용자 결정** |
 | **D-10** | partition 예약률 확정 | 25% (88 entry) | C4: 실측 상주 priority op 13.6개 = partition의 15%, fallback 8%, Datacenter만 full cycle 12.5%. 줄일 여지 있음(15~20%) — 축소 시 fallback 증가와 맞바꿈. **사용자 결정** |
-| **D-11** | **edge 집합** (store→load forwarding edge 포함 여부) | knob `zereco_critpath_mem_edge` (1 = 기존 동작: critical은 store를 LPR로 선택 가능, full도 forwarding store로 전파; 0 = register-only, PRF scoreboard 충실) | 타임라인 실험에서 드러남: 기존 비교는 critical만 store edge를 따라가 **critical ⊄ full**이었음. ES 실험(4 config)으로 두 edge 집합에서 공정 비교 후 **사용자 결정** |
+| **D-11** | **edge 집합** | knob `zereco_critpath_mem_edge` (1 = store→load forwarding edge 포함, 0 = register-only) | ES 결과: mem edge는 멤버 +4%p, IPC +0.3%p, 필터링 6.0 → 7.3%. 하드웨어 충실도는 0(PRF scoreboard만), 성능은 1(LPR = SQ entry 확장 필요). **사용자 결정** — 논문에서 어느 쪽을 기본으로 둘지 |
 | **D-1** | wrong-path 명령어의 priority | frontend 태깅이 `op->off_path`면 조기 반환 → off-path 멤버는 priority bit 없음 | 하드웨어는 fetch 시점에 on/off-path를 모르므로 wrong-path 멤버도 priority entry를 점유해야 한다. 현재 결과는 그 경쟁이 빠져 **낙관적**(partition 압박 과소평가). `decoupled_frontend.cc` critpath 분기에서 `off_path` 조건 제거 → 낙관 폭 측정(실험 B-5) |
 | D-2 | Δ-window (`\|t_last − t_second\| < Δ`면 양쪽 producer 삽입) | Δ=0 | 원안 유지. 후순위 |
 | D-4 | depth 제한 | 파라미터만 존재(`zereco_critpath_priority_max_depth` 0 = 무제한) | 인구를 줄이는 유일한 지렛대. D-12 (b)와 연결 — 실험 B-3 |
@@ -51,7 +51,7 @@
 
 | # | 내용 | 상태 |
 |---|---|---|
-| **ES** | **edge 집합 통일 비교** (`260909_critpath_edgeset`): both/{crit,full} × mem_edge {0,1}, 타임라인 포함, 67 simpoint | 코드·빌드·디스크립터 완료, **실행 대기(사용자)**. 볼 것: 두 edge 집합 각각에서 non-critical 비율(멤버/priority op/Target Load), `CRITPATH_SLICE_OPS_STORE`(멤버 store commit), IPC·latency, 타임라인 |
+| **ES** | edge 집합 통일 비교 (`260909_critpath_timeline`, 4 config) | **완료** → DESIGN.md C3·C7 |
 | **TL** | **멤버십 누적 타임라인** (`260909_critpath_timeline`): both/crit vs both/full, `--zereco_critpath_timeline_interval 100000` → 각 run의 `critpath_timeline.csv`(100K commit마다 누적 op/inst/cycle, 멤버 commit, root commit, 상주 멤버 PC; warm-up 포함 cycle 0부터) | **완료** → DESIGN.md C7. 결론: build-up 구간 없음(첫 200K 명령어부터 동일), critical이 오히려 1~2%p 높음 → edge 집합 불일치 발견(D-11) |
 | **B-3** | depth 제한 sweep (∞/8/4/2/1) — D-4, D-12(b) | 대기 |
 | **B-5** | D-1 수정 후 재측정 (wrong-path priority) — 낙관 폭 보고용 | 대기 |
