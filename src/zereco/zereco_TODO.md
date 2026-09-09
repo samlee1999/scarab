@@ -10,14 +10,13 @@
 
 | # | 항목 | 현재 코드 | 상태 · 결정 |
 |---|---|---|---|
-| **D-12** | **critical 필터의 단위** | 정적 PC별 멤버십(brslice_tab), decay 100K | ES(edge 통일 후): full 멤버 중 critical이 거르는 것 **6~7%**(priority op 6.1~7.5%, Target Load 3.5~4.2%; Datacenter 8~12%). 교수님 목표 20%에 못 미침. 원인은 정적 PC 멤버십의 누적(producer flip 22%, 전파의 99.9%가 refresh). 선택지: (a) **instance 단위 priority** — commit 때가 아니라 dispatch/issue 시점에 LPR 정보를 dynamic op에 직접 부착해 그 instance의 critical producer만 우대, (b) depth 제한(D-4), (c) confirm threshold를 높여 "자주 critical인 PC"만 유지, (d) 정적 PC 필터의 한계를 인정하고 서술 변경 — **사용자 결정** |
+| **D-12** | **가속 대상을 줄이는 방법** | 정적 PC별 멤버십, depth 무제한 | 문제는 "full 대비 몇 % 필터링"이 아니라 **커밋 op의 55~61%가 priority를 받는다**는 것(C3). 검증 끝난 것: **용량은 답이 아니다**(C8 — 상주 PC를 4배 줄여도 가속 op는 55 → 47%). 남은 후보: (a) **depth 제한**(B-3, 멤버 commit의 48.8%가 depth ≤ 2이므로 depth 2면 약 30% 예상), (b) **confirm/executed 비율 필터** — entry에 실행 횟수를 함께 세어 "자주 실행되지만 드물게 critical"한 hot PC를 겨냥. cold/hot 비대칭을 정면으로 치는 유일한 안, (c) instance 단위 priority |
 | **D-10** | partition 예약률 확정 | 25% (88 entry) | C4: 실측 상주 priority op 13.6개 = partition의 15%, fallback 8%, Datacenter만 full cycle 12.5%. 줄일 여지 있음(15~20%) — 축소 시 fallback 증가와 맞바꿈. **사용자 결정** |
-| **D-11** | **edge 집합** | knob `zereco_critpath_mem_edge` (1 = store→load forwarding edge 포함, 0 = register-only) | ES 결과: mem edge는 멤버 +4%p, IPC +0.3%p, 필터링 6.0 → 7.3%. 하드웨어 충실도는 0(PRF scoreboard만), 성능은 1(LPR = SQ entry 확장 필요). **사용자 결정** — 논문에서 어느 쪽을 기본으로 둘지 |
 | **D-1** | wrong-path 명령어의 priority | frontend 태깅이 `op->off_path`면 조기 반환 → off-path 멤버는 priority bit 없음 | 하드웨어는 fetch 시점에 on/off-path를 모르므로 wrong-path 멤버도 priority entry를 점유해야 한다. 현재 결과는 그 경쟁이 빠져 **낙관적**(partition 압박 과소평가). `decoupled_frontend.cc` critpath 분기에서 `off_path` 조건 제거 → 낙관 폭 측정(실험 B-5) |
 | D-2 | Δ-window (`\|t_last − t_second\| < Δ`면 양쪽 producer 삽입) | Δ=0 | 원안 유지. 후순위 |
-| D-4 | depth 제한 | 파라미터만 존재(`zereco_critpath_priority_max_depth` 0 = 무제한) | 인구를 줄이는 유일한 지렛대. D-12 (b)와 연결 — 실험 B-3 |
+| D-4 | depth 제한 | 파라미터 존재(`zereco_critpath_priority_max_depth` 0 = 무제한), config sweep만 하면 됨 | 가속 대상을 줄이는 최유력 지렛대 → B-3 |
 | D-5 | owner 충돌 | 단일 owner pointer, overwrite | 2-slot 승격 여부. 후순위 |
-| D-6 | brslice_tab 하드웨어 예산 | 4096 × 8-way (계측 크기); 실측 상주 멤버 PC 약 1.2K | 실제 예산(예: PUBS 128×8 = 1K)으로 축소해 민감도 측정 |
+| D-6 | brslice_tab 하드웨어 예산 | 4096 set × 8-way = 32,768 entry (계측 크기) | **C8로 답 나옴**: 1K entry(128 set × 8-way, PUBS 예산) −0.1%p, 512 entry −0.2%p. 논문 구성으로 **1K entry** 채택 권고 — 사용자 확인만 남음 |
 
 ## 1. Address-generation slice statistics (급하지 않음)
 
@@ -52,8 +51,9 @@
 | # | 내용 | 상태 |
 |---|---|---|
 | **ES** | edge 집합 통일 비교 (`260909_critpath_timeline`, 4 config) | **완료** → DESIGN.md C3·C7 |
-| **TL** | **멤버십 누적 타임라인** (`260909_critpath_timeline`): both/crit vs both/full, `--zereco_critpath_timeline_interval 100000` → 각 run의 `critpath_timeline.csv`(100K commit마다 누적 op/inst/cycle, 멤버 commit, root commit, 상주 멤버 PC; warm-up 포함 cycle 0부터) | **완료** → DESIGN.md C7. 결론: build-up 구간 없음(첫 200K 명령어부터 동일), critical이 오히려 1~2%p 높음 → edge 집합 불일치 발견(D-11) |
-| **B-3** | depth 제한 sweep (∞/8/4/2/1) — D-4, D-12(b) | 대기 |
+| **TL** | 멤버십 누적 타임라인 (`260909_critpath_timeline`) | **완료** → DESIGN.md C7 |
+| **TAB** | brslice_tab 용량 sweep (`260909_critpath_brslice_tab_size`, 10 config) | **완료** → DESIGN.md C8. 용량은 두 규칙을 가르는 축이 아님(격차 0.17 → 0.20%p). 대신 1K entry면 충분하다는 비용 결과 확보 |
+| **B-3** | **depth 제한 sweep** (`zereco_critpath_priority_max_depth` ∞/8/4/2/1) × {critical, full}, brslice_tab 1K entry | **다음 실험.** 멤버 commit의 48.8%가 depth ≤ 2 → depth 2 제한이 가속 대상을 약 30%로 낮출 것(유도값). 목표 20~30%대에 닿는 유일한 knob. 코드 변경 불필요 |
 | **B-5** | D-1 수정 후 재측정 (wrong-path priority) — 낙관 폭 보고용 | 대기 |
 | — | partition 15/20% 재확인 — D-10 | 사용자 결정 후 |
 | — | Golden Cove 186 머신 sweep (`zereco_dbg_gc186_sweep.json`) | 보류 |
