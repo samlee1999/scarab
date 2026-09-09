@@ -16,7 +16,7 @@
 | D-2 | Δ-window (`\|t_last − t_second\| < Δ`면 양쪽 producer 삽입) | Δ=0 | 원안 유지. 후순위 |
 | D-4 | depth 제한 | 파라미터 존재(`zereco_critpath_priority_max_depth` 0 = 무제한), config sweep만 하면 됨 | 가속 대상을 줄이는 최유력 지렛대 → B-3 |
 | D-5 | owner 충돌 | 단일 owner pointer, overwrite | 2-slot 승격 여부. 후순위 |
-| D-6 | brslice_tab 하드웨어 예산 | 4096 set × 8-way = 32,768 entry (계측 크기) | **C8로 답 나옴**: 1K entry(128 set × 8-way, PUBS 예산) −0.1%p, 512 entry −0.2%p. 논문 구성으로 **1K entry** 채택 권고 — 사용자 확인만 남음 |
+| D-6 | brslice_tab 하드웨어 예산 | **1K entry (128 set × 8-way) 확정** — 2026-09-10 사용자 결정, 이후 모든 실험 고정 | C8: 32K 대비 −0.1%p, 512 entry −0.2%p. PUBS 예산과 동일 |
 
 ## 1. Address-generation slice statistics (급하지 않음)
 
@@ -53,11 +53,25 @@
 | **ES** | edge 집합 통일 비교 (`260909_critpath_timeline`, 4 config) | **완료** → DESIGN.md C3·C7 |
 | **TL** | 멤버십 누적 타임라인 (`260909_critpath_timeline`) | **완료** → DESIGN.md C7 |
 | **TAB** | brslice_tab 용량 sweep (`260909_critpath_brslice_tab_size`, 10 config) | **완료** → DESIGN.md C8. 용량은 두 규칙을 가르는 축이 아님(격차 0.17 → 0.20%p). 대신 1K entry면 충분하다는 비용 결과 확보 |
-| **B-3** | **depth 제한 sweep** (`zereco_critpath_priority_max_depth` ∞/8/4/2/1) × {critical, full}, brslice_tab 1K entry | **다음 실험.** 멤버 commit의 48.8%가 depth ≤ 2 → depth 2 제한이 가속 대상을 약 30%로 낮출 것(유도값). 목표 20~30%대에 닿는 유일한 knob. 코드 변경 불필요 |
+| **B-3** | **depth 제한 sweep** (`260910_critpath_depth`): `zereco_critpath_priority_max_depth` ∞/8/4/2/1 × {critical, full}, brslice_tab **1K entry 고정**(앞으로 계속 1K) | **실행 대기(사용자)**, 코드 변경 없음. 예측 가속 대상: depth 1 ~19%, 2 ~29%, 4 ~41%, 8 ~50%. 정합성 확인: crit_inf/full_inf는 `260909_critpath_brslice_tab_size`의 crit_1k/full_1k와 일치해야 함 |
 | **B-5** | D-1 수정 후 재측정 (wrong-path priority) — 낙관 폭 보고용 | 대기 |
 | — | partition 15/20% 재확인 — D-10 | 사용자 결정 후 |
 | — | Golden Cove 186 머신 sweep (`zereco_dbg_gc186_sweep.json`) | 보류 |
 | — | `LEGACY_WALK_NEEDED()`가 false일 때 Fill Buffer/walk 메모리 할당 자체도 생략 (host 메모리) | 선택 |
+
+## 4a. 필터링 강화 실험 후보 (B-3 이후 진행 — 2026-09-10 사용자 확정)
+
+문제 정의: 한 instance에서는 producer 하나만 critical인데, 같은 PC가 반복 실행되며 instance마다 다른 producer를 지목하고(producer flip 22%) 그 **합집합이 누적**된다.
+"한 번이라도 critical이면 영구 멤버"이므로 critical 규칙이 full 규칙으로 수렴한다. 대책은 전부 **반복성·일관성을 요구**하는 방향이다.
+
+| # | 방향 | 내용 | 비용 |
+|---|---|---|---|
+| **D** | **더 강한 refresh** | `zereco_critpath_confirm_bits`(현재 4 = 최대 15)와 `_decay_interval`(현재 100K)이 이미 파라미터. 지금은 멤버 탈퇴에 1.5M retire가 걸려 극도로 끈적하다. confirm 1~2 bit + decay 10K sweep | **코드 0, config만** — 가장 먼저 |
+| **A** | **edge confidence** | entry의 `last_producer_pc`에 2-bit confidence를 붙여 같은 producer가 연속 지목될 때만 증가·바뀌면 리셋, 포화했을 때만 전파. "이 PC의 critical producer는 항상 저 PC"인 edge만 chain에 남음 | entry당 2 bit, 코드 ~20줄 |
+| **C** | **slack threshold** | `t_last − t_second ≥ Δ`일 때만 전파. tie(slack ≤ 2)가 25~27%인데 그건 누가 critical인지 정해지지 않은 경우 | slack은 이미 계산 중, 코드 몇 줄 |
+| **B** | **confirm / executed 비율** | entry에 실행 횟수를 함께 세고 비율이 임계 이상일 때만 멤버 유지. "자주 실행되지만 드물게 critical"한 hot PC를 겨냥. Phase A2에서 confirm **절대값** threshold가 무력했던 이유를 설명 | counter 1개(4~6 bit) |
+| **F** | **전파에도 depth 제한** | 현재 max_depth는 소비만 막고 전파는 계속됨. 전파까지 자르면 테이블 누적 자체가 줄어듦 | 코드 몇 줄 |
+| **E** | **H2P branch별 chain 분리** | entry당 owner 하나 + overwrite라 한 branch 기준으로도 여러 path가 섞임. owner별 분리 | 저장 비용 큼, 후순위 |
 
 ## 4b. 교수님 피드백 (2026-09-09)
 
