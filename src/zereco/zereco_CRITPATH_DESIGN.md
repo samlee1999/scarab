@@ -176,6 +176,10 @@ critical ⊆ full을 보장한 비교. 스크립트 `analysis/analyze_edgeset.py
   | **실제 priority로 issue된 op 수** | 2.7% | 4.5% | 6.2% | 4.0% |
 
   PC 수로는 5분의 1을 걸러내지만 실제로 우선순위를 받고 실행되는 명령어는 4~5%만 줄어든다 — 걸러지는 PC가 평균 멤버보다 약 3배 덜 실행되는 cold PC이기 때문이다. config를 따로 돌린 4.0%가 같은 실행 shadow의 6.1%보다 작은 것은 피드백 때문이다: critical만 가속하면 criticality가 다른 source로 옮겨가 멤버가 다시 늘어난다(crit 실행의 자체 테이블 1037 PC > full 실행 안 shadow 추정 1020 PC).
+- **왜 필터링이 구조적으로 작을 수밖에 없는가 — dataflow가 대부분 선형이다.** 커밋되는 op의 **67.9%가 waking source가 하나뿐**이고(wake 0개 12.9%, 2개 이상 19.3%), 멤버 op으로 좁혀도 **71.4%가 도착이 하나뿐**이다. producer가 하나면 critical 규칙과 full 규칙이 같은 곳으로 전파하므로 두 규칙이 원리적으로 구분되지 않는다. 갈릴 수 있는 모집단은 **경쟁 도착이 있는 멤버 op 17.9%뿐**이다.
+
+  그 결과 전파 이벤트 수는 멤버 commit당 critical 0.661 / full 0.900 — full이 방문하는 producer가 **1.36배**에 그친다. 그리고 그 추가 방문의 99.9%는 이미 멤버인 PC의 refresh다. 즉 필터링 상한은 두 단계로 깎인다: ① 프로그램 dataflow가 포크하지 않아 "추가 전파"가 27%뿐, ② 정적 PC 누적으로 그 추가 전파가 대부분 기존 멤버에 떨어져 최종 4%만 남는다. ②는 depth 제한으로 공격할 수 있으나 ①은 프로그램의 성질이다.
+
 - **더 큰 문제는 절대량이다.** 어느 규칙이든 커밋 op의 **55~61%가 priority scheduling을 받는다**(crit/reg 54.9%, full/reg 57.2%, crit/mem 58.5%, full/mem 61.4%). 25% partition인데도 이렇게 되는 것은 RS 점유가 낮고 priority op가 0.47 cycle 만에 빠져나가 구획을 빠르게 회전시키기 때문이다(fallback 8%). "full 대비 몇 % 필터링"이 아니라 **가속 대상 자체를 줄이는 것**이 과제다 → TODO D-12. 그림 `analysis/edgeset_noncrit.pdf`.
 - crit/mem은 `260908_critpath_comparison`의 piq_rfp_critical_slice와 simpoint별 IPC가 **정확히 동일**(타임라인 덤프가 타이밍에 무영향임을 증명). full/mem은 store edge를 새로 따라가므로 260908의 full과 다르다.
 
