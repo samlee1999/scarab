@@ -167,7 +167,16 @@ critical ⊆ full을 보장한 비교. 스크립트 `analysis/analyze_edgeset.py
 | Target Load 중 non-critical | — | 3.5% (0.7 / 4.4 / 6.9) | — | 4.2% (0.6 / 5.4 / 8.1) |
 
 - store edge를 포함하면 두 규칙 모두 멤버가 3.9~4.7%p 늘고(store의 data chain), IPC는 0.3%p 오른다. critical의 우위(+0.1%p)는 어느 edge 집합에서도 잡음 수준.
-- **필터링은 6~7%**(Datacenter 8~12%). 그림 `analysis/edgeset_noncrit.pdf`. 정적 PC 단위 멤버십에서는 critical producer가 instance마다 바뀌어(flip 22%) LPR 규칙도 결국 모든 producer를 방문하므로, 규칙의 차이가 PC 집합 차이로 남지 않는다. 20% 필터링은 필터 단위를 바꿔야 가능하다 → TODO D-12.
+- **무엇을 세느냐로 filtering 폭이 갈린다.** priority bit는 non-stall fallback에서 지워지므로 commit 시점에 bit가 살아 있는 op = 실제로 priority RS entry를 잡은 op이다(dispatch 189,347,846 vs commit 189,347,561, 차이는 종료 시 in-flight).
+
+  | 세는 대상 (register edge) | GAP | SPEC17 | Datacenter | 전체 |
+  |---|---|---|---|---|
+  | brslice_tab 상주 **PC 수** | 15.5% | 16.2% | 21.0% | 19.1% |
+  | 멤버 **commit 수** | 2.7% | 4.9% | 6.6% | 4.2% |
+  | **실제 priority로 issue된 op 수** | 2.7% | 4.5% | 6.2% | 4.0% |
+
+  PC 수로는 5분의 1을 걸러내지만 실제로 우선순위를 받고 실행되는 명령어는 4~5%만 줄어든다 — 걸러지는 PC가 평균 멤버보다 약 3배 덜 실행되는 cold PC이기 때문이다. config를 따로 돌린 4.0%가 같은 실행 shadow의 6.1%보다 작은 것은 피드백 때문이다: critical만 가속하면 criticality가 다른 source로 옮겨가 멤버가 다시 늘어난다(crit 실행의 자체 테이블 1037 PC > full 실행 안 shadow 추정 1020 PC).
+- **더 큰 문제는 절대량이다.** 어느 규칙이든 커밋 op의 **55~61%가 priority scheduling을 받는다**(crit/reg 54.9%, full/reg 57.2%, crit/mem 58.5%, full/mem 61.4%). 25% partition인데도 이렇게 되는 것은 RS 점유가 낮고 priority op가 0.47 cycle 만에 빠져나가 구획을 빠르게 회전시키기 때문이다(fallback 8%). "full 대비 몇 % 필터링"이 아니라 **가속 대상 자체를 줄이는 것**이 과제다 → TODO D-12. 그림 `analysis/edgeset_noncrit.pdf`.
 - crit/mem은 `260908_critpath_comparison`의 piq_rfp_critical_slice와 simpoint별 IPC가 **정확히 동일**(타임라인 덤프가 타이밍에 무영향임을 증명). full/mem은 store edge를 새로 따라가므로 260908의 full과 다르다.
 
 ### C4. priority scheduling (25% partition = 88 entry)
