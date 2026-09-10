@@ -59,7 +59,9 @@
 | — | Golden Cove 186 머신 sweep (`zereco_dbg_gc186_sweep.json`) | 보류 |
 | — | `LEGACY_WALK_NEEDED()`가 false일 때 Fill Buffer/walk 메모리 할당 자체도 생략 (host 메모리) | 선택 |
 
-## 4a. 필터링 강화 — 다음 배치 `260910_critpath_filter` (코드·빌드·디스크립터 완료, **실행 대기**)
+## 4a. 필터링 강화 — 두 단계로 분리 (2026-09-10 사용자 결정)
+
+**1단계 `260910_critpath_offpath_refresh` (실행 대기)**: 아래 표의 crit_ref, base, r10k, r4k만 — 새 base(off-path on + refresh 설정)를 먼저 확정한다. **2단계**: 확정된 base 위에 A/B/C. 분리 이유: B와 refresh는 둘 다 decay sweep에서 멤버를 빼므로 refresh 무릎이 옮겨가면 B의 몫이 달라지고, off-path로 구획 압박이 크게 늘면 25% partition부터 다시 봐야 할 수 있다. A/B/C 코드는 이미 같은 바이너리에 있고 기본 off.
 
 **지표 전환**: filtering = dispatch 기준. priority 자격을 가진 채 dispatch된 op(`ZERECO_PIQ_PRIORITY_ADMISSION_CANDIDATE_OPS`, on + off path)를 full vs critical로 비교. 분모는 전체 dispatch. 그래서 모든 config에서 `zereco_critpath_priority_offpath 1`.
 
