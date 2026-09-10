@@ -79,7 +79,7 @@ knob은 전부 기본 0(off)이고 off일 때 타이밍이 기존과 동일(새 
 
 **2단계 `260911_critpath_filter_abc` (실행 대기)**: 사용자 결정(2026-09-11)으로 **탐색 단계는 oracle(off-path 0)** 유지 — C1~C10과 연속, 비교 기준 재사용. base = off-path 0 + confirm 1 bit / decay 10K + 테이블 1K + register-only + depth ∞ + P-IQ 25%. crit_A3 / B25 / B50 / C3 + 정합성 crit_ref20k. 비교 대상 `260910_critpath_refresh/{crit,full}_1b_10k` 재사용.
 
-**최종 평가 시 주의**: oracle은 하드웨어가 모르는 on/off-path 정보를 쓰므로 IPC를 0.85%p 낙관한다(C11). TEA 비교 수치는 off-path 켬으로 내거나, oracle에 가까운 효과를 내는 현실적 메커니즘(G)과 함께 제시해야 한다. 또 dispatch 기준 지표를 택한 근거("하드웨어는 on/off를 구분 못 한다")와 oracle 가정이 서로 맞지 않으므로, 논문에서는 둘 중 하나로 정리 필요.
+**평가 모드 (2026-09-11 사용자 결정)**: 논문 평가는 **oracle(off-path 0) + commit 기준 filtering**으로 간다. 하드웨어 동작 수치는 C11에 보관(IPC −0.85%p). 논문에는 "wrong-path 명령어는 priority를 받지 않는다고 가정"을 명시하고 C11을 민감도로 제시. 이후 시뮬레이터에서만 가능한 관점의 결과(oracle/limit study)도 요청 예정 — 그런 결과는 상한(limit study)으로 표기.
 
 **새 후보 G — H2P 그림자 priority 차단** (C11에서 발견, **A/B/C 이후 방향이 없으면 시험** — 사용자 결정): priority 자격 dispatch의 **67.8%가 wrong-path**. 하드웨어가 알 수 있는 신호로 이를 줄일 수 있다 — 아직 resolve되지 않은 H2P branch(HBT가 표시) 뒤에서 fetch된 op는 wrong-path일 확률이 높으므로 priority bit를 주지 않는다. 대가는 그 branch가 맞게 예측된 경우의 on-path op도 priority를 잃는 것. A/B/C보다 줄일 수 있는 양이 훨씬 크다(상한: dispatch 기준 priority 비율 55% → 18%). 구현은 frontend에서 "in-flight 미해결 H2P branch 수" 카운터 하나.
 

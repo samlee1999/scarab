@@ -92,7 +92,8 @@ dynamic producer), ② decode-time → **commit-time** 학습 (on-path만, wrong
 | P-IQ partition | **25%** (352의 88 entry), non-stall fallback | baseline RS 점유율 ≈ 25%에 맞춤. 실측 점유는 partition의 15%로 여유 있음 (C4, TODO D-10) |
 | 옛 Fill-Buffer walk | 완전 배제 (`LEGACY_WALK_NEEDED()`) | Target Load 지명을 오염시켰음 |
 | 백엔드 머신 | `PARAMS.golden_cove_rs352`: RS 285/204/55 = 544 − TEA 예약 192 → main **352**, dcache 2 read port × 1 bank, PRF 592, issue 8 / retire 16, LQ 256 / SQ 192, BTB 8K, MSHR 64 | 모든 config 공통. partition %의 분모 = 352 |
-| wrong-path priority | **켬** (`zereco_critpath_priority_offpath 1`, 2026-09-11) | 하드웨어는 fetch 때 on/off-path를 모른다. 끄면 IPC를 0.85%p 낙관한다(C11) |
+| wrong-path priority | **끔 — oracle** (`zereco_critpath_priority_offpath 0`, 2026-09-11 사용자 결정) | 평가 모드. off-path op에는 priority bit를 주지 않는다. 하드웨어 동작(off-path 켬)의 수치는 C11에 있다: IPC −0.85%p, priority 자격 dispatch의 67.8%가 wrong-path. 논문에는 이 가정을 명시하고 C11을 민감도로 둔다 |
+| filtering 지표 | **commit 기준** — priority bit를 달고 commit된 op를 full vs critical로 비교 | oracle에서는 off-path가 priority를 받지 않으므로 dispatch 기준과 같은 값이다. dispatch 기준은 off-path 켬일 때만 의미가 있다 |
 | 스케줄러 | random queue (`node_issue_queue_schedule_scheme 1`) | PUBS와 같은 base; P-IQ의 select 우선권은 그 위에 얹힘 |
 | 표본 | **67 simpoint** (workload당 5, clang 4, gcc 3; 14 workload) | TEA 참조 실험과 동일 표본. weight 가중 → workload 간 geomean |
 
