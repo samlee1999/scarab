@@ -516,6 +516,21 @@ DEF_PARAM(zereco_critpath_priority_max_depth, ZERECO_CRITPATH_PRIORITY_MAX_DEPTH
    what every result before 2026-09-10 used.  Learning is unaffected either way:
    brslice_tab is written at commit, which only on-path ops reach. */
 DEF_PARAM(zereco_critpath_priority_offpath, ZERECO_CRITPATH_PRIORITY_OFFPATH, Flag, Flag, FALSE, )
+/* Filters that demand repetition before an edge or a member counts as critical.
+   All default to 0 (off), which is bit-identical to the unfiltered design.
+   A -- edge confidence: a member propagates to its last-arriving producer only
+        after naming the same producer on this many consecutive commits (2-bit
+        counter, 1..3).  Drops edges whose critical producer keeps changing.
+   B -- criticality ratio: at each decay sweep a non-root member is dropped if it
+        was chosen as a last-arriving producer on fewer than this many percent
+        of its own commits in the window (judged only after 4 commits).  Targets
+        PCs that execute often but are critical rarely.  Needs a decay interval.
+   C -- slack threshold: with two or more competing arrivals, propagate only when
+        the last one beat the runner-up by at least this many cycles.  Drops
+        ties, where accelerating one producer alone buys at most the slack. */
+DEF_PARAM(zereco_critpath_edge_conf_min, ZERECO_CRITPATH_EDGE_CONF_MIN, uns, uns, 0, )
+DEF_PARAM(zereco_critpath_ratio_min, ZERECO_CRITPATH_RATIO_MIN, uns, uns, 0, )
+DEF_PARAM(zereco_critpath_slack_min, ZERECO_CRITPATH_SLACK_MIN, uns, uns, 0, )
 /* [EXPERIMENT: ZERECO TIMED RFP] Register File Prefetching (ISCA'22) with real
    launch timing, L1 bandwidth contention, and finite predictor storage.  Unlike
    the h2p_chain_perfect_load oracle -- which predicts and validates in the same

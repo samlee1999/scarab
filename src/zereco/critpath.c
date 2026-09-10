@@ -63,6 +63,9 @@ typedef struct Critpath_PC_Entry_struct {
   uns8 depth;           /* distance from that branch, saturating */
   Addr owner_pc;        /* the H2P branch that claimed it */
   uns8 confirm;         /* times re-derived as a critical producer, saturating */
+  uns8 edge_conf;       /* A: consecutive commits naming the same LPR producer */
+  uns16 win_exec;       /* B: commits of this PC in the current decay window */
+  uns16 win_crit;       /* B: times chosen as a last-arriving producer, same window */
   Counter lru_touch;
 } Critpath_PC_Entry;
 
@@ -158,6 +161,20 @@ static void critpath_decay_table(uns proc_id, Critpath_Core_State* state,
     Critpath_PC_Entry* e = &table[ii];
     if (!e->valid)
       continue;
+    /* B: a member that commits often but is rarely anyone's last-arriving
+       producer is on the slice, not on the critical path.  Roots (depth 0) are
+       branches -- nobody's producer -- so they are exempt. */
+    if (is_main && ZERECO_CRITPATH_RATIO_MIN && e->in_slice && e->depth > 0 &&
+        e->win_exec >= 4 &&
+        (uns32)e->win_crit * 100 < (uns32)ZERECO_CRITPATH_RATIO_MIN * e->win_exec) {
+      e->in_slice = FALSE;
+      e->depth = 0;
+      e->owner_pc = 0;
+      e->confirm = 0;
+      STAT_EVENT(proc_id, CRITPATH_RATIO_DROPPED_MEMBER);
+    }
+    e->win_exec = 0;
+    e->win_crit = 0;
     if (e->confirm) {
       e->confirm--;
     } else if (e->in_slice) {
@@ -236,6 +253,10 @@ void critpath_init(uns proc_id) {
   ASSERTM(proc_id, ZERECO_CRITPATH_CONFIRM_BITS > 0 &&
                      ZERECO_CRITPATH_CONFIRM_BITS <= 8,
           "zereco_critpath_confirm_bits must be between 1 and 8\n");
+  ASSERTM(proc_id, ZERECO_CRITPATH_EDGE_CONF_MIN <= 3,
+          "zereco_critpath_edge_conf_min must be 0 (off) or 1..3 (2-bit counter)\n");
+  ASSERTM(proc_id, !ZERECO_CRITPATH_RATIO_MIN || ZERECO_CRITPATH_DECAY_INTERVAL,
+          "zereco_critpath_ratio_min is evaluated at decay sweeps; set zereco_critpath_decay_interval\n");
   ASSERTM(proc_id, ZERECO_CRITPATH_INSERT_GATE <= 2,
           "zereco_critpath_insert_gate must be 0 (all branches), "
           "1 (mispredicted at least once), or 2 (H2P)\n");
@@ -274,7 +295,11 @@ void critpath_reset(uns proc_id) {
  *
  * The frontend asks this whether an instruction belongs to a critical chain, and
  * a load that does is also the one worth prefetching into the register file.
- * Both are reads: allocation and aging belong to the commit path alone. */
+ * It never allocates and never touches confirm or depth -- allocation and aging
+ * belong to the commit path.  A hit does refresh the entry's LRU stamp, as a read
+ * of a set-associative table would in hardware, so the fetch stream (including
+ * wrong-path fetch under zereco_critpath_priority_offpath) does influence which
+ * member a later allocation evicts. */
 
 Flag critpath_is_member(uns proc_id, Addr pc, uns max_depth) {
   if (!ZERECO_CRITPATH_PROFILE)
@@ -436,6 +461,8 @@ static void critpath_propagate_to(uns proc_id, Critpath_Core_State* state,
     critpath_table_lookup(proc_id, state, table, producer_pc, TRUE, is_main);
   if (!producer)
     return;
+  if (is_main && producer->win_crit < 0xFFFF)
+    producer->win_crit++;
   if (!producer->in_slice) {
     producer->in_slice = TRUE;
     producer->depth = my_depth + 1;
@@ -601,6 +628,8 @@ void critpath_note_retire(Op* op) {
     }
     STAT_EVENT(proc_id, CRITPATH_SLICE_OPS);
     state->tl_members++;
+    if (entry->win_exec < 0xFFFF)
+      entry->win_exec++;
     if (op->table_info->mem_type == MEM_ST)
       STAT_EVENT(proc_id, CRITPATH_SLICE_OPS_STORE);
     if (state->shadow_table)
@@ -645,6 +674,15 @@ void critpath_note_retire(Op* op) {
 
   /* ---- 4. does the critical edge stay the same across instances? ------- */
   if (has_lpr) {
+    /* A: the edge to this op's last-arriving producer earns confidence only by
+       repeating; any change of producer starts it over. */
+    if (entry->has_last &&
+        entry->last_producer_pc == op->critpath_last_producer_pc) {
+      if (entry->edge_conf < 3)
+        entry->edge_conf++;
+    } else {
+      entry->edge_conf = 0;
+    }
     if (!entry->has_last) {
       STAT_EVENT(proc_id, CRITPATH_LPR_FIRST_OBSERVATION);
     } else {
@@ -724,6 +762,20 @@ void critpath_note_retire(Op* op) {
   }
   if (op->critpath_last_producer_pc == 0)
     return;
+  /* C: a near-tie means both producers are effectively critical; pushing one
+     of them alone buys at most the slack, so neither is followed. */
+  if (ZERECO_CRITPATH_SLACK_MIN && op->critpath_wake_events >= 2 &&
+      op->critpath_last_cycle - op->critpath_second_cycle <
+        ZERECO_CRITPATH_SLACK_MIN) {
+    STAT_EVENT(proc_id, CRITPATH_SLACK_BLOCKED);
+    return;
+  }
+  /* A: follow the edge only once it has proven to be the same one repeatedly. */
+  if (ZERECO_CRITPATH_EDGE_CONF_MIN &&
+      entry->edge_conf < ZERECO_CRITPATH_EDGE_CONF_MIN) {
+    STAT_EVENT(proc_id, CRITPATH_EDGE_CONF_BLOCKED);
+    return;
+  }
   /* Read what this op contributes before touching the table again.  The lookup
      inside the helper can evict whichever entry shares its index -- including
      this one -- so `entry` must not be dereferenced afterwards. */

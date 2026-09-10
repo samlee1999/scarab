@@ -59,19 +59,22 @@
 | — | Golden Cove 186 머신 sweep (`zereco_dbg_gc186_sweep.json`) | 보류 |
 | — | `LEGACY_WALK_NEEDED()`가 false일 때 Fill Buffer/walk 메모리 할당 자체도 생략 (host 메모리) | 선택 |
 
-## 4a. 필터링 강화 실험 후보 (B-3 이후 진행 — 2026-09-10 사용자 확정)
+## 4a. 필터링 강화 — 다음 배치 `260910_critpath_filter` (코드·빌드·디스크립터 완료, **실행 대기**)
 
-문제 정의: 한 instance에서는 producer 하나만 critical인데, 같은 PC가 반복 실행되며 instance마다 다른 producer를 지목하고(producer flip 22%) 그 **합집합이 누적**된다.
-"한 번이라도 critical이면 영구 멤버"이므로 critical 규칙이 full 규칙으로 수렴한다. 대책은 전부 **반복성·일관성을 요구**하는 방향이다.
+**지표 전환**: filtering = dispatch 기준. priority 자격을 가진 채 dispatch된 op(`ZERECO_PIQ_PRIORITY_ADMISSION_CANDIDATE_OPS`, on + off path)를 full vs critical로 비교. 분모는 전체 dispatch. 그래서 모든 config에서 `zereco_critpath_priority_offpath 1`.
 
-| # | 방향 | 내용 | 비용 |
-|---|---|---|---|
-| **D** | **더 강한 refresh** — **완료** → DESIGN.md C10 | **처음으로 효율을 올린 knob**: 1b/10K에서 가속 대상 51.2 → 44.9%, IPC −0.06%p, 효율 +13%, 필터링 3.1 → 6.8%(SPEC17 10.8%). 아직 포화 안 함 → 더 공격적인 점(decay 5K/2K, 1bit) 추가 필요 | **다음 배치 기본값을 1b/10K로** 두고 그 위에 A/B/C·D-2를 얹는 것을 권고 — 사용자 확인 |
-| **A** | **edge confidence** | entry의 `last_producer_pc`에 2-bit confidence를 붙여 같은 producer가 연속 지목될 때만 증가·바뀌면 리셋, 포화 시에만 전파 | entry당 2 bit, 코드 ~20줄. **모집단이 가장 크다**: producer flip이 멤버 commit의 22.5% |
-| **C / D-2** | **tie 정책 (한 knob으로 묶어 함께 실험)** | slack < Δ인 tie에서 0 = 현재(먼저 관측된 쪽) / 1 = **양쪽 삽입(D-2)** / 2 = **둘 다 제외(C)**. wake 훅에서 runner-up producer PC도 기록 필요 | LPR 하나를 가속한 이득은 slack에 묶이므로 tie에서 현재 정책은 이미 거의 0을 얻는다 → **C = 거의 공짜 필터링, D-2 = 성능 향상 후보**. 모집단 멤버 commit의 5.2%. `zereco_critpath_tie_policy` + `_tie_window`, ~20줄 |
-| **B** | **confirm / executed 비율** | entry에 실행 횟수를 함께 세고 비율이 임계 이상일 때만 멤버 유지. "자주 실행되지만 드물게 critical"한 hot PC를 겨냥. Phase A2에서 confirm **절대값** threshold가 무력했던 이유를 설명 | counter 1개(4~6 bit) |
-| — | **D 다음 배치**: A / B / C·D-2를 각각 기본 off인 독립 knob으로 구현해 한 빌드로. critical 규칙만 돌리고 full은 기준점 재사용 → A 1 + B 2(임계 두 점) + C 1 + D-2 1 = 5 config | D 결과 확인 후 |
-| **E** | **H2P branch별 chain 분리** | entry당 owner 하나 + overwrite라 한 branch 기준으로도 여러 path가 섞임. owner별 분리 | 저장 비용 큼, 후순위 |
+**공통 base**: off-path priority on, refresh **1b/10K**(멤버 수명 20K — C10 최고 효율, 1 bit라 하드웨어 최소), 테이블 1K, register-only edge, depth 무제한, P-IQ 25%, RFP PT 1K + store forwarding.
+
+| config | 목적 | 비교 대상 |
+|---|---|---|
+| crit_ref | 정합성: off-path 0, 기본 refresh, 필터 off | `260910_critpath_depth/crit_inf`와 simpoint별 완전 일치 |
+| crit_base / full_base | ① off-path 영향 + dispatch 기준 filtering 기준점 | `260910_critpath_refresh/{crit,full}_1b_10k` (off-path 0) |
+| crit/full × r10k, r4k | ② refresh 무릎 (수명 10K / 4K, decay 5K / 2K) | base(20K) |
+| crit_A3 | ③ A — edge confidence 3 (같은 LPR producer 4연속) | full_base, crit_base |
+| crit_B25 / B50 | ③ B — criticality ratio 25% / 50% (decay 창마다, 4회 이상 실행 PC만 판정, root 면제) | full_base, crit_base |
+| crit_C3 | ③ C — slack ≥ 3 cycle만 전파 (tie 0~2 제외) | full_base, crit_base |
+
+knob은 전부 기본 0(off)이고 off일 때 타이밍이 기존과 동일(새 필드 쓰기만). A·C는 critical 규칙의 전파만 막고, B는 decay sweep에서 멤버를 뺀다. **E(H2P branch별 chain 분리)는 저장 비용 때문에 보류, F는 제외, D-2(tie → 양쪽 삽입)는 성능 향상 후보로 남겨 둠.**
 
 ## 4b. 교수님 피드백 (2026-09-09)
 
