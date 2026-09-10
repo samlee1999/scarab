@@ -13,7 +13,7 @@
 | **D-12** | **가속 대상을 줄이는 방법** | 정적 PC별 멤버십 | 검증 끝: **용량은 답이 아님**(C8), **depth는 전체로는 비례 손실**이나 **코드가 큰 워크로드에서는 depth 4가 sweet spot**(C9 — Datacenter 인구 54%/이득 85%). 남은 축은 §4a의 여섯 방향. 필요한 성질이 분명해졌다: **평균보다 기여가 낮은 op를 골라내는** 필터여야 한다. depth는 그렇지 않았다(깊은 노드도 직렬 chain이라 동등 기여). A/B/D가 그 성질을 가질 후보 |
 | **D-10** | partition 예약률 확정 | 25% (88 entry) | C4: 실측 상주 priority op 13.6개 = partition의 15%, fallback 8%, Datacenter만 full cycle 12.5%. 줄일 여지 있음(15~20%) — 축소 시 fallback 증가와 맞바꿈. **사용자 결정** |
 | **D-1** | wrong-path 명령어의 priority | frontend 태깅이 `op->off_path`면 조기 반환 → off-path 멤버는 priority bit 없음 | 하드웨어는 fetch 시점에 on/off-path를 모르므로 wrong-path 멤버도 priority entry를 점유해야 한다. 현재 결과는 그 경쟁이 빠져 **낙관적**(partition 압박 과소평가). `decoupled_frontend.cc` critpath 분기에서 `off_path` 조건 제거 → 낙관 폭 측정(실험 B-5) |
-| D-2 | Δ-window (`\|t_last − t_second\| < Δ`면 양쪽 producer 삽입) | Δ=0 | 원안 유지. 후순위 |
+| D-2 | Δ-window (`\|t_last − t_second\| < Δ`면 **양쪽** producer 삽입) | **미구현.** Δ=0이고 `critpath_second_cycle`은 slack 통계에만 쓰인다. wake 훅이 `arrival > last_cycle`(strict)이라 동률이면 먼저 관측된 producer가 LPR로 남는다 | 필터링을 강화하려는 지금 방향과 **반대**(멤버가 늘어난다). 정확도(critical을 놓치지 않는 것)를 보려면 유효하나 후순위. 대상 모집단은 멤버 commit의 5.2%로 작다 |
 | D-4 | depth 제한 | 파라미터 존재, C9에서 sweep 완료 | **부분 채택 후보**: Datacenter/SPEC17에는 depth 4가 유리, GAP에는 불리. 워크로드 무관 단일 값은 없음. 최종 구성에서 depth 4를 기본으로 할지 사용자 결정 |
 | D-5 | owner 충돌 | 단일 owner pointer, overwrite | 2-slot 승격 여부. 후순위 |
 | D-6 | brslice_tab 하드웨어 예산 | **1K entry (128 set × 8-way) 확정** — 2026-09-10 사용자 결정, 이후 모든 실험 고정 | C8: 32K 대비 −0.1%p, 512 entry −0.2%p. PUBS 예산과 동일 |
@@ -66,11 +66,10 @@
 
 | # | 방향 | 내용 | 비용 |
 |---|---|---|---|
-| **D** | **더 강한 refresh** | `zereco_critpath_confirm_bits`(현재 4 = 최대 15)와 `_decay_interval`(현재 100K)이 이미 파라미터. 지금은 멤버 탈퇴에 1.5M retire가 걸려 극도로 끈적하다. confirm 1~2 bit + decay 10K sweep | **코드 0, config만** — 가장 먼저 |
-| **A** | **edge confidence** | entry의 `last_producer_pc`에 2-bit confidence를 붙여 같은 producer가 연속 지목될 때만 증가·바뀌면 리셋, 포화했을 때만 전파. "이 PC의 critical producer는 항상 저 PC"인 edge만 chain에 남음 | entry당 2 bit, 코드 ~20줄 |
-| **C** | **slack threshold** | `t_last − t_second ≥ Δ`일 때만 전파. tie(slack ≤ 2)가 25~27%인데 그건 누가 critical인지 정해지지 않은 경우 | slack은 이미 계산 중, 코드 몇 줄 |
+| **D** | **더 강한 refresh** (다음 실험) | `zereco_critpath_confirm_bits`(현재 4 = 최대 15)와 `_decay_interval`(현재 100K)이 이미 파라미터. 지금은 멤버 탈퇴에 1.5M retire가 걸려 극도로 끈적하다. confirm 1~2 bit + decay 10K sweep | **코드 0, config만** — 가장 먼저 |
+| **A** | **edge confidence** | entry의 `last_producer_pc`에 2-bit confidence를 붙여 같은 producer가 연속 지목될 때만 증가·바뀌면 리셋, 포화 시에만 전파 | entry당 2 bit, 코드 ~20줄. **모집단이 가장 크다**: producer flip이 멤버 commit의 22.5% |
+| **C** | **slack threshold** | `t_last − t_second ≥ Δ`일 때만 전파 | slack은 이미 계산 중. **다만 모집단이 작다**: tie(slack ≤ 2)는 경쟁 도착이 있는 멤버 op의 28.1%이고, 그 op 자체가 멤버 commit의 18.5%뿐 → **상한 5.2%**. 누적 효과를 감안하면 실현 효과는 1% 안팎일 것 |
 | **B** | **confirm / executed 비율** | entry에 실행 횟수를 함께 세고 비율이 임계 이상일 때만 멤버 유지. "자주 실행되지만 드물게 critical"한 hot PC를 겨냥. Phase A2에서 confirm **절대값** threshold가 무력했던 이유를 설명 | counter 1개(4~6 bit) |
-| **F** | **전파에도 depth 제한** | 현재 max_depth는 소비만 막고 전파는 계속됨. 전파까지 자르면 테이블 누적 자체가 줄어듦 | 코드 몇 줄 |
 | **E** | **H2P branch별 chain 분리** | entry당 owner 하나 + overwrite라 한 branch 기준으로도 여러 path가 섞임. owner별 분리 | 저장 비용 큼, 후순위 |
 
 ## 4b. 교수님 피드백 (2026-09-09)

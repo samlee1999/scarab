@@ -60,6 +60,17 @@ dynamic producer), ② decode-time → **commit-time** 학습 (on-path만, wrong
   현재 시뮬레이터는 forwarding store의 wake도 LPR 후보로 삼아, store가 마지막 도착이면 store PC로
   전파한다(critical edge의 약 2%). 하드웨어로 옮기려면 LPR 필드가 SQ entry를 가리키고 commit 때
   store PC를 읽는 확장이 필요하다 — 설계 반영 여부는 TODO D-11.
+- **chain의 크기** (`260910_critpath_depth`, brslice_tab 1K, register-only edge). H2P branch가 한 번 commit할 때 함께 commit되는 멤버 명령어 수와, 멤버의 평균 depth:
+
+  | | GAP | SPEC17 | Datacenter | 전체 |
+  |---|---|---|---|---|
+  | 멤버 commit / H2P branch commit (측정) | 6.0 | 12.4 | 13.0 | **8.3** |
+  | 평균 depth (유도, 히스토그램 중앙값) | 3.23 | 5.76 | 6.30 | **4.66** |
+  | 상주 멤버 PC (1K 테이블) | 51 | 722 | 655 | 432 |
+
+  전체 평균으로 **깊이 약 4.7단계, 명령어 약 8.3개**다. 단계당 1.8개꼴이라 대부분 선형이고 가끔 갈라진다(source가 하나뿐인 op이 68%인 것과 정합). suite 편차가 크다 — GAP은 6개/3.2단계로 짧고 Datacenter는 13개/6.3단계로 길다. **C9에서 depth 4가 Datacenter에만 sweet spot이었던 이유가 이것이다: GAP은 자를 꼬리가 없다.**
+  주의: register edge만 따라가므로 memory를 거치는 사슬은 load에서 끊긴다. store edge를 포함하면 chain이 8.9 → 9.5로 약 7% 길어진다(C3). frontier 종료도 있으므로 이 수치는 **실제 dataflow 사슬의 하한**이다.
+
 - **정적 PC 단위 멤버십은 누적된다.** 한 PC의 critical producer는 instance마다 바뀌므로(producer
   flip 약 22%), 시간이 지나면 LPR 규칙도 그 PC의 모든 producer를 방문한다. 그 결과 critical
   규칙과 full-slice 규칙의 멤버 집합이 거의 같아진다(C3). 필터의 단위를 바꾸는 문제는 TODO D-12.
