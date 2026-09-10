@@ -85,6 +85,7 @@
   - SPEC17 격차 15.47 → **13.76%p** (1.7%p만 줄어듦). 전체 격차 4.13 → 1.56%p로 줄지만 대부분 **GAP에서** 나옴(TEA GAP 1.118 → 1.062).
   - 부작용: bfs/259는 bfs weight의 **59.8%**(지배 phase)인데 격차 1.2%p로 최대라 제외됨 → TEA bfs 21.4 → 3.6%. pr은 우리 최고 simpoint가 제외돼 우리 +4.5 → −0.6%.
   - 좁은 변형(TEA가 IPC를 ~2배로 만든 bc/3024 +94%, mcf/25133 +123% 두 개만 제외): SPEC17 격차 14.14%p, 전체 3.49%p.
+  - **SPEC17만 제외 (사용자 확정 변형, 2026-09-10)**: SPEC17 5개 workload에서만 최대 격차 simpoint 1개씩 제외(deepsjeng 7248, leela 163012, mcf 25133, omnetpp 66177, xz 23529), GAP·Datacenter 전부 유지 → 67 → 62. SPEC17 Both crit 1.066 → 1.067, TEA 1.221 → **1.205**, 격차 15.47 → **13.76%p**. GAP·Datacenter 수치는 원본과 동일. 그림 `analysis/cmp62_specdrop_ipc.pdf`(원본 `cmp67_ipc.pdf`와 파일명으로 구분)
   - **결론: 어떤 제외 규칙으로도 SPEC17 격차는 13.8~14.1%p 남는다 — 구조적이다.** 쓸 경우 67 전체 결과와 나란히 민감도 분석으로 제시.
 - 극단 2개(bc/3024, mcf/25133)는 TEA 이득이 branch precomputation에서 오는지, TEA thread의 load가 main thread에 prefetch 효과를 주는 부수 효과인지 확인할 가치가 있다(후자면 논문에서 정당하게 지적 가능).
 
