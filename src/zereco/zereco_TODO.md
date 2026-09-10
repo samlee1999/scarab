@@ -12,7 +12,7 @@
 |---|---|---|---|
 | **D-12** | **가속 대상을 줄이는 방법** | 정적 PC별 멤버십 | 검증 끝: 용량 ✗(C8), depth ✗ 전체 비례 손실(C9), **refresh ✓ 효율 +13%**(C10 — 반복적으로 LPR인 PC만 남겨 critical 규칙을 실제로 선택적으로 만듦). refresh 단독 가속 대상 44.9%로 목표 20~30%엔 부족 → refresh 위에 A(edge confidence)/B(비율) 조합 |
 | **D-10** | partition 예약률 확정 | 25% (88 entry) | C4: 실측 상주 priority op 13.6개 = partition의 15%, fallback 8%, Datacenter만 full cycle 12.5%. 줄일 여지 있음(15~20%) — 축소 시 fallback 증가와 맞바꿈. **사용자 결정** |
-| **D-1** | wrong-path 명령어의 priority | frontend 태깅이 `op->off_path`면 조기 반환 → off-path 멤버는 priority bit 없음 | 하드웨어는 fetch 시점에 on/off-path를 모르므로 wrong-path 멤버도 priority entry를 점유해야 한다. 현재 결과는 그 경쟁이 빠져 **낙관적**(partition 압박 과소평가). `decoupled_frontend.cc` critpath 분기에서 `off_path` 조건 제거 → 낙관 폭 측정(실험 B-5) |
+| **D-1** | **wrong-path 명령어의 priority — 우선순위 상향** | frontend 태깅이 `op->off_path`면 조기 반환 → off-path 멤버는 priority bit 없음 | **filtering 지표를 dispatch 기준으로 바꾸려면 선결 조건.** dispatch된 op의 **62.6%가 off-path**인데 하나도 priority를 못 받는다. 그래서 지금 dispatch 기준 priority 비율은 19.2%(commit 기준 51.2%)로 **착시**이고, filtering은 두 기준이 동일(3.2 vs 3.1%)하다. 하드웨어는 fetch 때 on/off를 모르므로 off-path 멤버도 priority entry를 점유해야 한다. `zereco_critpath_priority_offpath` knob(기본 off로 재현성 유지)으로 구현해 다음 배치에 포함 — 구획 압박·fallback 증가, IPC 소폭 하락 예상 |
 | D-2 | Δ-window (`\|t_last − t_second\| < Δ`면 **양쪽** producer 삽입) | **미구현.** Δ=0이고 `critpath_second_cycle`은 slack 통계에만 쓰인다. wake 훅이 `arrival > last_cycle`(strict)이라 동률이면 먼저 관측된 producer가 LPR로 남는다 | 필터링을 강화하려는 지금 방향과 **반대**(멤버가 늘어난다). 정확도(critical을 놓치지 않는 것)를 보려면 유효하나 후순위. 대상 모집단은 멤버 commit의 5.2%로 작다 |
 | D-4 | depth 제한 | 파라미터 존재, C9에서 sweep 완료 | **부분 채택 후보**: Datacenter/SPEC17에는 depth 4가 유리, GAP에는 불리. 워크로드 무관 단일 값은 없음. 최종 구성에서 depth 4를 기본으로 할지 사용자 결정 |
 | D-5 | owner 충돌 | 단일 owner pointer, overwrite | 2-slot 승격 여부. 후순위 |
@@ -78,10 +78,15 @@
 1. **SPEC17에서 TEA와의 IPC 격차**(TEA +22% vs both/crit +6.6%, 특히 leela/mcf/omnetpp/xz)를 줄일 것.
 2. **criticality-aware라 부르려면 critical op 필터링이 실제로 보여야** — 지금은 full slice 대비 6%도 못 거름. 20% 내외를 목표로. → 먼저 TL 실험으로 누적 양상 확인 후 D-12 선택.
 
-## 4c. 데이터 품질 (2026-09-10 발견)
+## 4c. 데이터 품질 · 표본 민감도 (2026-09-10)
 
-- **deepsjeng 133677, 164928은 퇴화한 trace다.** 352 머신 IPC 0.973 / GC186 1.000으로 고정, H2P misprediction 0, uop/instruction이 정확히 4.0(정상 1.2), chain 멤버 0. 두 파일 크기도 거의 같다(141,775,971 / 141,776,125 bytes). **67 표본에는 포함되지 않아 현재 결과에는 영향 없음.** 108 표본으로 돌아갈 경우 결과와 무관한 기준(분기 활동 0 / IPC 고정)으로 제외하고 methodology에 명시.
-- TEA와의 격차가 큰 simpoint를 결과를 보고 제외하는 것은 **하지 않는다**(선택적 보고). 격차는 SPEC17 전반에 퍼져 있어 효과도 없다 — 어떤 workload를 빼도 suite 격차 14~17%p 유지.
+- **deepsjeng 133677, 164928은 퇴화한 trace다.** 352 머신 IPC 0.973 / GC186 1.000으로 고정, H2P misprediction 0, uop/instruction이 정확히 4.0(정상 1.2), chain 멤버 0. 67 표본에는 없어 현재 결과에 영향 없음. 108로 돌아갈 경우 결과와 무관한 기준(분기 활동 0 / IPC 고정)으로 제외하고 명시.
+- **TEA 격차 기준 제외 민감도** (`260908_critpath_comparison/analysis/drop_maxgap.py`, 사용자 요청으로 수행): workload마다 TEA − Both crit 격차가 가장 큰 simpoint 1개씩 제외(67 → 53).
+  - SPEC17 격차 15.47 → **13.76%p** (1.7%p만 줄어듦). 전체 격차 4.13 → 1.56%p로 줄지만 대부분 **GAP에서** 나옴(TEA GAP 1.118 → 1.062).
+  - 부작용: bfs/259는 bfs weight의 **59.8%**(지배 phase)인데 격차 1.2%p로 최대라 제외됨 → TEA bfs 21.4 → 3.6%. pr은 우리 최고 simpoint가 제외돼 우리 +4.5 → −0.6%.
+  - 좁은 변형(TEA가 IPC를 ~2배로 만든 bc/3024 +94%, mcf/25133 +123% 두 개만 제외): SPEC17 격차 14.14%p, 전체 3.49%p.
+  - **결론: 어떤 제외 규칙으로도 SPEC17 격차는 13.8~14.1%p 남는다 — 구조적이다.** 쓸 경우 67 전체 결과와 나란히 민감도 분석으로 제시.
+- 극단 2개(bc/3024, mcf/25133)는 TEA 이득이 branch precomputation에서 오는지, TEA thread의 load가 main thread에 prefetch 효과를 주는 부수 효과인지 확인할 가치가 있다(후자면 논문에서 정당하게 지적 가능).
 
 ## 5. 논문 서술 시 유의
 
