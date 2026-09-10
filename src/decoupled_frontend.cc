@@ -388,10 +388,13 @@ void Decoupled_FE::apply_main_chain_block_tag(Op* op) {
      split coverage by whether the load sits in an H2P slice, which needs the
      chain_bit even when no priority policy is running.  Tagging attaches bits
      and fires counters and nothing else, so this stays timing-neutral. */
+  /* A wrong-path op is tagged only when it should compete for priority the way
+     it would in hardware (see zereco_critpath_priority_offpath). */
+  Flag tag_offpath = ZERECO_CRITPATH_PRIORITY && ZERECO_CRITPATH_PRIORITY_OFFPATH;
   if ((!H2P_CHAIN_PERFECT_LOAD && !H2P_CHAIN_LOAD_PROFILE &&
        !H2P_CHAIN_LOAD_RAW_STREAM_DUMP && !ZERECO_IQ_PRIORITY_POLICY &&
        !ZERECO_CRITPATH_PRIORITY && !RFP_ENABLE) ||
-      op->thread_id != 0 || op->off_path || !op->inst_info ||
+      op->thread_id != 0 || (op->off_path && !tag_offpath) || !op->inst_info ||
       !op->table_info) {
     reset_main_chain_block_tracking();
     return;
@@ -407,14 +410,23 @@ void Decoupled_FE::apply_main_chain_block_tag(Op* op) {
        Loads, so the RFP counters that split coverage by slice membership use the
        same slice definition that did the selecting.  The priority bit is granted
        only when priority is actually enabled. */
-    op->chain_bit = member;
+    /* chain_bit feeds on-path RFP/dcache statistics only; leave it off for a
+       wrong-path op so the off-path knob changes the priority bit and nothing
+       else. */
+    op->chain_bit = member && !op->off_path;
     if (ZERECO_CRITPATH_PRIORITY) {
       op->zereco_iq_priority_bit = member;
       op->zereco_iq_priority_candidate_bit = member;
-      STAT_EVENT(proc_id, ZERECO_IQ_MAIN_ONPATH_OPS);
-      if (member) {
-        STAT_EVENT(proc_id, ZERECO_IQ_PRIORITY_MARKED_OPS);
-        STAT_EVENT(proc_id, ZERECO_IQ_PRIORITY_MARKED_PORTION);
+      if (op->off_path) {
+        STAT_EVENT(proc_id, ZERECO_IQ_MAIN_OFFPATH_OPS);
+        if (member)
+          STAT_EVENT(proc_id, ZERECO_IQ_PRIORITY_MARKED_OFFPATH_OPS);
+      } else {
+        STAT_EVENT(proc_id, ZERECO_IQ_MAIN_ONPATH_OPS);
+        if (member) {
+          STAT_EVENT(proc_id, ZERECO_IQ_PRIORITY_MARKED_OPS);
+          STAT_EVENT(proc_id, ZERECO_IQ_PRIORITY_MARKED_PORTION);
+        }
       }
     }
     reset_main_chain_block_tracking();

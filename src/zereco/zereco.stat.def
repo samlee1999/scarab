@@ -452,3 +452,11 @@ DEF_STAT(RFP_FWD_ABSTAIN_STORE_NOT_DONE, COUNT, NO_RATIO)/* mode 2 only */
    store->load forwarding edges (zereco_critpath_mem_edge 1). */
 DEF_STAT(CRITPATH_SLICE_OPS_STORE, COUNT, NO_RATIO)
 
+/* ---- wrong-path priority (zereco_critpath_priority_offpath, 2026-09-10) ---- */
+DEF_STAT(ZERECO_IQ_MAIN_OFFPATH_OPS, COUNT, NO_RATIO)                    /* off-path ops that reached frontend tagging */
+DEF_STAT(ZERECO_IQ_PRIORITY_MARKED_OFFPATH_OPS, COUNT, NO_RATIO)         /* of those, brslice_tab members (priority bit set) */
+DEF_STAT(ZERECO_PIQ_DISPATCHED_OFFPATH_OPS, COUNT, NO_RATIO)             /* every off-path op dispatched to an RS */
+DEF_STAT(ZERECO_PIQ_PRIORITY_ADMISSION_CANDIDATE_OFFPATH_OPS, COUNT, NO_RATIO) /* off-path ops that asked for a priority entry */
+DEF_STAT(ZERECO_PIQ_PRIORITY_DISPATCHED_OFFPATH_OPS, COUNT, NO_RATIO)    /* off-path ops that took a priority entry */
+DEF_STAT(ZERECO_PIQ_PRIORITY_TO_NORMAL_FALLBACK_OFFPATH_OPS, COUNT, NO_RATIO)  /* off-path candidates that fell back to normal */
+

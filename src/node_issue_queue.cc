@@ -477,6 +477,9 @@ void node_issue_queue_dispatch() {
         op->zereco_piq_fallback = TRUE;
         STAT_EVENT(node->proc_id,
                    ZERECO_PIQ_PRIORITY_TO_NORMAL_FALLBACK_OPS);
+        if (op->off_path)
+          STAT_EVENT(node->proc_id,
+                     ZERECO_PIQ_PRIORITY_TO_NORMAL_FALLBACK_OFFPATH_OPS);
         STAT_EVENT(node->proc_id,
                    ZERECO_PIQ_PRIORITY_TO_NORMAL_FALLBACK_PCT);
       }
@@ -566,6 +569,17 @@ void node_issue_queue_dispatch() {
       if (priority_admission_candidate)
         STAT_EVENT(node->proc_id,
                    ZERECO_PIQ_PRIORITY_ADMISSION_CANDIDATE_OPS);
+      /* Every dispatched op, split by path, so the priority share can be read
+         against what the scheduler actually receives (on + off path). */
+      if (op->off_path) {
+        STAT_EVENT(node->proc_id, ZERECO_PIQ_DISPATCHED_OFFPATH_OPS);
+        if (priority_admission_candidate)
+          STAT_EVENT(node->proc_id,
+                     ZERECO_PIQ_PRIORITY_ADMISSION_CANDIDATE_OFFPATH_OPS);
+        if (op->zereco_piq_entry)
+          STAT_EVENT(node->proc_id,
+                     ZERECO_PIQ_PRIORITY_DISPATCHED_OFFPATH_OPS);
+      }
       if (op->zereco_piq_entry) {
         rs->zereco_priority_op_count++;
         STAT_EVENT(node->proc_id, ZERECO_PIQ_PRIORITY_DISPATCHED_OPS);

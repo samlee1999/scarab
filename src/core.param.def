@@ -508,6 +508,14 @@ DEF_PARAM(rfp_target_critpath, RFP_TARGET_CRITPATH, Flag, Flag, FALSE, )
    Depth was the one lever in Phase A2 that moved the population, so it is a
    knob rather than a constant -- but the first runs leave it open. */
 DEF_PARAM(zereco_critpath_priority_max_depth, ZERECO_CRITPATH_PRIORITY_MAX_DEPTH, uns, uns, 0, )
+/* The frontend cannot tell a wrong-path instruction from a correct-path one --
+   that is only known when the mispredicted branch resolves -- so in hardware a
+   wrong-path op whose PC is a chain member still gets the priority bit, takes a
+   priority RS entry and competes at select until the flush frees it.  FALSE
+   keeps the simulator's oracle shortcut (off-path ops never tagged), which is
+   what every result before 2026-09-10 used.  Learning is unaffected either way:
+   brslice_tab is written at commit, which only on-path ops reach. */
+DEF_PARAM(zereco_critpath_priority_offpath, ZERECO_CRITPATH_PRIORITY_OFFPATH, Flag, Flag, FALSE, )
 /* [EXPERIMENT: ZERECO TIMED RFP] Register File Prefetching (ISCA'22) with real
    launch timing, L1 bandwidth contention, and finite predictor storage.  Unlike
    the h2p_chain_perfect_load oracle -- which predicts and validates in the same
