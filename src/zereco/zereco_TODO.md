@@ -10,7 +10,7 @@
 
 | # | 항목 | 현재 코드 | 상태 · 결정 |
 |---|---|---|---|
-| **D-12** | **가속 대상을 줄이는 방법** | 정적 PC별 멤버십 | 검증 끝: **용량은 답이 아님**(C8), **depth는 전체로는 비례 손실**이나 **코드가 큰 워크로드에서는 depth 4가 sweet spot**(C9 — Datacenter 인구 54%/이득 85%). 남은 축은 §4a의 여섯 방향. 필요한 성질이 분명해졌다: **평균보다 기여가 낮은 op를 골라내는** 필터여야 한다. depth는 그렇지 않았다(깊은 노드도 직렬 chain이라 동등 기여). A/B/D가 그 성질을 가질 후보 |
+| **D-12** | **가속 대상을 줄이는 방법** | 정적 PC별 멤버십 | 검증 끝: 용량 ✗(C8), depth ✗ 전체 비례 손실(C9), **refresh ✓ 효율 +13%**(C10 — 반복적으로 LPR인 PC만 남겨 critical 규칙을 실제로 선택적으로 만듦). refresh 단독 가속 대상 44.9%로 목표 20~30%엔 부족 → refresh 위에 A(edge confidence)/B(비율) 조합 |
 | **D-10** | partition 예약률 확정 | 25% (88 entry) | C4: 실측 상주 priority op 13.6개 = partition의 15%, fallback 8%, Datacenter만 full cycle 12.5%. 줄일 여지 있음(15~20%) — 축소 시 fallback 증가와 맞바꿈. **사용자 결정** |
 | **D-1** | wrong-path 명령어의 priority | frontend 태깅이 `op->off_path`면 조기 반환 → off-path 멤버는 priority bit 없음 | 하드웨어는 fetch 시점에 on/off-path를 모르므로 wrong-path 멤버도 priority entry를 점유해야 한다. 현재 결과는 그 경쟁이 빠져 **낙관적**(partition 압박 과소평가). `decoupled_frontend.cc` critpath 분기에서 `off_path` 조건 제거 → 낙관 폭 측정(실험 B-5) |
 | D-2 | Δ-window (`\|t_last − t_second\| < Δ`면 **양쪽** producer 삽입) | **미구현.** Δ=0이고 `critpath_second_cycle`은 slack 통계에만 쓰인다. wake 훅이 `arrival > last_cycle`(strict)이라 동률이면 먼저 관측된 producer가 LPR로 남는다 | 필터링을 강화하려는 지금 방향과 **반대**(멤버가 늘어난다). 정확도(critical을 놓치지 않는 것)를 보려면 유효하나 후순위. 대상 모집단은 멤버 commit의 5.2%로 작다 |
@@ -66,7 +66,7 @@
 
 | # | 방향 | 내용 | 비용 |
 |---|---|---|---|
-| **D** | **더 강한 refresh** — **실행 중** (`260910_critpath_refresh`) | confirm_bits × decay_interval, {critical, full}. 멤버 수명 = interval × 2^bits: 기준 1.6M(재사용) / 400K / 200K / 160K / 40K / 20K. 예측: 재확인 횟수가 실행 빈도에 비례해 hot PC는 살아남으므로 효과가 작을 수 있음 — 작게 나오면 B가 필요한 근거 | 코드 0, 10 config × 67 |
+| **D** | **더 강한 refresh** — **완료** → DESIGN.md C10 | **처음으로 효율을 올린 knob**: 1b/10K에서 가속 대상 51.2 → 44.9%, IPC −0.06%p, 효율 +13%, 필터링 3.1 → 6.8%(SPEC17 10.8%). 아직 포화 안 함 → 더 공격적인 점(decay 5K/2K, 1bit) 추가 필요 | **다음 배치 기본값을 1b/10K로** 두고 그 위에 A/B/C·D-2를 얹는 것을 권고 — 사용자 확인 |
 | **A** | **edge confidence** | entry의 `last_producer_pc`에 2-bit confidence를 붙여 같은 producer가 연속 지목될 때만 증가·바뀌면 리셋, 포화 시에만 전파 | entry당 2 bit, 코드 ~20줄. **모집단이 가장 크다**: producer flip이 멤버 commit의 22.5% |
 | **C / D-2** | **tie 정책 (한 knob으로 묶어 함께 실험)** | slack < Δ인 tie에서 0 = 현재(먼저 관측된 쪽) / 1 = **양쪽 삽입(D-2)** / 2 = **둘 다 제외(C)**. wake 훅에서 runner-up producer PC도 기록 필요 | LPR 하나를 가속한 이득은 slack에 묶이므로 tie에서 현재 정책은 이미 거의 0을 얻는다 → **C = 거의 공짜 필터링, D-2 = 성능 향상 후보**. 모집단 멤버 commit의 5.2%. `zereco_critpath_tie_policy` + `_tie_window`, ~20줄 |
 | **B** | **confirm / executed 비율** | entry에 실행 횟수를 함께 세고 비율이 임계 이상일 때만 멤버 유지. "자주 실행되지만 드물게 critical"한 hot PC를 겨냥. Phase A2에서 confirm **절대값** threshold가 무력했던 이유를 설명 | counter 1개(4~6 bit) |
@@ -77,6 +77,11 @@
 
 1. **SPEC17에서 TEA와의 IPC 격차**(TEA +22% vs both/crit +6.6%, 특히 leela/mcf/omnetpp/xz)를 줄일 것.
 2. **criticality-aware라 부르려면 critical op 필터링이 실제로 보여야** — 지금은 full slice 대비 6%도 못 거름. 20% 내외를 목표로. → 먼저 TL 실험으로 누적 양상 확인 후 D-12 선택.
+
+## 4c. 데이터 품질 (2026-09-10 발견)
+
+- **deepsjeng 133677, 164928은 퇴화한 trace다.** 352 머신 IPC 0.973 / GC186 1.000으로 고정, H2P misprediction 0, uop/instruction이 정확히 4.0(정상 1.2), chain 멤버 0. 두 파일 크기도 거의 같다(141,775,971 / 141,776,125 bytes). **67 표본에는 포함되지 않아 현재 결과에는 영향 없음.** 108 표본으로 돌아갈 경우 결과와 무관한 기준(분기 활동 0 / IPC 고정)으로 제외하고 methodology에 명시.
+- TEA와의 격차가 큰 simpoint를 결과를 보고 제외하는 것은 **하지 않는다**(선택적 보고). 격차는 SPEC17 전반에 퍼져 있어 효과도 없다 — 어떤 workload를 빼도 suite 격차 14~17%p 유지.
 
 ## 5. 논문 서술 시 유의
 

@@ -303,3 +303,23 @@ brslice_tab 1K entry 고정, register-only edge, P-IQ 25%, RFP PT 1K + store for
 - 원인은 dependency wait에 있다: 감소폭이 −18.9%(∞) → −13.4%(d4) → −6.5%(d2) → −0.8%(d1)로 무너진다. depth 제한은 **상류 chain을 자르는데, dependency wait을 만드는 것이 바로 그 상류**다. 반면 scheduler wait 감소는 −89 → −95%로 오히려 좋아진다(가속 대상이 줄어 구획 경쟁이 완화).
 - 손실의 주 성분은 RFP다: Target Load/loads 62.3 → 45.8(d4) → 31.6%(d2), useful/load 25.9 → 16.3 → 10.9%. **Target Load는 chain 깊은 곳에 산다.**
 - **depth 제한은 critical vs full 필터링을 개선하지 못한다**: 상대 필터링 3.1%(∞) → 8.0%(d8) → 4.9%(d4) → 1.7%(d2). 목표 구간에서 오히려 나빠진다. 참고로 full 규칙은 여러 경로가 닿아 depth를 최소값으로 받으므로 chain이 얕게 기록되고, 그래서 d8에서 full이 거의 손실이 없다(GAP full d8 = ∞와 동일).
+
+### C10. 더 강한 refresh (`260910_critpath_refresh`, confirm_bits × decay_interval, {critical, full})
+
+brslice_tab 1K, register-only edge, depth 무제한. 멤버 수명(재확인 없이 버티는 retire 수) = interval × 2^bits. 기준점 4b/100K는 C9의 `*_inf`를 재사용(같은 바이너리).
+스크립트 `analysis/analyze_refresh.py` → `refresh_results.txt`, 그림 `analysis/refresh_vs_depth.pdf`.
+
+| 수명 | 1.6M (기준) | 400K | 200K | 160K | 40K | **20K** |
+|---|---|---|---|---|---|---|
+| (confirm bits / decay) | 4 / 100K | 2 / 100K | 1 / 100K | 4 / 10K | 2 / 10K | **1 / 10K** |
+| IPC (critical) | +9.73% | +9.70% | +9.71% | +9.72% | +9.66% | **+9.67%** |
+| 가속 대상 (critical) | 51.2% | 49.9% | 49.2% | 48.5% | 46.7% | **44.9%** |
+| 효율 (IPC 이득 ÷ 가속%) | 0.190 | 0.195 | 0.197 | 0.200 | 0.207 | **0.215** |
+| critical vs full 필터링 | 3.1% | 4.1% | 4.6% | 5.5% | 6.9% | **6.8%** |
+| 상주 멤버 PC (crit / full) | 432 / 458 | 399 / 430 | 356 / 394 | 304 / 350 | 232 / 286 | **169 / 218** |
+
+- **처음으로 효율을 올린 knob이다.** 가속 대상을 51.2 → 44.9%로 6.3%p 줄이는 동안 IPC는 −0.06%p뿐, 효율이 0.190 → 0.215(+13%)로 단조 증가한다. depth(C9, 효율 평평)·용량(C8, 효과 없음)과 달리 **평균보다 기여가 낮은 멤버를 골라낸다**. 그림에서 depth는 비례선을 따라 대각선으로 내려가고 refresh는 거의 **수평으로 왼쪽**으로 이동한다.
+- **critical vs full 필터링이 두 배가 된다**(3.1 → 6.8%). SPEC17 3.2 → **10.8%**, Datacenter 4.4 → **11.1%**(2b/10K). 상주 PC 격차도 6% → 22%로 벌어진다.
+- **왜 refresh가 critical 규칙을 선택적으로 만드나.** 멤버는 consumer가 자기를 LPR producer로 지목할 때마다 재확인된다. full 규칙은 모든 producer를 매 instance 재확인하지만, critical 규칙은 **실제로 마지막에 도착한 producer만** 재확인한다. 수명이 짧으면 "한 번 LPR이었던" PC는 떨어지고 "계속 LPR인" PC만 남는다 — 누적(합집합)이 아니라 **반복성**이 멤버 조건이 된다. refresh가 없으면(수명 1.6M) 한 번 지목된 PC가 사실상 영구 멤버라 critical이 full로 수렴했던 것이다.
+- 탈퇴 경로가 바뀐다: 기준에서는 LRU 축출 1.44M vs decay 탈퇴 23K였지만, 1b/10K에서는 decay 탈퇴 897K가 LRU 304K를 앞선다. H2P latency(f→r −17.4 → −17.3%, dep −18.9 → −18.8%)와 RFP(useful/load 25.9 → 25.3%)는 거의 불변.
+- **아직 포화하지 않았다.** 효율이 가장 공격적인 1b/10K에서도 계속 오른다. 다만 가속 대상 44.9%는 목표 20~30%와 거리가 있어 refresh 단독으로는 부족하다 — A/B와의 조합이 필요하다.
