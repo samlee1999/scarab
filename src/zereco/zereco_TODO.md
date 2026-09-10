@@ -77,9 +77,11 @@
 
 knob은 전부 기본 0(off)이고 off일 때 타이밍이 기존과 동일(새 필드 쓰기만). A·C는 critical 규칙의 전파만 막고, B는 decay sweep에서 멤버를 뺀다. **E(H2P branch별 chain 분리)는 저장 비용 때문에 보류, F는 제외, D-2(tie → 양쪽 삽입)는 성능 향상 후보로 남겨 둠.**
 
-**2단계 (다음)**: base = off-path 켬 + 1b/10K + 테이블 1K + register-only + depth ∞ + P-IQ 25%. 그 위에 crit_A3 / crit_B25 / crit_B50 / crit_C3, 비교 대상 full_base(이미 측정됨, 재사용 가능).
+**2단계 `260911_critpath_filter_abc` (실행 대기)**: 사용자 결정(2026-09-11)으로 **탐색 단계는 oracle(off-path 0)** 유지 — C1~C10과 연속, 비교 기준 재사용. base = off-path 0 + confirm 1 bit / decay 10K + 테이블 1K + register-only + depth ∞ + P-IQ 25%. crit_A3 / B25 / B50 / C3 + 정합성 crit_ref20k. 비교 대상 `260910_critpath_refresh/{crit,full}_1b_10k` 재사용.
 
-**새 후보 G — H2P 그림자 priority 차단** (C11에서 발견): priority 자격 dispatch의 **67.8%가 wrong-path**. 하드웨어가 알 수 있는 신호로 이를 줄일 수 있다 — 아직 resolve되지 않은 H2P branch(HBT가 표시) 뒤에서 fetch된 op는 wrong-path일 확률이 높으므로 priority bit를 주지 않는다. 대가는 그 branch가 맞게 예측된 경우의 on-path op도 priority를 잃는 것. A/B/C보다 줄일 수 있는 양이 훨씬 크다(상한: dispatch 기준 priority 비율 55% → 18%). 구현은 frontend에서 "in-flight 미해결 H2P branch 수" 카운터 하나.
+**최종 평가 시 주의**: oracle은 하드웨어가 모르는 on/off-path 정보를 쓰므로 IPC를 0.85%p 낙관한다(C11). TEA 비교 수치는 off-path 켬으로 내거나, oracle에 가까운 효과를 내는 현실적 메커니즘(G)과 함께 제시해야 한다. 또 dispatch 기준 지표를 택한 근거("하드웨어는 on/off를 구분 못 한다")와 oracle 가정이 서로 맞지 않으므로, 논문에서는 둘 중 하나로 정리 필요.
+
+**새 후보 G — H2P 그림자 priority 차단** (C11에서 발견, **A/B/C 이후 방향이 없으면 시험** — 사용자 결정): priority 자격 dispatch의 **67.8%가 wrong-path**. 하드웨어가 알 수 있는 신호로 이를 줄일 수 있다 — 아직 resolve되지 않은 H2P branch(HBT가 표시) 뒤에서 fetch된 op는 wrong-path일 확률이 높으므로 priority bit를 주지 않는다. 대가는 그 branch가 맞게 예측된 경우의 on-path op도 priority를 잃는 것. A/B/C보다 줄일 수 있는 양이 훨씬 크다(상한: dispatch 기준 priority 비율 55% → 18%). 구현은 frontend에서 "in-flight 미해결 H2P branch 수" 카운터 하나.
 
 ## 4b. 교수님 피드백 (2026-09-09)
 
