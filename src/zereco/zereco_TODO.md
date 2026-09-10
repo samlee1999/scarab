@@ -10,11 +10,11 @@
 
 | # | 항목 | 현재 코드 | 상태 · 결정 |
 |---|---|---|---|
-| **D-12** | **가속 대상을 줄이는 방법** | 정적 PC별 멤버십, depth 무제한 | 문제는 "full 대비 몇 % 필터링"이 아니라 **커밋 op의 55~61%가 priority를 받는다**는 것(C3). 검증 끝난 것: **용량은 답이 아니다**(C8 — 상주 PC를 4배 줄여도 가속 op는 55 → 47%). 남은 후보: (a) **depth 제한**(B-3, 멤버 commit의 48.8%가 depth ≤ 2이므로 depth 2면 약 30% 예상), (b) **confirm/executed 비율 필터** — entry에 실행 횟수를 함께 세어 "자주 실행되지만 드물게 critical"한 hot PC를 겨냥. cold/hot 비대칭을 정면으로 치는 유일한 안, (c) instance 단위 priority |
+| **D-12** | **가속 대상을 줄이는 방법** | 정적 PC별 멤버십 | 검증 끝: **용량은 답이 아님**(C8), **depth는 전체로는 비례 손실**이나 **코드가 큰 워크로드에서는 depth 4가 sweet spot**(C9 — Datacenter 인구 54%/이득 85%). 남은 축은 §4a의 여섯 방향. 필요한 성질이 분명해졌다: **평균보다 기여가 낮은 op를 골라내는** 필터여야 한다. depth는 그렇지 않았다(깊은 노드도 직렬 chain이라 동등 기여). A/B/D가 그 성질을 가질 후보 |
 | **D-10** | partition 예약률 확정 | 25% (88 entry) | C4: 실측 상주 priority op 13.6개 = partition의 15%, fallback 8%, Datacenter만 full cycle 12.5%. 줄일 여지 있음(15~20%) — 축소 시 fallback 증가와 맞바꿈. **사용자 결정** |
 | **D-1** | wrong-path 명령어의 priority | frontend 태깅이 `op->off_path`면 조기 반환 → off-path 멤버는 priority bit 없음 | 하드웨어는 fetch 시점에 on/off-path를 모르므로 wrong-path 멤버도 priority entry를 점유해야 한다. 현재 결과는 그 경쟁이 빠져 **낙관적**(partition 압박 과소평가). `decoupled_frontend.cc` critpath 분기에서 `off_path` 조건 제거 → 낙관 폭 측정(실험 B-5) |
 | D-2 | Δ-window (`\|t_last − t_second\| < Δ`면 양쪽 producer 삽입) | Δ=0 | 원안 유지. 후순위 |
-| D-4 | depth 제한 | 파라미터 존재(`zereco_critpath_priority_max_depth` 0 = 무제한), config sweep만 하면 됨 | 가속 대상을 줄이는 최유력 지렛대 → B-3 |
+| D-4 | depth 제한 | 파라미터 존재, C9에서 sweep 완료 | **부분 채택 후보**: Datacenter/SPEC17에는 depth 4가 유리, GAP에는 불리. 워크로드 무관 단일 값은 없음. 최종 구성에서 depth 4를 기본으로 할지 사용자 결정 |
 | D-5 | owner 충돌 | 단일 owner pointer, overwrite | 2-slot 승격 여부. 후순위 |
 | D-6 | brslice_tab 하드웨어 예산 | **1K entry (128 set × 8-way) 확정** — 2026-09-10 사용자 결정, 이후 모든 실험 고정 | C8: 32K 대비 −0.1%p, 512 entry −0.2%p. PUBS 예산과 동일 |
 
@@ -53,7 +53,7 @@
 | **ES** | edge 집합 통일 비교 (`260909_critpath_timeline`, 4 config) | **완료** → DESIGN.md C3·C7 |
 | **TL** | 멤버십 누적 타임라인 (`260909_critpath_timeline`) | **완료** → DESIGN.md C7 |
 | **TAB** | brslice_tab 용량 sweep (`260909_critpath_brslice_tab_size`, 10 config) | **완료** → DESIGN.md C8. 용량은 두 규칙을 가르는 축이 아님(격차 0.17 → 0.20%p). 대신 1K entry면 충분하다는 비용 결과 확보 |
-| **B-3** | **depth 제한 sweep** (`260910_critpath_depth`): `zereco_critpath_priority_max_depth` ∞/8/4/2/1 × {critical, full}, brslice_tab **1K entry 고정**(앞으로 계속 1K) | **실행 대기(사용자)**, 코드 변경 없음. 예측 가속 대상: depth 1 ~19%, 2 ~29%, 4 ~41%, 8 ~50%. 정합성 확인: crit_inf/full_inf는 `260909_critpath_brslice_tab_size`의 crit_1k/full_1k와 일치해야 함 |
+| **B-3** | depth 제한 sweep (`260910_critpath_depth`) | **완료** → DESIGN.md C9. 가속 대상은 목표 구간(d2 = 25%)에 들어가나 이득도 절반으로 감소. **단 Datacenter는 depth 4에서 인구 54%로 이득 85% 유지**(효율 1.58배), SPEC17 1.30배, GAP 없음. depth 제한은 critical vs full 필터링은 개선 못 함 |
 | **B-5** | D-1 수정 후 재측정 (wrong-path priority) — 낙관 폭 보고용 | 대기 |
 | — | partition 15/20% 재확인 — D-10 | 사용자 결정 후 |
 | — | Golden Cove 186 머신 sweep (`zereco_dbg_gc186_sweep.json`) | 보류 |

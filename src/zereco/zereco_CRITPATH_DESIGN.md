@@ -261,3 +261,34 @@ register-only edge, 멤버 전용 할당, P-IQ 25%, RFP PT 1K + store forwarding
 - **용량 압박이 chain을 얕게 만드는 효과는 약하다.** chain size 8.9 → 7.7, depth ≤ 2 비중 48.8 → 51.0%. 전파가 끊겨 depth 제한처럼 작동하는 효과는 있으나 2%p 수준이다.
 - filtering은 압박이 커질수록 6.1 → 7.8%로 조금 오르지만 20%와는 거리가 멀다. H2P latency(−17.5 → −17.2%), RFP useful/load(26.1 → 25.7%)도 거의 불변.
 - **다음 지렛대는 depth다.** 멤버 commit의 **48.8%가 depth ≤ 2**이므로 `zereco_critpath_priority_max_depth 2`는 가속 대상을 절반으로 잘라 멤버 비율 약 30%를 만든다(유도값). 목표 구간 20~30%대에 직접 닿는 유일한 knob이다 → 실험 B-3.
+
+### C9. chain depth 제한 sweep (`260910_critpath_depth`, `zereco_critpath_priority_max_depth` ∞/8/4/2/1 × {critical, full})
+
+brslice_tab 1K entry 고정, register-only edge, P-IQ 25%, RFP PT 1K + store forwarding. `max_depth`는 **소비만** 막는다(frontend priority bit, Target Load 지명). 전파는 chain 전체를 계속 걷는다.
+정합성 확인: `crit_inf`/`full_inf`가 C8의 `crit_1k`/`full_1k`와 simpoint별 IPC **완전 일치**(Δ = 0). 스크립트 `analysis/analyze_depth.py`, 그림 `analysis/depth_tradeoff.pdf`.
+
+**가속 대상은 목표 구간에 들어간다 — 하지만 이득도 같은 비율로 사라진다.**
+
+| max_depth | ∞ | 8 | 4 | 2 | 1 |
+|---|---|---|---|---|---|
+| 가속 대상 (critical) | 51.2% | 42.8% | 35.3% | **25.2%** | 15.5% |
+| IPC 이득 (critical) | +9.73% | +8.37% | +7.13% | **+4.92%** | +2.97% |
+| 인구 잔존 / 이득 잔존 | 100 / 100% | 84 / 86% | 69 / 73% | **49 / 51%** | 30 / 31% |
+
+전체로는 **인구 잔존율과 이득 잔존율이 거의 같다** — 효율(이득 ÷ 인구)이 0.190 → 0.202 → 0.195로 평평하다. depth로 인구를 절반 줄이면 이득도 절반 사라진다.
+
+**그런데 suite별로 보면 코드가 큰 워크로드에는 sweet spot이 있다.**
+
+| | GAP | SPEC17 | Datacenter |
+|---|---|---|---|
+| ∞ 효율 (IPC 이득 ÷ 가속 대상%) | 0.234 | 0.114 | 0.249 |
+| depth 4 효율 | 0.196 | 0.148 | **0.393** |
+| depth 4에서 인구 잔존 / 이득 잔존 | 81 / 68% | 60 / 78% | **54 / 85%** |
+| depth 4의 가속 대상 | 47.8% | 33.3% | **16.4%** |
+
+- **Datacenter는 depth 4에서 인구를 절반으로 줄이고 이득의 85%를 유지**한다(효율 1.58배). 가속 대상 16.4%로 목표 구간 아래이면서 이득 +6.45%. SPEC17도 1.30배로 완만한 sweet spot(depth 4, 가속 33.3%, 이득 78% 유지).
+- **GAP은 sweet spot이 없다**(효율 0.234 → 0.196). 작은 커널이라 chain이 짧고 깊은 노드도 똑같이 기여한다.
+- **depth 2 아래로는 어디서나 무너진다.** Datacenter 효율이 0.393(d4) → 0.200(d2)으로 ∞보다도 나빠진다. 경계는 depth 4와 2 사이다.
+- 원인은 dependency wait에 있다: 감소폭이 −18.9%(∞) → −13.4%(d4) → −6.5%(d2) → −0.8%(d1)로 무너진다. depth 제한은 **상류 chain을 자르는데, dependency wait을 만드는 것이 바로 그 상류**다. 반면 scheduler wait 감소는 −89 → −95%로 오히려 좋아진다(가속 대상이 줄어 구획 경쟁이 완화).
+- 손실의 주 성분은 RFP다: Target Load/loads 62.3 → 45.8(d4) → 31.6%(d2), useful/load 25.9 → 16.3 → 10.9%. **Target Load는 chain 깊은 곳에 산다.**
+- **depth 제한은 critical vs full 필터링을 개선하지 못한다**: 상대 필터링 3.1%(∞) → 8.0%(d8) → 4.9%(d4) → 1.7%(d2). 목표 구간에서 오히려 나빠진다. 참고로 full 규칙은 여러 경로가 닿아 depth를 최소값으로 받으므로 chain이 얕게 기록되고, 그래서 d8에서 full이 거의 손실이 없다(GAP full d8 = ∞와 동일).
