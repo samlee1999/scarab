@@ -66,10 +66,11 @@
 
 | # | 방향 | 내용 | 비용 |
 |---|---|---|---|
-| **D** | **더 강한 refresh** (다음 실험) | `zereco_critpath_confirm_bits`(현재 4 = 최대 15)와 `_decay_interval`(현재 100K)이 이미 파라미터. 지금은 멤버 탈퇴에 1.5M retire가 걸려 극도로 끈적하다. confirm 1~2 bit + decay 10K sweep | **코드 0, config만** — 가장 먼저 |
+| **D** | **더 강한 refresh** — **실행 중** (`260910_critpath_refresh`) | confirm_bits × decay_interval, {critical, full}. 멤버 수명 = interval × 2^bits: 기준 1.6M(재사용) / 400K / 200K / 160K / 40K / 20K. 예측: 재확인 횟수가 실행 빈도에 비례해 hot PC는 살아남으므로 효과가 작을 수 있음 — 작게 나오면 B가 필요한 근거 | 코드 0, 10 config × 67 |
 | **A** | **edge confidence** | entry의 `last_producer_pc`에 2-bit confidence를 붙여 같은 producer가 연속 지목될 때만 증가·바뀌면 리셋, 포화 시에만 전파 | entry당 2 bit, 코드 ~20줄. **모집단이 가장 크다**: producer flip이 멤버 commit의 22.5% |
-| **C** | **slack threshold** | `t_last − t_second ≥ Δ`일 때만 전파 | slack은 이미 계산 중. **다만 모집단이 작다**: tie(slack ≤ 2)는 경쟁 도착이 있는 멤버 op의 28.1%이고, 그 op 자체가 멤버 commit의 18.5%뿐 → **상한 5.2%**. 누적 효과를 감안하면 실현 효과는 1% 안팎일 것 |
+| **C / D-2** | **tie 정책 (한 knob으로 묶어 함께 실험)** | slack < Δ인 tie에서 0 = 현재(먼저 관측된 쪽) / 1 = **양쪽 삽입(D-2)** / 2 = **둘 다 제외(C)**. wake 훅에서 runner-up producer PC도 기록 필요 | LPR 하나를 가속한 이득은 slack에 묶이므로 tie에서 현재 정책은 이미 거의 0을 얻는다 → **C = 거의 공짜 필터링, D-2 = 성능 향상 후보**. 모집단 멤버 commit의 5.2%. `zereco_critpath_tie_policy` + `_tie_window`, ~20줄 |
 | **B** | **confirm / executed 비율** | entry에 실행 횟수를 함께 세고 비율이 임계 이상일 때만 멤버 유지. "자주 실행되지만 드물게 critical"한 hot PC를 겨냥. Phase A2에서 confirm **절대값** threshold가 무력했던 이유를 설명 | counter 1개(4~6 bit) |
+| — | **D 다음 배치**: A / B / C·D-2를 각각 기본 off인 독립 knob으로 구현해 한 빌드로. critical 규칙만 돌리고 full은 기준점 재사용 → A 1 + B 2(임계 두 점) + C 1 + D-2 1 = 5 config | D 결과 확인 후 |
 | **E** | **H2P branch별 chain 분리** | entry당 owner 하나 + overwrite라 한 branch 기준으로도 여러 path가 섞임. owner별 분리 | 저장 비용 큼, 후순위 |
 
 ## 4b. 교수님 피드백 (2026-09-09)
