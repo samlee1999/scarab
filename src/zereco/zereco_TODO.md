@@ -12,7 +12,6 @@
 |---|---|---|---|
 | **D-12** | **가속 대상을 줄이는 방법** | 정적 PC별 멤버십 | 검증 끝: 용량 ✗(C8), depth ✗ 전체 비례 손실(C9), **refresh ✓ 효율 +13%**(C10 — 반복적으로 LPR인 PC만 남겨 critical 규칙을 실제로 선택적으로 만듦). refresh 단독 가속 대상 44.9%로 목표 20~30%엔 부족 → refresh 위에 A(edge confidence)/B(비율) 조합 |
 | **D-10** | partition 예약률 확정 | 25% (88 entry) | C4: 실측 상주 priority op 13.6개 = partition의 15%, fallback 8%, Datacenter만 full cycle 12.5%. 줄일 여지 있음(15~20%) — 축소 시 fallback 증가와 맞바꿈. **사용자 결정** |
-| **D-1** | **wrong-path 명령어의 priority** | **knob 구현 완료**: `zereco_critpath_priority_offpath` (기본 0 = 기존 oracle 동작, 1 = off-path 멤버도 priority bit·priority entry·select 우선권). 학습은 그대로 commit·on-path만. flush 시 `flush_window()`가 `zereco_piq_entry` 기준으로 구획 슬롯을 반환하므로 누수 없음(무결성 ASSERT 유지). 새 통계 `ZERECO_IQ_*_OFFPATH_OPS`, `ZERECO_PIQ_*_OFFPATH_OPS` | **실행 대기** (`260910_critpath_offpath`, 5 config × 67): 기본 refresh·1b/10K 각각 {crit, full} + 정합성 확인 1개. 이 결과로 filtering 지표를 dispatch 기준으로 전환 |
 | D-2 | Δ-window (`\|t_last − t_second\| < Δ`면 **양쪽** producer 삽입) | **미구현.** Δ=0이고 `critpath_second_cycle`은 slack 통계에만 쓰인다. wake 훅이 `arrival > last_cycle`(strict)이라 동률이면 먼저 관측된 producer가 LPR로 남는다 | 필터링을 강화하려는 지금 방향과 **반대**(멤버가 늘어난다). 정확도(critical을 놓치지 않는 것)를 보려면 유효하나 후순위. 대상 모집단은 멤버 commit의 5.2%로 작다 |
 | D-4 | depth 제한 | 파라미터 존재, C9에서 sweep 완료 | **부분 채택 후보**: Datacenter/SPEC17에는 depth 4가 유리, GAP에는 불리. 워크로드 무관 단일 값은 없음. 최종 구성에서 depth 4를 기본으로 할지 사용자 결정 |
 | D-5 | owner 충돌 | 단일 owner pointer, overwrite | 2-slot 승격 여부. 후순위 |
@@ -61,7 +60,7 @@
 
 ## 4a. 필터링 강화 — 두 단계로 분리 (2026-09-10 사용자 결정)
 
-**1단계 `260910_critpath_offpath_refresh` (실행 대기)**: 아래 표의 crit_ref, base, r10k, r4k만 — 새 base(off-path on + refresh 설정)를 먼저 확정한다. **2단계**: 확정된 base 위에 A/B/C. 분리 이유: B와 refresh는 둘 다 decay sweep에서 멤버를 빼므로 refresh 무릎이 옮겨가면 B의 몫이 달라지고, off-path로 구획 압박이 크게 늘면 25% partition부터 다시 봐야 할 수 있다. A/B/C 코드는 이미 같은 바이너리에 있고 기본 off.
+**1단계 `260910_critpath_offpath_refresh` — 완료 → DESIGN.md C11.** off-path 켬을 기준으로 확정(IPC −0.85%p = oracle 낙관), refresh는 **수명 20K(1b/10K) 유지**(4K는 SPEC17 −0.36%p로 과함), 25% 구획 유지(점유 27%, fallback 10%).: 아래 표의 crit_ref, base, r10k, r4k만 — 새 base(off-path on + refresh 설정)를 먼저 확정한다. **2단계**: 확정된 base 위에 A/B/C. 분리 이유: B와 refresh는 둘 다 decay sweep에서 멤버를 빼므로 refresh 무릎이 옮겨가면 B의 몫이 달라지고, off-path로 구획 압박이 크게 늘면 25% partition부터 다시 봐야 할 수 있다. A/B/C 코드는 이미 같은 바이너리에 있고 기본 off.
 
 **지표 전환**: filtering = dispatch 기준. priority 자격을 가진 채 dispatch된 op(`ZERECO_PIQ_PRIORITY_ADMISSION_CANDIDATE_OPS`, on + off path)를 full vs critical로 비교. 분모는 전체 dispatch. 그래서 모든 config에서 `zereco_critpath_priority_offpath 1`.
 
@@ -77,6 +76,10 @@
 | crit_C3 | ③ C — slack ≥ 3 cycle만 전파 (tie 0~2 제외) | full_base, crit_base |
 
 knob은 전부 기본 0(off)이고 off일 때 타이밍이 기존과 동일(새 필드 쓰기만). A·C는 critical 규칙의 전파만 막고, B는 decay sweep에서 멤버를 뺀다. **E(H2P branch별 chain 분리)는 저장 비용 때문에 보류, F는 제외, D-2(tie → 양쪽 삽입)는 성능 향상 후보로 남겨 둠.**
+
+**2단계 (다음)**: base = off-path 켬 + 1b/10K + 테이블 1K + register-only + depth ∞ + P-IQ 25%. 그 위에 crit_A3 / crit_B25 / crit_B50 / crit_C3, 비교 대상 full_base(이미 측정됨, 재사용 가능).
+
+**새 후보 G — H2P 그림자 priority 차단** (C11에서 발견): priority 자격 dispatch의 **67.8%가 wrong-path**. 하드웨어가 알 수 있는 신호로 이를 줄일 수 있다 — 아직 resolve되지 않은 H2P branch(HBT가 표시) 뒤에서 fetch된 op는 wrong-path일 확률이 높으므로 priority bit를 주지 않는다. 대가는 그 branch가 맞게 예측된 경우의 on-path op도 priority를 잃는 것. A/B/C보다 줄일 수 있는 양이 훨씬 크다(상한: dispatch 기준 priority 비율 55% → 18%). 구현은 frontend에서 "in-flight 미해결 H2P branch 수" 카운터 하나.
 
 ## 4b. 교수님 피드백 (2026-09-09)
 

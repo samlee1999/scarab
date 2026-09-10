@@ -92,6 +92,7 @@ dynamic producer), ② decode-time → **commit-time** 학습 (on-path만, wrong
 | P-IQ partition | **25%** (352의 88 entry), non-stall fallback | baseline RS 점유율 ≈ 25%에 맞춤. 실측 점유는 partition의 15%로 여유 있음 (C4, TODO D-10) |
 | 옛 Fill-Buffer walk | 완전 배제 (`LEGACY_WALK_NEEDED()`) | Target Load 지명을 오염시켰음 |
 | 백엔드 머신 | `PARAMS.golden_cove_rs352`: RS 285/204/55 = 544 − TEA 예약 192 → main **352**, dcache 2 read port × 1 bank, PRF 592, issue 8 / retire 16, LQ 256 / SQ 192, BTB 8K, MSHR 64 | 모든 config 공통. partition %의 분모 = 352 |
+| wrong-path priority | **켬** (`zereco_critpath_priority_offpath 1`, 2026-09-11) | 하드웨어는 fetch 때 on/off-path를 모른다. 끄면 IPC를 0.85%p 낙관한다(C11) |
 | 스케줄러 | random queue (`node_issue_queue_schedule_scheme 1`) | PUBS와 같은 base; P-IQ의 select 우선권은 그 위에 얹힘 |
 | 표본 | **67 simpoint** (workload당 5, clang 4, gcc 3; 14 workload) | TEA 참조 실험과 동일 표본. weight 가중 → workload 간 geomean |
 
@@ -323,3 +324,31 @@ brslice_tab 1K, register-only edge, depth 무제한. 멤버 수명(재확인 없
 - **왜 refresh가 critical 규칙을 선택적으로 만드나.** 멤버는 consumer가 자기를 LPR producer로 지목할 때마다 재확인된다. full 규칙은 모든 producer를 매 instance 재확인하지만, critical 규칙은 **실제로 마지막에 도착한 producer만** 재확인한다. 수명이 짧으면 "한 번 LPR이었던" PC는 떨어지고 "계속 LPR인" PC만 남는다 — 누적(합집합)이 아니라 **반복성**이 멤버 조건이 된다. refresh가 없으면(수명 1.6M) 한 번 지목된 PC가 사실상 영구 멤버라 critical이 full로 수렴했던 것이다.
 - 탈퇴 경로가 바뀐다: 기준에서는 LRU 축출 1.44M vs decay 탈퇴 23K였지만, 1b/10K에서는 decay 탈퇴 897K가 LRU 304K를 앞선다. H2P latency(f→r −17.4 → −17.3%, dep −18.9 → −18.8%)와 RFP(useful/load 25.9 → 25.3%)는 거의 불변.
 - **아직 포화하지 않았다.** 효율이 가장 공격적인 1b/10K에서도 계속 오른다. 다만 가속 대상 44.9%는 목표 20~30%와 거리가 있어 refresh 단독으로는 부족하다 — A/B와의 조합이 필요하다.
+
+### C11. wrong-path priority와 dispatch 기준 filtering (`260910_critpath_offpath_refresh`)
+
+`zereco_critpath_priority_offpath 1`: frontend가 on/off-path를 구분하지 않으므로 wrong-path 멤버도 priority bit·priority entry·select 우선권을 받는다(하드웨어 동작). 학습은 그대로 commit·on-path만. brslice_tab 1K, register-only edge, depth 무제한, P-IQ 25%.
+정합성: `crit_ref`(off-path 0, 필터 off)가 C9 `crit_inf`와 simpoint별 IPC 완전 일치 — A/B/C 코드가 들어간 바이너리도 knob off면 동일. 스크립트 `analysis/analyze_offpath_refresh.py`.
+
+| 수명 20K (1b/10K) | IPC crit / full | dispatch 기준 priority 비율 crit / full | 그중 wrong-path | dispatch 기준 filtering |
+|---|---|---|---|---|
+| off-path 끔 (oracle) | +9.67 / +9.59% | 18.1 / 19.4% (착시) | 0% | 6.7% |
+| **off-path 켬 (하드웨어)** | **+8.82 / +8.68%** | **55.5 / 58.6%** | **67.8%** | **5.3%** |
+
+- **oracle 낙관의 크기는 IPC 0.85%p**(crit). SPEC17 −0.88, GAP −1.01, DC −0.50%p. 이것이 D-1이 가리고 있던 비용이고, 이후 모든 실험은 off-path 켬이 기준이다.
+- **priority 자격으로 dispatch되는 op의 2/3(67.8%)가 wrong-path다.** dispatch의 63.0%가 wrong-path이고 그중 58.9%가 멤버다(on-path 멤버 비율과 비슷 — wrong-path도 대개 같은 hot loop 코드). priority 자원의 대부분이 곧 flush될 일에 쓰이고 있다.
+- 손실 경로는 select 경쟁이다: H2P branch의 scheduler wait 감소가 −89.5 → **−74.7%**로 줄고(wrong-path priority op가 branch와 같은 우선순위로 경쟁), f→r −17.3 → −15.9%, dep −18.8 → −17.7%.
+- 구획 압박: 점유/용량 12.2 → 27.2%, 어느 RS든 구획이 찬 cycle 4.3 → 14.0%, fallback 7.0 → 10.3%. 25% 구획은 아직 포화하지 않아 비율 조정 없이 A/B/C로 넘어간다.
+- dispatch 기준 filtering 5.3%(SPEC17 7.8, DC 9.4%) — commit 기준 6.8%보다 약간 낮다. 두 규칙이 같은 wrong-path hot code를 똑같이 표시하기 때문.
+
+**refresh 무릎 (off-path 켬)**
+
+| 수명 | 20K | 10K | 4K |
+|---|---|---|---|
+| IPC crit (SPEC17) | +8.82% (5.41) | +8.75% (5.30) | +8.60% (**4.94**) |
+| dispatch 기준 priority 비율 crit | 55.5% | 53.6% | 49.2% |
+| dispatch 기준 filtering | 5.3% | 5.8% | 6.3% |
+| 효율 (IPC ÷ priority 비율) | 0.159 | 0.163 | 0.175 |
+| 상주 멤버 PC crit | 168 | 120 | 56 |
+
+20K → 10K는 −0.07%p로 거의 공짜, 10K → 4K는 −0.15%p이고 **SPEC17에서 −0.36%p**. TEA 대비 약점인 SPEC17을 더 깎으므로 4K는 과하다. **A/B/C base는 수명 20K(1b/10K) 유지** — IPC 여유가 가장 크고, B는 refresh와 같은 decay sweep에서 작동하므로 refresh가 덜 공격적일 때 B의 몫이 분리되어 보인다.
