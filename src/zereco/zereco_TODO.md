@@ -83,11 +83,14 @@ knob은 전부 기본 0(off)이고 off일 때 타이밍이 기존과 동일(새 
 
 **3단계 `260911_critpath_edge_conf` — 완료 → DESIGN.md C13.** depth ≤ 1 면제(e1)만 효과(IPC 손실 −1.20 → −0.75%p, filtering 25.6%). 임계·hysteresis는 지렛대가 아니다. 남은 SPEC17 손실의 72%가 mcf 두 simpoint(82875, 28781).
 
-**다음 할 일**
-- **A 최종 설정 선택 — 사용자 결정 대기.** 추천 A3-e1(reset, 임계 3, depth ≤ 1 면제): A3-h-e1보다 IPC·filtering 둘 다 낫고, A2-h-e1과는 같은 교환선 위(IPC 0.06%p 차, filtering 1.9%p 차)이며 edge_pc 필드가 필요 없다
-- **mcf 82875 / 28781 진단**: 어떤 멤버 PC가 이 phase의 이득을 지는지. critical vs A3-e1에서 brslice_tab 멤버(PC, depth, edge confidence, producer flip 빈도)를 끝에 dump해 비교 — 코드 필요(진단 전용 knob). 결과에 따라 "매번 바뀌는 두 producer를 둘 다 따라가는" 식의 A 보완을 검토
-- (선택) **e2**: depth ≤ 2 면제 — mcf가 회복되는지, filtering이 20%를 지키는지 (코드 없이 config 하나)
-- **주의**: 추가 zereco run은 TEA 브랜치로 전환하기 **전에** 띄울 것 — 전환 후 `./sci --sim zereco_dbg`를 부르면 TEA 코드로 빌드된다
+**다음 할 일 (TEA 결과를 뽑은 뒤, test 브랜치로 돌아와서)**
+- **4단계 배치 — A2-e1 (사용자 제안, 2026-09-11)**: reset 모드, 임계 2, depth ≤ 1 면제, hysteresis 없음. filtering이 목표(20%)보다 넉넉하므로(A3-e1 25.6%) 일부를 성능으로 바꾸는 방향
+  - 예상(유도, C13의 임계 효과로부터): 임계만으로는 작다 — A3 → A2가 e1 없이 +0.06%p, hysteresis+e1에서 +0.10%p였다. A2-e1은 IPC 약 +0.05~0.10%p, filtering 약 1%p 감소로 예상
+  - 같은 배치에 **A2-e2**(depth ≤ 2 면제) 추가 권장: 임계보다 면제 깊이가 더 센 지렛대다. A3-e1에서 남은 차단의 52%가 depth 2(GAP은 87%). A2-e1 대 A2-e2로 면제 깊이 효과, A3-e1 대 A2-e1로 임계 효과를 분리
+  - config: 현재 base + `--zereco_critpath_edge_conf_min 2 --zereco_critpath_edge_conf_exempt_depth 1` / `... _exempt_depth 2`
+- **A 최종 설정은 4단계 후 결정.** 참고: A3-e1은 A3-h-e1보다 IPC·filtering 둘 다 낫다 — hysteresis는 쓰지 않는다
+- **mcf 82875 / 28781 진단 — 남은 손실의 핵심.** A3-e1의 전체 손실 −0.75%p 중 **mcf 하나가 0.47%p(63%)**, 나머지 workload는 각 0.08%p 이하. 어떤 멤버 PC가 이 phase의 이득을 지는지: critical vs A3-e1에서 brslice_tab 멤버(PC, depth, edge confidence, producer flip 빈도)를 끝에 dump해 비교 — 코드 필요(진단 전용 knob). 결과에 따라 "번갈아 오는 두 producer를 둘 다 따라가는" 식의 A 보완을 검토
+- **주의**: zereco run은 test 브랜치에서 빌드·실행할 것. TEA 브랜치에 있는 동안 `./sci --sim zereco_dbg`를 부르면 TEA 코드로 빌드된다
 
 **평가 모드 (2026-09-11 사용자 결정)**: 논문 평가는 **oracle(off-path 0) + commit 기준 filtering**으로 간다. 하드웨어 동작 수치는 C11에 보관(IPC −0.85%p). 논문에는 "wrong-path 명령어는 priority를 받지 않는다고 가정"을 명시하고 C11을 민감도로 제시. 이후 시뮬레이터에서만 가능한 관점의 결과(oracle/limit study)도 요청 예정 — 그런 결과는 상한(limit study)으로 표기.
 
