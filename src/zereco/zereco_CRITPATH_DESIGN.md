@@ -354,6 +354,15 @@ brslice_tab 1K, register-only edge, depth 무제한. 멤버 수명(재확인 없
 
 20K → 10K는 −0.07%p로 거의 공짜, 10K → 4K는 −0.15%p이고 **SPEC17에서 −0.36%p**. TEA 대비 약점인 SPEC17을 더 깎으므로 4K는 과하다. **A/B/C base는 수명 20K(1b/10K) 유지** — IPC 여유가 가장 크고, B는 refresh와 같은 decay sweep에서 작동하므로 refresh가 덜 공격적일 때 B의 몫이 분리되어 보인다.
 
+**설계 조정이 IPC에 준 누적 비용** (필터 없는 critical 규칙, `analysis/ipc_drift.py`): C1(`260908`) +10.08% → 현재 base +9.67%, 합계 −0.41%p.
+
+| 단계 | GAP | SPEC17 | DC | ALL | 주 영향 |
+|---|---|---|---|---|---|
+| ② register-only edge | −0.47 | −0.14 | −0.19 | **−0.29** | cc −1.66, bfs −0.94, clang −0.47 — GAP 그래프 알고리즘은 critical path가 store→load를 지난다 |
+| ③ 멤버 전용 할당 | 0.00 | 0.00 | +0.19 | +0.04 | xgboost +0.53 (멤버 축출이 사라짐) |
+| ④ 테이블 32K → 1K | 0.00 | −0.16 | −0.20 | −0.10 | deepsjeng −0.55, gcc −0.34 — 코드가 큰 workload |
+| ⑤ refresh 1.6M → 20K | +0.03 | −0.06 | −0.22 | −0.06 | gcc −0.32, deepsjeng −0.27, clang −0.22 |
+
 ### C12. 반복성 필터 A / B / C (`260911_critpath_filter_abc`)
 
 base: oracle(off-path 0), refresh 1 bit / 10K(수명 20K), brslice_tab 1K, register-only edge, depth 무제한, P-IQ 25%. 비교: `260910_critpath_refresh/{crit,full}_1b_10k`.
