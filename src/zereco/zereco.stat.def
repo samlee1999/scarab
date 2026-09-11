@@ -464,4 +464,6 @@ DEF_STAT(ZERECO_PIQ_PRIORITY_TO_NORMAL_FALLBACK_OFFPATH_OPS, COUNT, NO_RATIO)  /
 DEF_STAT(CRITPATH_EDGE_CONF_BLOCKED, COUNT, NO_RATIO)      /* A: propagations withheld, edge not yet confident */
 DEF_STAT(CRITPATH_RATIO_DROPPED_MEMBER, COUNT, NO_RATIO)   /* B: members dropped for a low criticality ratio */
 DEF_STAT(CRITPATH_SLACK_BLOCKED, COUNT, NO_RATIO)          /* C: propagations withheld on a near-tie */
+/* A: of the withheld propagations, those at an H2P branch itself (depth 0) -- the chain never starts */
+DEF_STAT(CRITPATH_EDGE_CONF_BLOCKED_ROOT, COUNT, NO_RATIO)
 

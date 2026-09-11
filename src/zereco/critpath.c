@@ -63,7 +63,8 @@ typedef struct Critpath_PC_Entry_struct {
   uns8 depth;           /* distance from that branch, saturating */
   Addr owner_pc;        /* the H2P branch that claimed it */
   uns8 confirm;         /* times re-derived as a critical producer, saturating */
-  uns8 edge_conf;       /* A: consecutive commits naming the same LPR producer */
+  uns8 edge_conf;       /* A: confidence that edge_pc is this PC's critical producer */
+  Addr edge_pc;         /* A: the producer that confidence is about */
   uns16 win_exec;       /* B: commits of this PC in the current decay window */
   uns16 win_crit;       /* B: times chosen as a last-arriving producer, same window */
   Counter lru_touch;
@@ -546,6 +547,7 @@ void critpath_note_retire(Op* op) {
                    (ZERECO_CRITPATH_INSERT_GATE == 2 &&
                     op->oracle_info.hbt_pred_is_hard));
   Flag has_lpr = (op->critpath_wake_events > 0);
+  Flag edge_match = FALSE;   /* A: this instance names the tracked producer */
 
   /* Allocate for a member, not for every PC that commits: a miss simply means
      "not a chain member", which is all any consumer asks of this table. */
@@ -675,12 +677,18 @@ void critpath_note_retire(Op* op) {
   /* ---- 4. does the critical edge stay the same across instances? ------- */
   if (has_lpr) {
     /* A: the edge to this op's last-arriving producer earns confidence only by
-       repeating; any change of producer starts it over. */
-    if (entry->has_last &&
-        entry->last_producer_pc == op->critpath_last_producer_pc) {
+       repeating.  A different producer either starts it over (reset) or, with
+       hysteresis, only chips at the confidence of the one being tracked. */
+    Addr cur = op->critpath_last_producer_pc;
+    if (entry->has_last && entry->edge_pc == cur) {
+      edge_match = TRUE;
       if (entry->edge_conf < 3)
         entry->edge_conf++;
+    } else if (ZERECO_CRITPATH_EDGE_CONF_DECAY && entry->has_last &&
+               entry->edge_conf > 0) {
+      entry->edge_conf--;
     } else {
+      entry->edge_pc = cur;
       entry->edge_conf = 0;
     }
     if (!entry->has_last) {
@@ -770,10 +778,15 @@ void critpath_note_retire(Op* op) {
     STAT_EVENT(proc_id, CRITPATH_SLACK_BLOCKED);
     return;
   }
-  /* A: follow the edge only once it has proven to be the same one repeatedly. */
+  /* A: follow the edge only on an instance that names the tracked producer, and
+     only once that producer has proven itself.  In reset mode a confident edge
+     always matches, so the match test changes nothing there. */
   if (ZERECO_CRITPATH_EDGE_CONF_MIN &&
-      entry->edge_conf < ZERECO_CRITPATH_EDGE_CONF_MIN) {
+      !(ZERECO_CRITPATH_EDGE_CONF_ROOT_EXEMPT && entry->depth == 0) &&
+      (!edge_match || entry->edge_conf < ZERECO_CRITPATH_EDGE_CONF_MIN)) {
     STAT_EVENT(proc_id, CRITPATH_EDGE_CONF_BLOCKED);
+    if (entry->depth == 0)
+      STAT_EVENT(proc_id, CRITPATH_EDGE_CONF_BLOCKED_ROOT);
     return;
   }
   /* Read what this op contributes before touching the table again.  The lookup
