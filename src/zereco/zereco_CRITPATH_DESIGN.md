@@ -94,6 +94,7 @@ dynamic producer), ② decode-time → **commit-time** 학습 (on-path만, wrong
 | 백엔드 머신 | `PARAMS.golden_cove_rs352`: RS 285/204/55 = 544 − TEA 예약 192 → main **352**, dcache 2 read port × 1 bank, PRF 592, issue 8 / retire 16, LQ 256 / SQ 192, BTB 8K, MSHR 64 | 모든 config 공통. partition %의 분모 = 352 |
 | wrong-path priority | **끔 — oracle** (`zereco_critpath_priority_offpath 0`, 2026-09-11 사용자 결정) | 평가 모드. off-path op에는 priority bit를 주지 않는다. 하드웨어 동작(off-path 켬)의 수치는 C11에 있다: IPC −0.85%p, priority 자격 dispatch의 67.8%가 wrong-path. 논문에는 이 가정을 명시하고 C11을 민감도로 둔다 |
 | filtering 지표 | **commit 기준** — priority bit를 달고 commit된 op를 full vs critical로 비교 | oracle에서는 off-path가 priority를 받지 않으므로 dispatch 기준과 같은 값이다. dispatch 기준은 off-path 켬일 때만 의미가 있다 |
+| 반복성 필터 | **A(edge confidence) 채택, B·C 제외** (2026-09-11 사용자 결정) | A만 20% 이상 거른다(C12). B·C는 7.7~9.1%로 작다. A의 임계·면제는 C13 참고. hysteresis(−1)는 효과가 없어 쓰지 않는다 |
 | 스케줄러 | random queue (`node_issue_queue_schedule_scheme 1`) | PUBS와 같은 base; P-IQ의 select 우선권은 그 위에 얹힘 |
 | 표본 | **67 simpoint** (workload당 5, clang 4, gcc 3; 14 workload) | TEA 참조 실험과 동일 표본. weight 가중 → workload 간 geomean |
 
@@ -382,3 +383,29 @@ base: oracle(off-path 0), refresh 1 bit / 10K(수명 20K), brslice_tab 1K, regis
 - **B는 약하다**(filtering 7.7 / 9.1%, IPC −0.04%p). 탈퇴 멤버 158K / 308K뿐 — refresh(수명 20K)가 같은 decay sweep에서 이미 드물게 지목되는 멤버를 빼고 있어 겹친다(C11에서 예측한 대로).
 - **C는 거의 공짜다**(filtering 8.8%, IPC −0.02%p). 전파를 8.7M번 막지만 멤버십 차이는 1%p — 막힌 producer 대부분이 다른 경로로 이미 멤버다. tie에서 한쪽만 당겨 봐야 slack만큼만 버는 구조라 성능 손실이 없다.
 - **해석**: A가 SPEC17에서 크게 잃는 것은 (1) 임계 3(같은 producer 4연속)이 엄격하고, (2) **H2P root의 edge에도 A가 걸려** branch의 critical 입력이 번갈아 바뀌면 chain 전체가 시작되지 않으며, (3) 그 결과 Target Load가 사라져 RFP가 줄기 때문으로 보인다. SPEC17(게임 트리 탐색, 복잡한 제어 흐름)은 producer flip이 잦다 → TODO: A 조율.
+  **→ C13에서 (1)·(2)는 반증.** 임계를 1까지 낮춰도 거의 회복되지 않고, root(depth 0)에서 막힌 전파는 0.8%뿐이다. 실제로 막히는 곳은 한 단계 위 depth 1(비교 명령)이다 — x86 조건 분기는 flags만 읽으므로 branch 자신의 edge는 안정적이다.
+
+### C13. A 조율 — 임계 · hysteresis · depth 면제 (`260911_critpath_edge_conf`)
+
+base는 C12와 같다. 축: 임계 1/2/3(A1/A2/A3), 불일치 처리(reset = 0으로 / **h** = hysteresis, −1하고 우세 producer 유지), **e1** = depth ≤ 1 멤버는 A 면제(branch와 그 flag producer는 항상 전파, A는 depth 2부터).
+정합성: `crit_A3`가 C12의 `crit_A3`와 simpoint별 cycle·counter까지 완전 일치 — reset 모드는 코드 변경의 영향이 없다. 스크립트 `analysis/analyze_edgeconf.py`, 그림 `analysis/edgeconf_tradeoff.pdf`(filtering–IPC), `analysis/edgeconf_blocked.pdf`(막힌 전파의 depth 분포).
+
+| | IPC ALL / SPEC17 / GAP / DC | full 대비 filtering (GAP / SPEC17 / DC) | 효율 | Target Load/loads |
+|---|---|---|---|---|
+| critical (필터 없음) | +9.67 / 6.29 / 13.77 / 7.39% | 6.8% | 0.215 | 61.4% |
+| A3 | +8.47 / 3.91 / 13.50 / 6.42% | 35.4% (11.8 / 59.4 / 52.6) | 0.272 | 38.4% |
+| A2 | +8.53 / 4.03 / 13.52 / 6.45% | 34.4% | 0.270 | 39.2% |
+| A1 | +8.63 / 4.24 / 13.51 / 6.58% | 31.1% | 0.260 | 42.3% |
+| A3-h | +8.44 / 3.95 / 13.50 / 6.19% | 34.2% | 0.266 | 39.9% |
+| A2-h | +8.52 / 4.00 / 13.47 / 6.54% | 33.6% | 0.266 | 40.5% |
+| **A3-e1** | **+8.92 / 4.55 / 13.95 / 6.56%** | **25.6%** (6.2 / 43.0 / 47.0) | 0.249 | 49.1% |
+| A3-h-e1 | +8.88 / 4.52 / 13.94 / 6.43% | 24.1% | 0.243 | 50.5% |
+| A2-h-e1 | +8.98 / 4.60 / 13.96 / 6.71% | 23.7% (6.3 / 38.9 / 44.1) | 0.244 | 50.8% |
+
+- **임계는 지렛대가 아니다.** A3 → A1(같은 producer 2연속만 요구)이 IPC 0.16%p만 되찾고 filtering은 4.3%p 잃는다. 반복을 한 번만 요구해도 −1.04%p — 값어치 있는 edge는 "가끔 바뀌는" 게 아니라 **거의 매번 바뀌는** edge다.
+- **hysteresis는 효과가 없다.** 같은 임계에서 IPC가 0.02~0.04%p 낮고 filtering도 약간 낮다. 우세 producer가 있고 가끔 flip하는 edge는 애초에 손실 원인이 아니었다.
+- **A가 막는 곳은 depth 1이다** (측정, A3): 막힌 전파의 **54.3%가 depth 1**, 16.5%가 depth 2, 28.4%가 depth 3 이상이고 **depth 0(branch 자신)은 0.8%**(GAP 0.0 / SPEC17 0.5 / DC 3.7%). Scarab의 x86 디코더는 flags 전체를 레지스터 하나(ZPS)로 보고 조건 분기의 source는 그것뿐이라, branch → flag producer(cmp·test 등) edge는 거의 바뀌지 않는다. 흔들리는 곳은 비교 명령의 두 피연산자 중 어느 쪽이 늦게 오느냐다. 번갈아 오는 두 producer는 hysteresis로도 confidence가 쌓이지 않는다.
+- **depth ≤ 1 면제(e1)가 유일하게 듣는다.** IPC 손실 −1.20 → **−0.75%p**(37% 회복), SPEC17 −2.38 → −1.74%p, Target Load/loads 38.4 → 49.1%, filtering은 25.6%로 20% 목표를 유지한다. **GAP은 필터 없는 critical보다 오히려 높다**(13.95 vs 13.77%; sssp 10.41 → 11.23%, pr 4.45 → 4.82%) — GAP에서는 깊은 곳의 흔들리는 멤버가 가속을 방해하고 있었다.
+- **교환 비율은 모든 변형에서 거의 같다**(유도): full 대비 filtering 1%p당 IPC 0.040~0.046%p. knob은 같은 선 위의 위치만 바꾸고 선 자체는 못 바꾼다. e1이 비율이 가장 좋은 쪽(0.040)이다.
+- **남은 손실의 대부분은 mcf의 두 simpoint다.** 82875(weight 0.21)와 28781(0.20)에서 critical의 +13.2% / +8.1%가 **모든 A 변형에서 +0.1~0.5%로 사라진다** — e1, A1도 마찬가지. A가 priority op 비율은 33 → 31%로 조금만 줄이는데(상주 멤버 PC 30 → 21) 이득이 통째로 사라진다. 즉 depth 2 이상에서 critical producer가 거의 매번 바뀌는 edge 뒤의 소수 멤버가 이 phase의 이득 전체를 진다. SPEC17 손실(A3-e1 −1.74%p) 중 **mcf 몫이 1.26%p(72%)** — mcf만 critical 값으로 되돌리면 회복되는 양(유도, geomean 분해). 나머지 SPEC17 workload는 각 0.06~0.14%p. Datacenter 손실(−0.83%p)은 한곳에 몰리지 않는다(clang 0.38 / xgboost 0.26 / gcc 0.18%p).
+- **TEA 격차**: TEA SPEC17 +22.11% 대비 A3-e1 +4.55% → 17.6%p(critical 15.8%p). 필터가 격차를 1.7%p 넓힌다. TEA 수치는 자원을 맞춰 다시 잴 예정(TODO).
