@@ -536,10 +536,13 @@ DEF_PARAM(zereco_critpath_edge_conf_min, ZERECO_CRITPATH_EDGE_CONF_MIN, uns, uns
    edge its confidence.  Either way an edge propagates only on an instance that
    names the tracked producer, with the counter at or above the minimum. */
 DEF_PARAM(zereco_critpath_edge_conf_decay, ZERECO_CRITPATH_EDGE_CONF_DECAY, Flag, Flag, FALSE, )
-/* A does not gate an H2P branch's own edge (depth 0): the chain always starts,
-   and only its interior edges must prove themselves.  Without this a branch
-   whose critical input alternates never grows a chain at all. */
-DEF_PARAM(zereco_critpath_edge_conf_root_exempt, ZERECO_CRITPATH_EDGE_CONF_ROOT_EXEMPT, Flag, Flag, FALSE, )
+/* A does not gate the edges of members at depth <= this value; -1 gates every
+   edge.  A cut near the branch loses the whole chain above it, so the first
+   levels are always followed and only deeper edges must prove themselves.  On
+   x86 the branch reads only the flags, so its own edge (depth 0) to the flag
+   setter hardly ever changes; the alternation is one level up, where the
+   compare's two operands arrive in varying order -- hence 1, not 0. */
+DEF_PARAM(zereco_critpath_edge_conf_exempt_depth, ZERECO_CRITPATH_EDGE_CONF_EXEMPT_DEPTH, int, int, -1, )
 DEF_PARAM(zereco_critpath_ratio_min, ZERECO_CRITPATH_RATIO_MIN, uns, uns, 0, )
 DEF_PARAM(zereco_critpath_slack_min, ZERECO_CRITPATH_SLACK_MIN, uns, uns, 0, )
 /* [EXPERIMENT: ZERECO TIMED RFP] Register File Prefetching (ISCA'22) with real

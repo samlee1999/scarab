@@ -256,6 +256,8 @@ void critpath_init(uns proc_id) {
           "zereco_critpath_confirm_bits must be between 1 and 8\n");
   ASSERTM(proc_id, ZERECO_CRITPATH_EDGE_CONF_MIN <= 3,
           "zereco_critpath_edge_conf_min must be 0 (off) or 1..3 (2-bit counter)\n");
+  ASSERTM(proc_id, ZERECO_CRITPATH_EDGE_CONF_EXEMPT_DEPTH >= -1,
+          "zereco_critpath_edge_conf_exempt_depth must be -1 (none) or a depth\n");
   ASSERTM(proc_id, !ZERECO_CRITPATH_RATIO_MIN || ZERECO_CRITPATH_DECAY_INTERVAL,
           "zereco_critpath_ratio_min is evaluated at decay sweeps; set zereco_critpath_decay_interval\n");
   ASSERTM(proc_id, ZERECO_CRITPATH_INSERT_GATE <= 2,
@@ -780,13 +782,13 @@ void critpath_note_retire(Op* op) {
   }
   /* A: follow the edge only on an instance that names the tracked producer, and
      only once that producer has proven itself.  In reset mode a confident edge
-     always matches, so the match test changes nothing there. */
+     always matches, so the match test changes nothing there.  Members near the
+     branch are exempt: a cut there loses everything above it. */
   if (ZERECO_CRITPATH_EDGE_CONF_MIN &&
-      !(ZERECO_CRITPATH_EDGE_CONF_ROOT_EXEMPT && entry->depth == 0) &&
+      (int)entry->depth > ZERECO_CRITPATH_EDGE_CONF_EXEMPT_DEPTH &&
       (!edge_match || entry->edge_conf < ZERECO_CRITPATH_EDGE_CONF_MIN)) {
     STAT_EVENT(proc_id, CRITPATH_EDGE_CONF_BLOCKED);
-    if (entry->depth == 0)
-      STAT_EVENT(proc_id, CRITPATH_EDGE_CONF_BLOCKED_ROOT);
+    STAT_EVENT(proc_id, CRITPATH_EDGE_CONF_BLOCKED_D0 + MIN2(entry->depth, 3));
     return;
   }
   /* Read what this op contributes before touching the table again.  The lookup

@@ -83,15 +83,16 @@ knob은 전부 기본 0(off)이고 off일 때 타이밍이 기존과 동일(새 
 
 **3단계 `260911_critpath_edge_conf` — 실행 대기** (A 조율, 8 config × 67, 기준: `260911_critpath_filter_abc/crit_ref20k`, `260910_critpath_refresh/full_1b_10k`):
 
-| config | 임계 | 불일치 처리 | root |
+| config | 임계 | 불일치 처리 | A 면제 |
 |---|---|---|---|
-| crit_A3 | 3 | reset (0으로) | 막음 — **정합성: `260911_critpath_filter_abc/crit_A3`와 simpoint별 완전 일치해야 함** |
-| crit_A2 / A1 | 2 / 1 | reset | 막음 |
-| crit_A3d / A2d | 3 / 2 | **hysteresis** (−1, 우세 producer 유지) | 막음 |
-| crit_A3r | 3 | reset | **면제** |
-| crit_A3dr / A2dr | 3 / 2 | hysteresis | 면제 |
+| crit_A3 | 3 | reset (0으로) | 없음 — **정합성: `260911_critpath_filter_abc/crit_A3`와 simpoint별 완전 일치해야 함** |
+| crit_A2 / A1 | 2 / 1 | reset | 없음 |
+| crit_A3d / A2d | 3 / 2 | **hysteresis** (−1, 우세 producer 유지) | 없음 |
+| crit_A3e1 | 3 | reset | **depth ≤ 1** (branch와 그 flag producer는 항상 전파, A는 depth 2부터) |
+| crit_A3de1 / A2de1 | 3 / 2 | hysteresis | depth ≤ 1 |
 
-- 분석: IPC(전체·SPEC17), filtering(commit 기준, full 대비), Target Load 비율, `CRITPATH_EDGE_CONF_BLOCKED_ROOT / BLOCKED`(root에서 막힌 몫 — r config에서는 0)
+- 면제를 depth 0이 아니라 ≤ 1로 둔 이유: x86 조건 분기의 source는 flags(ZPS) 하나라 branch → flag producer(cmp 등) edge는 거의 바뀌지 않는다. 번갈아 바뀌는 곳은 한 단계 위, 비교 대상 두 값 중 어느 쪽이 늦게 오느냐다 → crit_A3의 `BLOCKED_D0`이 작게 나오는지로 확인
+- 분석: IPC(전체·SPEC17), filtering(commit 기준, full 대비), Target Load 비율, `CRITPATH_EDGE_CONF_BLOCKED_D0/D1/D2/D3P`(A가 막은 전파를 막은 멤버의 depth별로 — chain이 어디서 잘리는지. e1 config에서는 D0·D1 = 0)
 - 목표: IPC는 crit_ref20k에 최대한 가깝게 유지, filtering은 20% 내외(교수님 목표) 이상
 
 **평가 모드 (2026-09-11 사용자 결정)**: 논문 평가는 **oracle(off-path 0) + commit 기준 filtering**으로 간다. 하드웨어 동작 수치는 C11에 보관(IPC −0.85%p). 논문에는 "wrong-path 명령어는 priority를 받지 않는다고 가정"을 명시하고 C11을 민감도로 제시. 이후 시뮬레이터에서만 가능한 관점의 결과(oracle/limit study)도 요청 예정 — 그런 결과는 상한(limit study)으로 표기.
