@@ -353,3 +353,23 @@ brslice_tab 1K, register-only edge, depth 무제한. 멤버 수명(재확인 없
 | 상주 멤버 PC crit | 168 | 120 | 56 |
 
 20K → 10K는 −0.07%p로 거의 공짜, 10K → 4K는 −0.15%p이고 **SPEC17에서 −0.36%p**. TEA 대비 약점인 SPEC17을 더 깎으므로 4K는 과하다. **A/B/C base는 수명 20K(1b/10K) 유지** — IPC 여유가 가장 크고, B는 refresh와 같은 decay sweep에서 작동하므로 refresh가 덜 공격적일 때 B의 몫이 분리되어 보인다.
+
+### C12. 반복성 필터 A / B / C (`260911_critpath_filter_abc`)
+
+base: oracle(off-path 0), refresh 1 bit / 10K(수명 20K), brslice_tab 1K, register-only edge, depth 무제한, P-IQ 25%. 비교: `260910_critpath_refresh/{crit,full}_1b_10k`.
+정합성: `crit_ref20k`가 `crit_1b_10k`와 simpoint별 IPC 완전 일치. filtering은 commit 기준. 스크립트 `analysis/analyze_abc.py`, 그림 `analysis/abc_tradeoff.pdf`.
+
+| | IPC (ALL / SPEC17) | 가속 대상 | **full 대비 filtering** (GAP / SPEC17 / DC) | 효율 | 상주 PC |
+|---|---|---|---|---|---|
+| full slice | +9.59 / 6.04% | 48.2% | — | 0.199 | 218 |
+| critical (필터 없음) | +9.67 / 6.29% | 44.9% | 6.8% (2.8 / 10.8 / 9.6) | 0.215 | 169 |
+| **A** edge confidence 3 | **+8.47 / 3.91%** | **31.1%** | **35.4%** (11.8 / **59.4** / **52.6**) | **0.272** | 62 |
+| B ratio 25% | +9.64 / 6.28% | 44.5% | 7.7% | 0.217 | 165 |
+| B ratio 50% | +9.63 / 6.26% | 43.8% | 9.1% | 0.220 | 158 |
+| C slack ≥ 3 | +9.65 / 6.27% | 44.0% | 8.8% | 0.220 | 160 |
+
+- **A는 진짜 criticality 필터다.** full 대비 35.4%를 걸러내 교수님 목표(20%)를 넘고, 효율이 0.215 → 0.272(+27%). 그림에서 A만 비례선 **위**에 크게 떨어진다 — 평균보다 기여가 낮은 op를 골라낸다는 뜻. depth(C9)가 비례선을 따라 내려간 것과 대조된다.
+- **그러나 IPC −1.20%p, SPEC17에서 −2.38%p**(6.29 → 3.91%). 손실은 SPEC17·Datacenter에 몰리고 GAP은 거의 무손실(−0.27%p) — GAP 커널은 edge가 안정적이라 A가 거의 막지 않는다. workload별로 mcf 12.90 → **5.89%**, leela 7.27 → 5.73%, omnetpp 2.85 → 1.72%. A가 전파를 13.6M번 막아 신규 멤버가 1.08M → 0.27M로 줄고, **Target Load/loads 61.4 → 38.4%, RFP useful 25.3 → 17.3%** — RFP 의존도가 큰 mcf가 가장 크게 잃는다.
+- **B는 약하다**(filtering 7.7 / 9.1%, IPC −0.04%p). 탈퇴 멤버 158K / 308K뿐 — refresh(수명 20K)가 같은 decay sweep에서 이미 드물게 지목되는 멤버를 빼고 있어 겹친다(C11에서 예측한 대로).
+- **C는 거의 공짜다**(filtering 8.8%, IPC −0.02%p). 전파를 8.7M번 막지만 멤버십 차이는 1%p — 막힌 producer 대부분이 다른 경로로 이미 멤버다. tie에서 한쪽만 당겨 봐야 slack만큼만 버는 구조라 성능 손실이 없다.
+- **해석**: A가 SPEC17에서 크게 잃는 것은 (1) 임계 3(같은 producer 4연속)이 엄격하고, (2) **H2P root의 edge에도 A가 걸려** branch의 critical 입력이 번갈아 바뀌면 chain 전체가 시작되지 않으며, (3) 그 결과 Target Load가 사라져 RFP가 줄기 때문으로 보인다. SPEC17(게임 트리 탐색, 복잡한 제어 흐름)은 producer flip이 잦다 → TODO: A 조율.

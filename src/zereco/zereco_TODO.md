@@ -77,7 +77,13 @@
 
 knob은 전부 기본 0(off)이고 off일 때 타이밍이 기존과 동일(새 필드 쓰기만). A·C는 critical 규칙의 전파만 막고, B는 decay sweep에서 멤버를 뺀다. **E(H2P branch별 chain 분리)는 저장 비용 때문에 보류, F는 제외, D-2(tie → 양쪽 삽입)는 성능 향상 후보로 남겨 둠.**
 
-**2단계 `260911_critpath_filter_abc` (실행 대기)**: 사용자 결정(2026-09-11)으로 **탐색 단계는 oracle(off-path 0)** 유지 — C1~C10과 연속, 비교 기준 재사용. base = off-path 0 + confirm 1 bit / decay 10K + 테이블 1K + register-only + depth ∞ + P-IQ 25%. crit_A3 / B25 / B50 / C3 + 정합성 crit_ref20k. 비교 대상 `260910_critpath_refresh/{crit,full}_1b_10k` 재사용.
+**2단계 `260911_critpath_filter_abc` — 완료 → DESIGN.md C12.** **A가 유일하게 큰 필터**(full 대비 35.4%, 효율 +27%)지만 IPC −1.20%p(SPEC17 −2.38%p). B(7.7~9.1%)·C(8.8%)는 거의 공짜지만 작다.
+
+**3단계 후보 — A 조율** (SPEC17 손실을 줄이며 20% 이상 filtering 유지):
+- A 임계 1 / 2 (현재 3 = 같은 producer 4연속). 임계를 낮추면 SPEC17의 잦은 flip을 덜 막는다
+- **A root 면제**: depth 0(H2P branch)의 edge는 항상 전파 → chain 시작은 보장하고 내부 edge만 거른다. branch 입력이 번갈아 바뀌어 chain 전체가 사라지는 경우를 막는다(코드 몇 줄, knob 하나)
+- A + C, C + B50 조합 (C·B는 거의 공짜라 쌓아 볼 가치)
+- 진단용: A가 막은 전파를 depth별로 세는 통계(root에서 얼마나 막히는지)
 
 **평가 모드 (2026-09-11 사용자 결정)**: 논문 평가는 **oracle(off-path 0) + commit 기준 filtering**으로 간다. 하드웨어 동작 수치는 C11에 보관(IPC −0.85%p). 논문에는 "wrong-path 명령어는 priority를 받지 않는다고 가정"을 명시하고 C11을 민감도로 제시. 이후 시뮬레이터에서만 가능한 관점의 결과(oracle/limit study)도 요청 예정 — 그런 결과는 상한(limit study)으로 표기.
 
