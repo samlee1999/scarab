@@ -1,15 +1,13 @@
 /***************************************************************************************
  * File         : zereco/rfp.c
  * Description  : Timed Register File Prefetching for ZERECO.  See rfp.h for the
- *                datapath overview and zereco_RFP_IMPLEMENTATION_PLAN.md for how
- *                each piece maps onto the RFP paper (ISCA'22).
+ *                datapath overview and src/zereco/zereco_CRITPATH_DESIGN.md (A4,
+ *                A6) for how it serves the critical chain.
  *
- * Phase 1 scope: the Prefetch Table trains and predicts, but nothing reaches the
- * memory system and no load's latency changes.  Prediction accuracy, coverage
- * headroom, and the store-abstain population are all measurable here, and a run
- * must stay cycle-identical to the baseline whether rfp_enable is on or off.
- * Phase 2 adds the request queue and real L1 probes; Phase 3 lets a covered load
- * skip its cache access.
+ * The Prefetch Table trains at retire and predicts at rename; the prefetch packet
+ * is drained with L1 read ports the demand loads left idle (or, under
+ * rfp_store_forward, served from a matching in-flight store), and a load whose
+ * predicted data arrived in time uses it instead of waiting on its own access.
  ***************************************************************************************/
 
 #include "zereco/rfp.h"
@@ -980,7 +978,7 @@ Flag rfp_try_validate(Op* op) {
      data is already in the register file either way, so the load always keeps
      what the prefetch bought it; but a load helped only marginally is still
      sitting on the branch's critical path, and RF coverage is what strips the
-     rest of its slice of IQ priority (zereco_ARCHITECTURE.md §7.1).  Only claim
+     rest of its slice of IQ priority.  Only claim
      it once the saving clears the configured bar.  Consumed after retire, so it
      never reorders the current occurrence. */
   if (saved >= RFP_COVERED_MIN_SAVED_CYCLES)

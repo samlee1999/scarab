@@ -1,42 +1,42 @@
 /***************************************************************************************
  * File         : zereco/critpath.h
- * Description  : Critical-path slice observation (Phase A -- measurement only).
+ * Description  : Critical chains of H2P branches (brslice_tab).
  *
  * An instruction with several source operands becomes ready when its LAST
  * source arrives.  Only the producer on that edge -- the Last Producer Register
  * (LPR) -- can move this instruction's ready time, and by induction only the
  * chain of such edges can move an H2P branch's resolution time.  This module
- * observes those edges; it never changes them.
+ * finds those chains; ZERECO_CRITPATH_PRIORITY gives their members IQ priority
+ * and RFP_TARGET_CRITPATH makes their loads Target Loads.  With neither consumer
+ * on, nothing written here is read by scheduling, renaming or the memory system,
+ * and a run stays cycle-identical to one with ZERECO_CRITPATH_PROFILE off.
  *
- * Everything here is instrumentation.  No field written here is read by
- * scheduling, renaming, or the memory system, so a run with
- * ZERECO_CRITPATH_PROFILE on must stay cycle-identical to one with it off.
- * That identity is the acceptance test.
+ * Baseline mechanism (defaults in core.param.def, 2026-09-14):
  *
- * Phase A measured the edges themselves: the slack between the critical operand
- * and the runner-up (which sets the window below which two producers are
- * co-critical), how stable the critical edge is per static PC, where a walk
- * naturally terminates, and how far chains reach.  It also showed the problem
- * Phase A2 exists to solve -- following only critical edges still leaves two
- * thirds of committed instructions inside some chain, so selectivity has to come
- * from somewhere else.
+ *   seed         an H2P branch (HBT counter > 1, read when it commits) becomes a
+ *                root (depth 0) and re-confirms itself on every such commit.
  *
- * Phase A2 adds the three knobs that can supply it, and measures all of their
- * settings at once rather than sweeping them:
+ *   propagate    at commit, a member adds the producer of its last-arriving
+ *                REGISTER source one level up, one level per dynamic instance.
+ *                Only members and roots allocate brslice_tab entries (1K,
+ *                128 x 8-way).  Propagation stops at an op that waited on no
+ *                operand (the frontier).
  *
- *   confirmation counter   how often a PC has been re-derived as a critical
- *                          producer.  Bucketing member commits by their counter
- *                          yields the population for EVERY threshold from one
- *                          run: population(>=T) is the tail sum above T.
+ *   filter A     a member at depth >= 2 propagates only when the same producer
+ *                was its last-arriving one on 4 commits in a row (2-bit counter,
+ *                threshold 3); depth 0 and 1 -- the branch and its compare --
+ *                always propagate, since the compare is where two inputs compete.
  *
- *   decay                  periodically ages every counter, so a PC that stops
- *                          being re-confirmed leaves the chain on its own.  This
- *                          is what adapts membership to a phase change, and the
- *                          only knob that needs separate runs.
+ *   refresh      a 1-bit confirm per entry, set by every propagation that names
+ *                the entry (or a root's own H2P commit) and cleared every 10K
+ *                committed ops; a member found already clear leaves.  This is what
+ *                adapts the chain to phase changes, to a branch leaving H2P, and
+ *                to edges that filter A stopped following.
  *
- *   insertion gate         which branches may seed a chain at all.  Bucketing by
- *                          the owner's current misprediction counter yields the
- *                          population under every gate from one run.
+ * Also available for comparison or study: the PUBS-style full slice
+ * (ZERECO_CRITPATH_FULL_SLICE), store->load edges (ZERECO_CRITPATH_MEM_EDGE),
+ * filters B and C and the hysteresis form of A (not adopted), and the Phase A
+ * measurements (slack, edge stability, confirm and owner histograms).
  *
  * Design notes live in src/zereco/zereco_CRITPATH_DESIGN.md.
  ***************************************************************************************/

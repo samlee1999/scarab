@@ -12,10 +12,11 @@
  *   dcache  : validate the predicted address at the load's first attempt; only
  *             a prediction that was correct *and* arrived in time saves latency
  *
- * Which loads may own a Prefetch Table entry is set by RFP_SCOPE: the H2P
- * backward-slice Target Loads found by the retire-time walk (ZERECO), or every
- * load (vanilla RFP).  Design rationale and the mapping to the paper are in
- * src/zereco/zereco_RFP_IMPLEMENTATION_PLAN.md.
+ * Which loads may own a Prefetch Table entry is set by RFP_SCOPE: Target Loads
+ * only (0) or every load (1, vanilla RFP).  With RFP_TARGET_CRITPATH -- the
+ * ZERECO baseline -- a Target Load is a load that commits as a member of an H2P
+ * branch's critical chain; without it, the legacy retire-time walk picks them.
+ * Design notes: src/zereco/zereco_CRITPATH_DESIGN.md (A4, A6).
  ***************************************************************************************/
 
 #ifndef __ZERECO_RFP_H__

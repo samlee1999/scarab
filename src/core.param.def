@@ -448,27 +448,32 @@ DEF_PARAM(zereco_piq_dispatch_policy, ZERECO_PIQ_DISPATCH_POLICY, uns, uns, 0, )
 /* [EXPERIMENT: ZERECO_H2P_MISPRED_LATENCY_PROFILE]
    Profile execute-resolved H2P mispred/misfetch latency without changing pipeline behavior. */
 DEF_PARAM(zereco_h2p_mispred_latency_profile, ZERECO_H2P_MISPRED_LATENCY_PROFILE, Flag, Flag, FALSE, )
-/* [EXPERIMENT: ZERECO CRITICAL PATH -- Phase A, measurement only]
-   Observe which source operand arrives last at each instruction (the Last
-   Producer Register) and propagate that edge backward from H2P branches one
-   level per dynamic instance.  Measures the slack between the critical operand
-   and the runner-up, how stable the critical edge is per static PC, where a
-   backward walk would naturally terminate, and how far chains reach.  Writes no
-   field that scheduling, renaming, or the memory system reads, so a run with
-   this on must stay cycle-identical to one with it off.
-   See src/zereco/zereco_CRITPATH_DESIGN.md. */
+/* [ZERECO CRITICAL PATH] Build the critical chain of every H2P branch in
+   brslice_tab: at wakeup keep the source that arrives last (the Last Producer
+   Register), and at commit let a chain member add that producer one level up.
+   The chain is consumed by ZERECO_CRITPATH_PRIORITY (IQ priority) and
+   RFP_TARGET_CRITPATH (Target Loads); with neither on it only observes, and
+   the run stays cycle-identical to one with it off.
+   The defaults below are the adopted baseline (2026-09-14): register edges
+   only, brslice_tab 1K entries allocated to members only, refresh with a 1-bit
+   confirm every 10K committed ops, repetition filter A with threshold 3 and
+   depth <= 1 exempt.  See src/zereco/zereco_CRITPATH_DESIGN.md. */
 DEF_PARAM(zereco_critpath_profile, ZERECO_CRITPATH_PROFILE, Flag, Flag, FALSE, )
-/* Observation-table geometry.  Set-associative: at 64K direct-mapped entries the
-   conflict evictions outnumbered the propagations being recorded. */
-DEF_PARAM(zereco_critpath_table_sets, ZERECO_CRITPATH_TABLE_SETS, uns, uns, 4096, )
+/* brslice_tab geometry, 128 sets x 8 ways = 1K entries.  Enough for the chains:
+   512 to 32K entries differ little (C8), and 85-170 member PCs are resident at a
+   time (C12, C13). */
+DEF_PARAM(zereco_critpath_table_sets, ZERECO_CRITPATH_TABLE_SETS, uns, uns, 128, )
 DEF_PARAM(zereco_critpath_table_assoc, ZERECO_CRITPATH_TABLE_ASSOC, uns, uns, 8, )
-/* Retention counter width.  Member commits are bucketed by this counter, so one
-   run yields the admitted population for every retention threshold. */
-DEF_PARAM(zereco_critpath_confirm_bits, ZERECO_CRITPATH_CONFIRM_BITS, uns, uns, 4, )
-/* Committed instructions between decay sweeps; 0 disables decay.  This is the
-   knob that adapts chain membership to a program phase change, and the only one
-   that needs separate runs. */
-DEF_PARAM(zereco_critpath_decay_interval, ZERECO_CRITPATH_DECAY_INTERVAL, uns, uns, 0, )
+/* Refresh (reference) bit width.  Set when a member's propagation names this PC
+   again, or when an H2P root commits; each decay sweep clears it, and a member
+   found already clear leaves.  1 bit keeps a member 10K-20K committed ops after
+   its last re-derivation (C10: +13% efficiency over the old 4 bits / 100K). */
+DEF_PARAM(zereco_critpath_confirm_bits, ZERECO_CRITPATH_CONFIRM_BITS, uns, uns, 1, )
+/* Committed main-thread ops (micro-ops, not x86 instructions) between refresh
+   sweeps; 0 disables aging, leaving LRU eviction as the only way out.  Without
+   it a PC named once stays a member and the critical rule converges on the full
+   slice (C10). */
+DEF_PARAM(zereco_critpath_decay_interval, ZERECO_CRITPATH_DECAY_INTERVAL, uns, uns, 10000, )
 /* Which branches may seed a chain: 0 = every branch, 1 = mispredicted at least
    once, 2 = H2P.  Phase A used 2, the strictest. */
 DEF_PARAM(zereco_critpath_insert_gate, ZERECO_CRITPATH_INSERT_GATE, uns, uns, 2, )
@@ -484,13 +489,13 @@ DEF_PARAM(zereco_critpath_full_slice, ZERECO_CRITPATH_FULL_SLICE, Flag, Flag, FA
    in the shadow table under full-slice mode).  Counts from cycle 0 -- warm-up
    included -- so the membership build-up is visible.  0 disables. */
 DEF_PARAM(zereco_critpath_timeline_interval, ZERECO_CRITPATH_TIMELINE_INTERVAL, uns, uns, 0, )
-/* Edge set both slice rules follow.  1 (historical behaviour): a store->load
-   forwarding edge counts -- the critical rule may pick the forwarding store as
-   the LPR, and the full rule propagates to the forwarding store too.  0: register
-   edges only, which is what a PRF-scoreboard implementation can see; a store is
-   then never a chain member.  Same value for both rules keeps critical a subset
-   of full. */
-DEF_PARAM(zereco_critpath_mem_edge, ZERECO_CRITPATH_MEM_EDGE, Flag, Flag, TRUE, )
+/* Edge set both slice rules follow.  0 (adopted): register edges only, which is
+   what a PRF-scoreboard implementation can see; a store is never a chain
+   member.  1 (behaviour before 2026-09-09): a store->load forwarding edge counts
+   too -- the critical rule may pick the forwarding store as the LPR, which would
+   need the LPR to point at an SQ entry and the store PC to be kept for the load.
+   Same value for both rules keeps critical a subset of full. */
+DEF_PARAM(zereco_critpath_mem_edge, ZERECO_CRITPATH_MEM_EDGE, Flag, Flag, FALSE, )
 /* A real brslice_tab holds chain members only.  With this FALSE the commit hook
    allocates an entry for every committed PC, so the table's occupancy tracks the
    program's whole static footprint rather than the chain -- fine for the Phase A
@@ -517,10 +522,13 @@ DEF_PARAM(zereco_critpath_priority_max_depth, ZERECO_CRITPATH_PRIORITY_MAX_DEPTH
    brslice_tab is written at commit, which only on-path ops reach. */
 DEF_PARAM(zereco_critpath_priority_offpath, ZERECO_CRITPATH_PRIORITY_OFFPATH, Flag, Flag, FALSE, )
 /* Filters that demand repetition before an edge or a member counts as critical.
-   All default to 0 (off), which is bit-identical to the unfiltered design.
+   A is part of the baseline; B and C were not adopted (small effect, C12) and
+   stay off.  Setting A to 0 gives the unfiltered critical rule.
    A -- edge confidence: a member propagates to its last-arriving producer only
-        after naming the same producer on this many consecutive commits (2-bit
-        counter, 1..3).  Drops edges whose critical producer keeps changing.
+        after naming the same producer on this many further consecutive commits
+        (2-bit counter, 1..3; 3 = the same producer on 4 commits in a row).
+        Drops edges whose critical producer keeps changing.  Baseline 3; the
+        optimum (2 vs 3) is still being measured.
    B -- criticality ratio: at each decay sweep a non-root member is dropped if it
         was chosen as a last-arriving producer on fewer than this many percent
         of its own commits in the window (judged only after 4 commits).  Targets
@@ -528,21 +536,22 @@ DEF_PARAM(zereco_critpath_priority_offpath, ZERECO_CRITPATH_PRIORITY_OFFPATH, Fl
    C -- slack threshold: with two or more competing arrivals, propagate only when
         the last one beat the runner-up by at least this many cycles.  Drops
         ties, where accelerating one producer alone buys at most the slack. */
-DEF_PARAM(zereco_critpath_edge_conf_min, ZERECO_CRITPATH_EDGE_CONF_MIN, uns, uns, 0, )
-/* A, how a disagreement is treated.  FALSE: any different last-arriving producer
-   resets the counter and becomes the tracked one.  TRUE: hysteresis -- a
-   different producer only decrements the counter and the dominant producer is
-   kept until the counter reaches 0, so an occasional flip no longer costs the
-   edge its confidence.  Either way an edge propagates only on an instance that
-   names the tracked producer, with the counter at or above the minimum. */
+DEF_PARAM(zereco_critpath_edge_conf_min, ZERECO_CRITPATH_EDGE_CONF_MIN, uns, uns, 3, )
+/* A, how a disagreement is treated.  FALSE (baseline): any different
+   last-arriving producer resets the counter and becomes the tracked one.  TRUE:
+   hysteresis -- a different producer only decrements the counter and the
+   dominant producer is kept until the counter reaches 0.  Not adopted: it did
+   not help at any threshold (C13).  Either way an edge propagates only on an
+   instance that names the tracked producer, with the counter at the minimum. */
 DEF_PARAM(zereco_critpath_edge_conf_decay, ZERECO_CRITPATH_EDGE_CONF_DECAY, Flag, Flag, FALSE, )
 /* A does not gate the edges of members at depth <= this value; -1 gates every
    edge.  A cut near the branch loses the whole chain above it, so the first
    levels are always followed and only deeper edges must prove themselves.  On
    x86 the branch reads only the flags, so its own edge (depth 0) to the flag
    setter hardly ever changes; the alternation is one level up, where the
-   compare's two operands arrive in varying order -- hence 1, not 0. */
-DEF_PARAM(zereco_critpath_edge_conf_exempt_depth, ZERECO_CRITPATH_EDGE_CONF_EXEMPT_DEPTH, int, int, -1, )
+   compare's two operands arrive in varying order -- hence 1, not 0 (C13). */
+DEF_PARAM(zereco_critpath_edge_conf_exempt_depth, ZERECO_CRITPATH_EDGE_CONF_EXEMPT_DEPTH, int, int, 1, )
+/* B and C (see above): not adopted, off by default. */
 DEF_PARAM(zereco_critpath_ratio_min, ZERECO_CRITPATH_RATIO_MIN, uns, uns, 0, )
 DEF_PARAM(zereco_critpath_slack_min, ZERECO_CRITPATH_SLACK_MIN, uns, uns, 0, )
 /* [EXPERIMENT: ZERECO TIMED RFP] Register File Prefetching (ISCA'22) with real
@@ -551,7 +560,7 @@ DEF_PARAM(zereco_critpath_slack_min, ZERECO_CRITPATH_SLACK_MIN, uns, uns, 0, )
    cycle after address generation -- this model launches after rename, probes the
    L1 with spare read ports, and only accelerates a load whose data actually
    arrived in time.  The two are mutually exclusive.  See
-   src/zereco/zereco_RFP_IMPLEMENTATION_PLAN.md. */
+   src/zereco/zereco_CRITPATH_DESIGN.md (A4, A6). */
 DEF_PARAM(rfp_enable, RFP_ENABLE, Flag, Flag, FALSE, )
 /* Loads whose data comes from an in-flight store (paper §3.2.1).
    0 = abstain: the load stays on the demand path (conservative model).
@@ -577,8 +586,9 @@ DEF_PARAM(rfp_drain_width, RFP_DRAIN_WIDTH, uns, uns, 2, )
 /* Effective load latency once the value is prefetched into the register file. */
 DEF_PARAM(rfp_hit_latency, RFP_HIT_LATENCY, uns, uns, 1, )
 /* Which loads may own a Prefetch Table entry:
-   0 = H2P backward-slice Target Loads only, allocated by the retire-time walk
-       (ZERECO), 1 = every retired load (vanilla RFP baseline). */
+   0 = Target Loads only -- with RFP_TARGET_CRITPATH (the ZERECO baseline) the
+       loads that commit as critical-chain members, otherwise the legacy
+       retire-time walk; 1 = every retired load (vanilla RFP baseline). */
 DEF_PARAM(rfp_scope, RFP_SCOPE, uns, uns, 0, )
 /* RFP probe that misses the L1: 0 = drop the request, 1 = continue to the lower
    levels like a demand miss.  Continuing is what the RFP paper specifies (§3.2.2)

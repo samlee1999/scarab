@@ -160,7 +160,7 @@ DEF_STAT(ZERECO_PIQ_NONSTALL_INTEGRITY_MISMATCHES, COUNT, NO_RATIO)
  * The funnel mirrors Fig. 13 of the RFP paper (ISCA'22) so the two can be read
  * side by side.  Reference values there, as a fraction of all loads:
  * injected 72%, executed 48%, useful 43.4% (34.2% full + 9.2% partial).
- * See src/zereco/zereco_RFP_IMPLEMENTATION_PLAN.md §3.9. */
+ * See src/zereco/zereco_CRITPATH_DESIGN.md (A6). */
 
 /* Funnel: every load the configured scope makes eligible for a Prefetch Table
  * entry, narrowing down to the ones whose prefetch actually saved latency. */

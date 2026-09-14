@@ -1,20 +1,20 @@
 /***************************************************************************************
  * File         : zereco/critpath.c
- * Description  : Critical-path slice observation (Phase A -- measurement only).
- *                See critpath.h for what each measurement decides, and
- *                zereco_CRITPATH_DESIGN.md for the design it feeds.
+ * Description  : Critical chains of H2P branches (brslice_tab).  See critpath.h
+ *                for the mechanism and zereco_CRITPATH_DESIGN.md for the design.
  *
- * Two hooks, and nothing else touches the machine:
+ * Two hooks build the chain; the frontend reads it (critpath_is_member):
  *
  *   critpath_note_wake()    at the wakeup logic, keeps the largest and second
  *                           largest source wake cycle plus the owner of the
  *                           largest.  This is the argmax of the max the wakeup
  *                           logic already computes, so it adds no work.
  *
- *   critpath_note_retire()  at commit, where every measurement is taken.  Doing
- *                           it here means only on-path, architecturally executed
- *                           instructions contribute -- wrong-path work cannot
- *                           reach the counters.
+ *   critpath_note_retire()  at commit: seeds H2P roots, lets a member add its
+ *                           last-arriving producer one level up (subject to
+ *                           filter A), ages members every decay interval, and
+ *                           takes the measurements.  Only on-path,
+ *                           architecturally executed instructions reach it.
  ***************************************************************************************/
 
 #include "zereco/critpath.h"
@@ -453,6 +453,46 @@ static void critpath_record_depth(uns proc_id, uns8 depth) {
     STAT_EVENT(proc_id, CRITPATH_DEPTH_17_PLUS);
 }
 
+/* Filter A bookkeeping for one entry on an instance whose last-arriving producer
+   is `cur`: returns whether the instance names the producer being tracked, and
+   moves the 2-bit confidence.  A different producer either starts it over
+   (reset, the baseline) or, with hysteresis, only chips at the confidence of the
+   one being tracked.  `seen` says whether the entry has observed an LPR before. */
+static Flag critpath_edge_observe(Critpath_PC_Entry* e, Flag seen, Addr cur) {
+  if (seen && e->edge_pc == cur) {
+    if (e->edge_conf < 3)
+      e->edge_conf++;
+    return TRUE;
+  }
+  if (ZERECO_CRITPATH_EDGE_CONF_DECAY && seen && e->edge_conf > 0) {
+    e->edge_conf--;
+  } else {
+    e->edge_pc = cur;
+    e->edge_conf = 0;
+  }
+  return FALSE;
+}
+
+/* Filter A: may this entry's edge be followed on this instance?  Only an
+   instance that names the tracked producer, and only once that producer has
+   proven itself; in reset mode a confident edge always matches.  Members near
+   the branch are exempt: a cut there loses everything above it. */
+static Flag critpath_edge_passes(const Critpath_PC_Entry* e, Flag match) {
+  if (!ZERECO_CRITPATH_EDGE_CONF_MIN)
+    return TRUE;
+  if ((int)e->depth <= ZERECO_CRITPATH_EDGE_CONF_EXEMPT_DEPTH)
+    return TRUE;
+  return match && e->edge_conf >= ZERECO_CRITPATH_EDGE_CONF_MIN;
+}
+
+/* Filter C: a near-tie means both producers are effectively critical; pushing
+   one of them alone buys at most the slack, so neither is followed. */
+static Flag critpath_slack_passes(const Op* op) {
+  return !(ZERECO_CRITPATH_SLACK_MIN && op->critpath_wake_events >= 2 &&
+           op->critpath_last_cycle - op->critpath_second_cycle <
+             ZERECO_CRITPATH_SLACK_MIN);
+}
+
 /* Make `producer_pc` a member one level below (`my_depth`, `my_owner`).  The
    lookup may evict any entry that shares its set, so callers must have copied
    whatever they still need out of their own entry before calling this. */
@@ -514,8 +554,9 @@ void critpath_note_retire(Op* op) {
   Addr pc = op->inst_info->addr;
   STAT_EVENT(proc_id, CRITPATH_OPS);
 
-  /* Decay runs on committed instructions, the same clock the H2P table ages on,
-     so the interval means the same thing in both structures. */
+  /* Decay runs on committed main-thread ops (micro-ops).  The H2P table ages on
+     committed x86 instructions instead, so 10K here is about 8K instructions at
+     ~1.2 ops per instruction. */
   state->retires++;
   if (ZERECO_CRITPATH_DECAY_INTERVAL &&
       (state->retires % ZERECO_CRITPATH_DECAY_INTERVAL) == 0)
@@ -602,11 +643,20 @@ void critpath_note_retire(Op* op) {
                                       : CRITPATH_PRIORITY_OP_NONCRITICAL);
 
   /* The shadow applies the critical rule independently of what the main table
-     holds.  Read its fields first: the lookup inside the helper can evict any
-     entry sharing the set, including this one. */
+     holds -- the same rule a run without full-slice mode uses, filters included,
+     so its critical/non-critical split describes the baseline.  Read its fields
+     first: the lookup inside the helper can evict any entry sharing the set,
+     including this one. */
+  Flag shadow_match = FALSE;
+  if (shadow && has_lpr) {
+    shadow_match = critpath_edge_observe(shadow, shadow->has_last,
+                                         op->critpath_last_producer_pc);
+    shadow->has_last = TRUE;
+  }
   if (shadow_member && has_lpr && !frontier &&
       shadow->depth < CRITPATH_MAX_DEPTH &&
-      op->critpath_last_producer_pc != 0) {
+      op->critpath_last_producer_pc != 0 && critpath_slack_passes(op) &&
+      critpath_edge_passes(shadow, shadow_match)) {
     uns8 sh_depth = shadow->depth;
     Addr sh_owner = shadow->owner_pc;
     critpath_propagate_to(proc_id, state, state->shadow_table, FALSE,
@@ -679,20 +729,9 @@ void critpath_note_retire(Op* op) {
   /* ---- 4. does the critical edge stay the same across instances? ------- */
   if (has_lpr) {
     /* A: the edge to this op's last-arriving producer earns confidence only by
-       repeating.  A different producer either starts it over (reset) or, with
-       hysteresis, only chips at the confidence of the one being tracked. */
-    Addr cur = op->critpath_last_producer_pc;
-    if (entry->has_last && entry->edge_pc == cur) {
-      edge_match = TRUE;
-      if (entry->edge_conf < 3)
-        entry->edge_conf++;
-    } else if (ZERECO_CRITPATH_EDGE_CONF_DECAY && entry->has_last &&
-               entry->edge_conf > 0) {
-      entry->edge_conf--;
-    } else {
-      entry->edge_pc = cur;
-      entry->edge_conf = 0;
-    }
+       repeating. */
+    edge_match = critpath_edge_observe(entry, entry->has_last,
+                                       op->critpath_last_producer_pc);
     if (!entry->has_last) {
       STAT_EVENT(proc_id, CRITPATH_LPR_FIRST_OBSERVATION);
     } else {
@@ -772,21 +811,11 @@ void critpath_note_retire(Op* op) {
   }
   if (op->critpath_last_producer_pc == 0)
     return;
-  /* C: a near-tie means both producers are effectively critical; pushing one
-     of them alone buys at most the slack, so neither is followed. */
-  if (ZERECO_CRITPATH_SLACK_MIN && op->critpath_wake_events >= 2 &&
-      op->critpath_last_cycle - op->critpath_second_cycle <
-        ZERECO_CRITPATH_SLACK_MIN) {
+  if (!critpath_slack_passes(op)) {
     STAT_EVENT(proc_id, CRITPATH_SLACK_BLOCKED);
     return;
   }
-  /* A: follow the edge only on an instance that names the tracked producer, and
-     only once that producer has proven itself.  In reset mode a confident edge
-     always matches, so the match test changes nothing there.  Members near the
-     branch are exempt: a cut there loses everything above it. */
-  if (ZERECO_CRITPATH_EDGE_CONF_MIN &&
-      (int)entry->depth > ZERECO_CRITPATH_EDGE_CONF_EXEMPT_DEPTH &&
-      (!edge_match || entry->edge_conf < ZERECO_CRITPATH_EDGE_CONF_MIN)) {
+  if (!critpath_edge_passes(entry, edge_match)) {
     STAT_EVENT(proc_id, CRITPATH_EDGE_CONF_BLOCKED);
     STAT_EVENT(proc_id, CRITPATH_EDGE_CONF_BLOCKED_D0 + MIN2(entry->depth, 3));
     return;
