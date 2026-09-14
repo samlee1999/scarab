@@ -643,20 +643,11 @@ void critpath_note_retire(Op* op) {
                                       : CRITPATH_PRIORITY_OP_NONCRITICAL);
 
   /* The shadow applies the critical rule independently of what the main table
-     holds -- the same rule a run without full-slice mode uses, filters included,
-     so its critical/non-critical split describes the baseline.  Read its fields
-     first: the lookup inside the helper can evict any entry sharing the set,
-     including this one. */
-  Flag shadow_match = FALSE;
-  if (shadow && has_lpr) {
-    shadow_match = critpath_edge_observe(shadow, shadow->has_last,
-                                         op->critpath_last_producer_pc);
-    shadow->has_last = TRUE;
-  }
+     holds.  Read its fields first: the lookup inside the helper can evict any
+     entry sharing the set, including this one. */
   if (shadow_member && has_lpr && !frontier &&
       shadow->depth < CRITPATH_MAX_DEPTH &&
-      op->critpath_last_producer_pc != 0 && critpath_slack_passes(op) &&
-      critpath_edge_passes(shadow, shadow_match)) {
+      op->critpath_last_producer_pc != 0) {
     uns8 sh_depth = shadow->depth;
     Addr sh_owner = shadow->owner_pc;
     critpath_propagate_to(proc_id, state, state->shadow_table, FALSE,
