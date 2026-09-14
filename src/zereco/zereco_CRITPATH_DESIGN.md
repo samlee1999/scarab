@@ -1,9 +1,12 @@
 # Critical-Path Slice Acceleration — 설계와 확정된 결과
 
-> Last updated: 2026-09-08 · branch `test`
+> Last updated: 2026-09-14 · branch `test`
 > **이 문서 = 설계 + 확정된 결과.** 할 일·미결정은 [zereco_TODO.md](zereco_TODO.md)에서만 관리한다.
 > 참고 논문 정독 노트: [zereco_REFERENCE_NOTES.md](zereco_REFERENCE_NOTES.md)
-> 기준 실험: `/home/lee/simulations/260908_critpath_comparison` (분석·그림은 그 안의 `analysis/`)
+> **기준 설정 = 코드 기본값 (2026-09-14, `core.param.def`)**: register edge만, brslice_tab 1K·멤버 전용 할당,
+> refresh 1-bit confirm / 10K commit, 반복성 필터 A(임계 3, depth ≤ 1 면제). 이 설정의 결과는 C13의 A3-e1
+> (`/home/lee/simulations/260911_critpath_edge_conf/crit_A3e1`). TEA 비교는 C14 (`/home/lee/simulations/260913_TEA`).
+> 각 실험의 분석·그림은 그 실험 폴더의 `analysis/`.
 
 ---
 
@@ -29,7 +32,7 @@ critical path 하나다.
 |---|---|---|---|---|---|
 | **A1** | H2P 판별 | branch PC별 misprediction 이력으로 "자주 틀리는 branch" 선별 | branch resolve (갱신) / fetch (조회) | **HBT** — 1024 entry, 3-bit saturating counter, counter>1이면 H2P, 50K retire마다 decay | TEA HBT (= PUBS conf_tab과 동형) |
 | **A2** | **critical producer 찾기** | 여러 source 중 **가장 늦게 ready된 source**의 producer를 식별 | wakeup (관찰) → issue (확정) → commit (사용) | **PRF scoreboard** (preg → producer PC) + **RSE의 LPR 필드** + **LPR tracker** (ROB entry별) | **본 연구 고유** |
-| **A3** | critical chain 멤버십 | commit 때 "내가 chain 소속이면 내 critical producer도 소속"을 한 단계씩 전파 | commit | **brslice_tab** (PC → owner branch, depth, confirm counter) | PUBS 방식, physical register 기반으로 변경 |
+| **A3** | critical chain 멤버십 | commit 때 "내가 chain 소속이면 내 critical producer도 소속"을 한 단계씩 전파. depth ≥ 2 멤버는 같은 producer가 4번 연속일 때만(필터 A), 10K commit 동안 재지목이 없으면 탈퇴(refresh) | commit | **brslice_tab** — 1K entry(128 set × 8-way), 멤버만 할당. entry: tag, 멤버 bit, depth, confirm 1 bit, edge 신뢰도 2 bit + 추적 producer tag, LRU | PUBS 방식, physical register 기반·반복성 필터 추가 |
 | **A4** | Target Load 판정 | chain 위의 load 중 주소가 규칙적인 것 선별 | rename (조회) / commit (학습) | **Prefetch Table** — load PC별 stride predictor, 1-bit confidence(p=1/16), chain 멤버 load만 할당 | RFP 논문 |
 | **A5** | priority scheduling | chain 명령어를 RS의 예약 entry에 배치해 먼저 issue | dispatch (배치) → select (실현) | **P-IQ** — RS의 25%를 priority partition으로 분할, non-stall fallback | PUBS |
 | **A6** | RF prefetch | 예측 주소의 데이터를 load의 destination physical register로 미리 가져옴 | rename (발사) → store scan / L1 probe → AGU (검증) | **PT + Prefetch Queue + validate-then-use**, in-flight store가 있으면 store data forwarding, L1 miss면 하위 계층 fill | RFP 논문 |
@@ -43,7 +46,11 @@ wakeup   : source별로 producer tag가 broadcast되어 M bit set → DELAY shif
 issue    : LPR을 ROB entry(LPR tracker)로 고정
 commit   : brslice_tab[내 PC] 조회 → chain 소속이면
            LPR → PRF scoreboard 역참조 → producer PC 획득
-           → brslice_tab[producer PC].owner = 내 owner branch    (한 단계 전파)
+           → 필터 A: 내 edge 신뢰도 갱신 (같은 producer면 +1, 다르면 그 producer로 바꾸고 0)
+           → 내 depth ≤ 1이거나 (같은 producer이고 신뢰도 3)이면
+             brslice_tab[producer PC]를 멤버로 (depth+1, confirm bit set)   (한 단계 전파)
+           H2P branch 자신은 commit할 때마다 root로 자기 confirm bit set
+10K commit마다 (refresh): confirm bit 1 → 0, 이미 0인 멤버는 탈퇴
 ```
 
 PUBS와의 차이 셋: ① logical → **physical** register (rename이 WAW를 해소했으므로 항상 실제
@@ -56,10 +63,10 @@ dynamic producer), ② decode-time → **commit-time** 학습 (on-path만, wrong
 
 - **walk가 저절로 끝난다.** dispatch 시점에 모든 source가 이미 ready였던 명령어는 LPR 이벤트가
   없어 전파하지 않는다 — operand wait이 실재하는 경계(frontier)에서 멈춘다.
-- **store→load memory dependence.** PRF scoreboard만으로는 register edge만 따라갈 수 있다.
-  현재 시뮬레이터는 forwarding store의 wake도 LPR 후보로 삼아, store가 마지막 도착이면 store PC로
-  전파한다(critical edge의 약 2%). 하드웨어로 옮기려면 LPR 필드가 SQ entry를 가리키고 commit 때
-  store PC를 읽는 확장이 필요하다 — 설계 반영 여부는 TODO D-11.
+- **store→load memory dependence는 따라가지 않는다(기준 설정).** PRF scoreboard만으로는 register edge만
+  볼 수 있다. forwarding store의 wake를 LPR 후보로 삼으면(`zereco_critpath_mem_edge 1`, 2026-09-09 이전 동작)
+  critical edge의 약 2%가 store로 가고 IPC가 0.29%p 오르지만(C11 분해), LPR 필드가 SQ entry를 가리키고
+  forwarding 때 store PC를 load 쪽에 보관하는 확장이 필요해 채택하지 않았다.
 - **chain의 크기** (`260910_critpath_depth`, brslice_tab 1K, register-only edge). H2P branch가 한 번 commit할 때 함께 commit되는 멤버 명령어 수와, 멤버의 평균 depth:
 
   | | GAP | SPEC17 | Datacenter | 전체 |
@@ -71,11 +78,15 @@ dynamic producer), ② decode-time → **commit-time** 학습 (on-path만, wrong
   전체 평균으로 **깊이 약 4.7단계, 명령어 약 8.3개**다. 단계당 1.8개꼴이라 대부분 선형이고 가끔 갈라진다(source가 하나뿐인 op이 68%인 것과 정합). suite 편차가 크다 — GAP은 6개/3.2단계로 짧고 Datacenter는 13개/6.3단계로 길다. **C9에서 depth 4가 Datacenter에만 sweet spot이었던 이유가 이것이다: GAP은 자를 꼬리가 없다.**
   주의: register edge만 따라가므로 memory를 거치는 사슬은 load에서 끊긴다. store edge를 포함하면 chain이 8.9 → 9.5로 약 7% 길어진다(C3). frontier 종료도 있으므로 이 수치는 **실제 dataflow 사슬의 하한**이다.
 
-- **정적 PC 단위 멤버십은 누적된다.** 한 PC의 critical producer는 instance마다 바뀌므로(producer
-  flip 약 22%), 시간이 지나면 LPR 규칙도 그 PC의 모든 producer를 방문한다. 그 결과 critical
-  규칙과 full-slice 규칙의 멤버 집합이 거의 같아진다(C3). 필터의 단위를 바꾸는 문제는 TODO D-12.
+- **정적 PC 단위 멤버십은 그대로 두면 누적된다.** 한 PC의 critical producer는 instance마다 바뀌므로(producer
+  flip 약 22%), 시간이 지나면 LPR 규칙도 그 PC의 모든 producer를 방문해 critical 규칙과 full-slice 규칙의
+  멤버 집합이 거의 같아진다(C3). 기준 설정은 이를 두 장치로 끊는다: **refresh**가 창마다 다시 지목되지 않은
+  멤버를 빼고(C10), **필터 A**가 매번 바뀌는 edge로는 새 멤버를 만들지 않는다(C12·C13). 그 결과 full 대비
+  filtering이 6.8%(refresh만) → 25.6%(A3-e1)가 된다.
 
 ### 확정된 설계 결정
+
+critical-path 관련 결정은 2026-09-14부터 코드 기본값(`core.param.def`)이다 — `zereco_critpath_profile`·`zereco_critpath_priority`·`rfp_target_critpath`만 켜면 아래 설정으로 돈다.
 
 | 항목 | 결정 | 근거 |
 |---|---|---|
@@ -85,7 +96,7 @@ dynamic producer), ② decode-time → **commit-time** 학습 (on-path만, wrong
 | chain 제거 방식 | **refresh만 — root branch가 H2P에서 강등돼도 owner 기준으로 chain을 한꺼번에 지우지 않는다** (2026-09-14 사용자 결정) | HBT는 오예측 한 번이면 H2P로 복귀하고(counter 1 → 2) 강등은 50K decay 때만 일어나, 경계선 branch는 강등·복귀를 반복할 수 있다. 일괄 제거는 그때마다 chain을 다시 쌓게 한다(branch instance당 한 층). refresh의 층별 연쇄 탈퇴가 유예 기간이 된다. owner 제거는 공유 멤버(재지목의 11.2%, A3-e1)도 함께 지우고, refresh를 대신하지도 못한다(살아 있는 chain 안의 정리, A의 불안정 edge는 처리 불가). 선택 실험은 TODO |
 | retention threshold | 불채택 | 재확인이 노화를 압도해 인구가 줄지 않음 |
 | Δ-window | Δ=0 (last producer만) | TODO D-2 |
-| depth 제한 | 없음 | 인구를 줄이는 유일한 지렛대 — TODO D-4 |
+| depth 제한 | **없음** | C9: 가속 대상과 이득이 같은 비율로 줄어 효율이 오르지 않는다(Datacenter depth 4만 예외). 가속 대상을 줄이는 일은 refresh·필터 A가 맡는다 |
 | Prefetch Table | 1K entry, 8-way, 1-bit confidence(p=1/16) | 512~∞에서 성능 차 0.1%p 이내; 병목은 주소 예측 가능성 |
 | slice edge 집합 | **register edge만** (`zereco_critpath_mem_edge 0`) — store→load 의존은 추적하지 않는 경우로 고정 | PRF scoreboard로 볼 수 있는 것과 일치. store edge를 포함하면 멤버 +4%p, IPC +0.3%p이나 LPR 필드가 SQ entry를 가리키는 확장이 필요하다 |
 | brslice_tab 할당 정책 | **멤버 전용** (`zereco_critpath_member_only_alloc 1`) — H2P seed이거나 전파가 닿은 PC만 entry를 갖는다 | 모든 commit PC에 entry를 잡으면 테이블 점유가 chain이 아니라 프로그램 전체 static PC 수를 따라가, 용량 연구가 엉뚱한 구조를 재게 된다 |
@@ -93,10 +104,10 @@ dynamic producer), ② decode-time → **commit-time** 학습 (on-path만, wrong
 | RFP L1-miss 정책 | 하위 계층 fill 진행 | fill path가 RFP 이득의 지배 성분 |
 | P-IQ partition | **25%** (352의 88 entry), non-stall fallback | baseline RS 점유율 ≈ 25%에 맞춤. 실측 점유는 partition의 15%로 여유 있음 (C4, TODO D-10) |
 | 옛 Fill-Buffer walk | 완전 배제 (`LEGACY_WALK_NEEDED()`) | Target Load 지명을 오염시켰음 |
-| 백엔드 머신 | `PARAMS.golden_cove_rs352`: RS 285/204/55 = 544 − TEA 예약 192 → main **352**, dcache 2 read port × 1 bank, PRF 592, issue 8 / retire 16, LQ 256 / SQ 192, BTB 8K, MSHR 64 | 모든 config 공통. partition %의 분모 = 352 |
+| 백엔드 머신 | `PARAMS.golden_cove_rs352`: RS 285/204/55 = 544에 TEA 예약 192를 걸어 main 한도 185/132/36 = **353**(RS별 비례 분할의 반올림; 흔히 "352"로 부름), dcache 2 read port × 1 bank, PRF 592, issue 8 / retire 16, LQ 256 / SQ 192, BTB 8K, MSHR 64 | 모든 config 공통. partition %의 분모 = 352 |
 | wrong-path priority | **끔 — oracle** (`zereco_critpath_priority_offpath 0`, 2026-09-11 사용자 결정) | 평가 모드. off-path op에는 priority bit를 주지 않는다. 하드웨어 동작(off-path 켬)의 수치는 C11에 있다: IPC −0.85%p, priority 자격 dispatch의 67.8%가 wrong-path. 논문에는 이 가정을 명시하고 C11을 민감도로 둔다 |
 | filtering 지표 | **commit 기준** — priority bit를 달고 commit된 op를 full vs critical로 비교 | oracle에서는 off-path가 priority를 받지 않으므로 dispatch 기준과 같은 값이다. dispatch 기준은 off-path 켬일 때만 의미가 있다 |
-| 반복성 필터 | **A(edge confidence) 채택, B·C 제외** (2026-09-11 사용자 결정) | A만 20% 이상 거른다(C12). B·C는 7.7~9.1%로 작다. A의 임계·면제는 C13 참고. hysteresis(−1)는 효과가 없어 쓰지 않는다 |
+| 반복성 필터 | **A(edge confidence) 채택, B·C 제외** (2026-09-11 사용자 결정). 현재 기준 **임계 3 + depth ≤ 1 면제, reset 방식**(A3-e1) — 임계의 최적점(2 vs 3)은 측정 중 | A만 20% 이상 거른다(C12). B·C는 7.7~9.1%로 작다. depth ≤ 1 면제만 IPC 손실을 줄인다(C13). hysteresis(−1)는 효과가 없어 쓰지 않는다 |
 | 스케줄러 | random queue (`node_issue_queue_schedule_scheme 1`) | PUBS와 같은 base; P-IQ의 select 우선권은 그 위에 얹힘 |
 | 표본 | **67 simpoint** (workload당 5, clang 4, gcc 3; 14 workload) | TEA 참조 실험과 동일 표본. weight 가중 → workload 간 geomean |
 
@@ -119,26 +130,35 @@ dynamic producer), ② decode-time → **commit-time** 학습 (on-path만, wrong
 |---|---|---|
 | **A1** HBT | 재사용 | `bp/hbt.c` — 1024 entry, 3-bit, threshold>1, decay 50K |
 | **A2** LPR 관측 | 구현 | `cmp_model.c: cmp_wake()` 훅 — wakeup의 max에 argmax를 얹음. producer PC는 wake 시점에 포착(소비자 commit 전에는 preg가 재할당되지 않으므로 scoreboard 역참조와 등가) |
-| **A3** brslice_tab | 구현 | `zereco/critpath.c` — 4096 sets × 8-way LRU, `{in_slice, depth, owner_pc, confirm}`; commit 훅(`critpath_note_retire`)에서 seed·전파·decay |
+| **A3** brslice_tab | 구현 | `zereco/critpath.c` — 128 sets × 8-way LRU(1K), 멤버 전용 할당. 기능 필드 `{valid, tag, in_slice, depth, confirm, edge_pc, edge_conf}`, 통계용 필드 `{owner_pc, last_src, last_producer_pc, win_exec, win_crit}`. commit 훅(`critpath_note_retire`)에서 seed·필터 A(`critpath_edge_observe/_passes`)·전파(`critpath_propagate_to`)·refresh(`critpath_decay_table`) |
 | **A4** Target Load → PT | 구현 | `critpath_note_retire()` → `rfp_note_target_load()` (멤버 load만 PT 할당/refresh) |
 | **A5** P-IQ | 재사용, 입력만 교체 | **decoupled frontend**(FTQ에서 op를 꺼낼 때, rename 이전)가 brslice_tab을 PC로 조회해 priority bit 부착 → `node_issue_queue.cc`(partition·fallback·select)/`exec_ports.c`(partition 크기) |
 | **A6** RFP | 재사용 + store forwarding | `zereco/rfp.c`. `rfp_store_forward`: 0 = forwarding store가 있는 load는 포기, **1** = 예측 주소가 store 주소와 맞으면 forwarding 패킷(queue·L1 port 사용 없음, store 완료 +1 cycle에 RF 도착, validation의 older-store/stale 검사 생략), 2 = launch 시 이미 실행된 store만 |
 | H2P resolution profiler | 재사용 | `zereco/h2p_mispred_latency.c` (`zereco_h2p_mispred_latency_profile 1`) |
-| **full-slice 비교 모드** (PUBS식) | 구현 | `zereco_critpath_full_slice 1`: 전파만 다름 — 모든 register source의 producer로 전파, frontier 종료 없음. producer PC는 rename map(`Map_Entry.pc`, PUBS의 def_tab)에서 source별로 op에 복사(`critpath_src_producer_pc[]`). 같은 실행에서 **shadow critical table**이 critical 규칙을 병행 적용해 멤버/priority op/Target Load를 critical·non-critical로 분류(`CRITPATH_FULL_MEMBER_*`, `CRITPATH_PRIORITY_OP_*`, `CRITPATH_TARGET_LOAD_*`) |
+| **full-slice 비교 모드** (PUBS식) | 구현 | `zereco_critpath_full_slice 1`: 전파만 다름 — 모든 register source의 producer로 전파, frontier 종료 없음, 필터 A 없음. producer PC는 rename map(`Map_Entry.pc`, PUBS의 def_tab)에서 source별로 op에 복사(`critpath_src_producer_pc[]`). 같은 실행에서 **shadow critical table**이 critical 규칙을 병행 적용해 멤버/priority op/Target Load를 critical·non-critical로 분류(`CRITPATH_FULL_MEMBER_*`, `CRITPATH_PRIORITY_OP_*`, `CRITPATH_TARGET_LOAD_*`). shadow도 기준과 같은 필터 A·C를 적용한다(2026-09-14부터; 그 전 full-slice run의 shadow는 필터 없는 critical 규칙) |
 | 옛 identification (Fill Buffer + batch walk + Block Cache) | 비활성 | `LEGACY_WALK_NEEDED()`가 false면 fill·trigger·엔진 모두 skip |
 
-파라미터: `zereco_critpath_profile`(관측·멤버십), `zereco_critpath_priority`(A5 입력), `rfp_target_critpath`(A4 입력),
-`zereco_critpath_decay_interval`, `_insert_gate`, `_priority_max_depth`, `_table_sets/_assoc`, `_confirm_bits`,
-`zereco_critpath_full_slice`, `zereco_piq_enable/_entry_percent/_dispatch_policy`, `rfp_enable/_pt_entries/_store_forward`.
+파라미터 (괄호 = 기본값, 2026-09-14): 켜는 스위치 `zereco_critpath_profile`(chain 구축), `zereco_critpath_priority`(A5 입력),
+`rfp_target_critpath`(A4 입력) — 모두 기본 꺼짐. 기준 설정 `_mem_edge`(0), `_table_sets/_assoc`(128/8), `_member_only_alloc`(1),
+`_confirm_bits`(1), `_decay_interval`(10000), `_edge_conf_min`(3), `_edge_conf_exempt_depth`(1), `_insert_gate`(2 = H2P),
+`_priority_max_depth`(0 = 무제한), `_priority_offpath`(0 = oracle). 비교·연구용 `_full_slice`, `_edge_conf_decay`(hysteresis),
+`_ratio_min`(B), `_slack_min`(C), `_timeline_interval` — 모두 기본 꺼짐. 그 밖에 `zereco_piq_enable/_entry_percent/_dispatch_policy`,
+`rfp_enable/_pt_entries/_store_forward`.
 
 ---
 
-## C. 확정된 결과 (`260908_critpath_comparison`)
+## C. 확정된 결과
 
-**설정.** 352-entry 머신, random queue, 67 simpoint. 6 config = {P-IQ, RFP, P-IQ+RFP} × {critical slice, full slice}.
+**읽는 법.** C1~C7은 `260908_critpath_comparison`의 설정(store→load edge 포함, brslice_tab 32K·전체 PC 할당,
+refresh 4 bit / 100K)으로 잰 것이고, 이후 절이 차례로 기준 설정에 도달한다(C8 용량 → C10 refresh → C12·C13 필터 A).
+설정 변경별 IPC 비용은 C11 끝의 분해 표에 있다. **IPC 지표는 C13까지 Cumulative**(warm-up 포함 20M 명령어),
+**C14는 Periodic**(warm-up 뒤 10M~20M 구간)이다 — speedup 차이는 0.007 이내.
+
+**C1~C7 설정.** 352-entry 머신, random queue, 67 simpoint. 6 config = {P-IQ, RFP, P-IQ+RFP} × {critical slice, full slice}.
 P-IQ 25% partition non-stall, RFP PT 1K + store forwarding 모드 1, decay 100K, depth 무제한.
 baseline = `260905_critpath_phaseB/baseline_randq`, TEA = `260827_tea_baseline/tea_random_queue`
-(TEA thread용 RS 192·PRF 192를 **추가로** 갖는 544-entry 머신, 옛 빌드라 IPC만 비교 가능).
+(RS는 TEA thread용 192를 **추가로** 가져 544, PRF는 592 중 192를 TEA가 떼어 씀, stream prefetcher 꺼짐 —
+이후 TEA 비교 기준은 C14).
 집계: workload 안에서 SimPoint weight 정규화, IPC는 workload 간 geomean, latency 감소율은 workload 간 산술평균,
 비율 통계는 가중 카운터를 합한 뒤 나눔. 스크립트 `analysis/analyze.py`(→ `results67.txt`), 그림 `analysis/plot_cmp67.py`, `plot_pie.py`.
 
@@ -196,7 +216,7 @@ critical ⊆ full을 보장한 비교. 스크립트 `analysis/analyze_edgeset.py
 
   그 결과 전파 이벤트 수는 멤버 commit당 critical 0.661 / full 0.900 — full이 방문하는 producer가 **1.36배**에 그친다. 그리고 그 추가 방문의 99.9%는 이미 멤버인 PC의 refresh다. 즉 필터링 상한은 두 단계로 깎인다: ① 프로그램 dataflow가 포크하지 않아 "추가 전파"가 27%뿐, ② 정적 PC 누적으로 그 추가 전파가 대부분 기존 멤버에 떨어져 최종 4%만 남는다. ②는 depth 제한으로 공격할 수 있으나 ①은 프로그램의 성질이다.
 
-- **더 큰 문제는 절대량이다.** 어느 규칙이든 커밋 op의 **55~61%가 priority scheduling을 받는다**(crit/reg 54.9%, full/reg 57.2%, crit/mem 58.5%, full/mem 61.4%). 25% partition인데도 이렇게 되는 것은 RS 점유가 낮고 priority op가 0.47 cycle 만에 빠져나가 구획을 빠르게 회전시키기 때문이다(fallback 8%). "full 대비 몇 % 필터링"이 아니라 **가속 대상 자체를 줄이는 것**이 과제다 → TODO D-12. 그림 `analysis/edgeset_noncrit.pdf`.
+- **더 큰 문제는 절대량이다.** 어느 규칙이든 커밋 op의 **55~61%가 priority scheduling을 받는다**(crit/reg 54.9%, full/reg 57.2%, crit/mem 58.5%, full/mem 61.4%). 25% partition인데도 이렇게 되는 것은 RS 점유가 낮고 priority op가 0.47 cycle 만에 빠져나가 구획을 빠르게 회전시키기 때문이다(fallback 8%). "full 대비 몇 % 필터링"이 아니라 **가속 대상 자체를 줄이는 것**이 과제다 → refresh(C10)와 필터 A(C12·C13)로 해결. 그림 `analysis/edgeset_noncrit.pdf`.
 - crit/mem은 `260908_critpath_comparison`의 piq_rfp_critical_slice와 simpoint별 IPC가 **정확히 동일**(타임라인 덤프가 타이밍에 무영향임을 증명). full/mem은 store edge를 새로 따라가므로 260908의 full과 다르다.
 
 ### C4. priority scheduling (25% partition = 88 entry)
@@ -276,7 +296,7 @@ register-only edge, 멤버 전용 할당, P-IQ 25%, RFP PT 1K + store forwarding
 - **왜 성능이 안 떨어지나: LRU가 cold PC부터 버리기 때문이다.** 상주 멤버 PC는 4배 줄어드는데(1079 → 256) 실제로 priority를 받는 커밋 op 비율은 55.0 → 47.4%로 밖에 안 준다. C3에서 본 cold/hot 비대칭이 용량 축에서도 그대로 재현된다.
 - **용량 압박이 chain을 얕게 만드는 효과는 약하다.** chain size 8.9 → 7.7, depth ≤ 2 비중 48.8 → 51.0%. 전파가 끊겨 depth 제한처럼 작동하는 효과는 있으나 2%p 수준이다.
 - filtering은 압박이 커질수록 6.1 → 7.8%로 조금 오르지만 20%와는 거리가 멀다. H2P latency(−17.5 → −17.2%), RFP useful/load(26.1 → 25.7%)도 거의 불변.
-- **다음 지렛대는 depth다.** 멤버 commit의 **48.8%가 depth ≤ 2**이므로 `zereco_critpath_priority_max_depth 2`는 가속 대상을 절반으로 잘라 멤버 비율 약 30%를 만든다(유도값). 목표 구간 20~30%대에 직접 닿는 유일한 knob이다 → 실험 B-3.
+- **다음 지렛대는 depth다.** 멤버 commit의 **48.8%가 depth ≤ 2**이므로 `zereco_critpath_priority_max_depth 2`는 가속 대상을 절반으로 잘라 멤버 비율 약 30%를 만든다(유도값). 목표 구간 20~30%대에 직접 닿는 유일한 knob이다 → C9 (결과: 이득도 같은 비율로 사라져 불채택).
 
 ### C9. chain depth 제한 sweep (`260910_critpath_depth`, `zereco_critpath_priority_max_depth` ∞/8/4/2/1 × {critical, full})
 
@@ -327,7 +347,7 @@ brslice_tab 1K, register-only edge, depth 무제한. 멤버 수명(재확인 없
 - **critical vs full 필터링이 두 배가 된다**(3.1 → 6.8%). SPEC17 3.2 → **10.8%**, Datacenter 4.4 → **11.1%**(2b/10K). 상주 PC 격차도 6% → 22%로 벌어진다.
 - **왜 refresh가 critical 규칙을 선택적으로 만드나.** 멤버는 consumer가 자기를 LPR producer로 지목할 때마다 재확인된다. full 규칙은 모든 producer를 매 instance 재확인하지만, critical 규칙은 **실제로 마지막에 도착한 producer만** 재확인한다. 수명이 짧으면 "한 번 LPR이었던" PC는 떨어지고 "계속 LPR인" PC만 남는다 — 누적(합집합)이 아니라 **반복성**이 멤버 조건이 된다. refresh가 없으면(수명 1.6M) 한 번 지목된 PC가 사실상 영구 멤버라 critical이 full로 수렴했던 것이다.
 - 탈퇴 경로가 바뀐다: 기준에서는 LRU 축출 1.44M vs decay 탈퇴 23K였지만, 1b/10K에서는 decay 탈퇴 897K가 LRU 304K를 앞선다. H2P latency(f→r −17.4 → −17.3%, dep −18.9 → −18.8%)와 RFP(useful/load 25.9 → 25.3%)는 거의 불변.
-- **아직 포화하지 않았다.** 효율이 가장 공격적인 1b/10K에서도 계속 오른다. 다만 가속 대상 44.9%는 목표 20~30%와 거리가 있어 refresh 단독으로는 부족하다 — A/B와의 조합이 필요하다.
+- **아직 포화하지 않았다.** 효율이 가장 공격적인 1b/10K에서도 계속 오른다. 다만 가속 대상 44.9%는 목표 20~30%와 거리가 있어 refresh 단독으로는 부족하다 — A/B와의 조합이 필요하다 → C12·C13.
 
 ### C11. wrong-path priority와 dispatch 기준 filtering (`260910_critpath_offpath_refresh`)
 
@@ -339,7 +359,7 @@ brslice_tab 1K, register-only edge, depth 무제한. 멤버 수명(재확인 없
 | off-path 끔 (oracle) | +9.67 / +9.59% | 18.1 / 19.4% (착시) | 0% | 6.7% |
 | **off-path 켬 (하드웨어)** | **+8.82 / +8.68%** | **55.5 / 58.6%** | **67.8%** | **5.3%** |
 
-- **oracle 낙관의 크기는 IPC 0.85%p**(crit). SPEC17 −0.88, GAP −1.01, DC −0.50%p. 이것이 D-1이 가리고 있던 비용이고, 이후 모든 실험은 off-path 켬이 기준이다.
+- **oracle 낙관의 크기는 IPC 0.85%p**(crit). SPEC17 −0.88, GAP −1.01, DC −0.50%p. 이것이 D-1이 가리고 있던 비용이다. 이 실험 직후에는 off-path 켬을 기준으로 삼으려 했으나, **평가 모드는 oracle(off-path 끔)로 결정됐다**(2026-09-11, 결정 표) — 이 절은 하드웨어 동작의 민감도로 쓴다.
 - **priority 자격으로 dispatch되는 op의 2/3(67.8%)가 wrong-path다.** dispatch의 63.0%가 wrong-path이고 그중 58.9%가 멤버다(on-path 멤버 비율과 비슷 — wrong-path도 대개 같은 hot loop 코드). priority 자원의 대부분이 곧 flush될 일에 쓰이고 있다.
 - 손실 경로는 select 경쟁이다: H2P branch의 scheduler wait 감소가 −89.5 → **−74.7%**로 줄고(wrong-path priority op가 branch와 같은 우선순위로 경쟁), f→r −17.3 → −15.9%, dep −18.8 → −17.7%.
 - 구획 압박: 점유/용량 12.2 → 27.2%, 어느 RS든 구획이 찬 cycle 4.3 → 14.0%, fallback 7.0 → 10.3%. 25% 구획은 아직 포화하지 않아 비율 조정 없이 A/B/C로 넘어간다.
@@ -384,7 +404,7 @@ base: oracle(off-path 0), refresh 1 bit / 10K(수명 20K), brslice_tab 1K, regis
 - **그러나 IPC −1.20%p, SPEC17에서 −2.38%p**(6.29 → 3.91%). 손실은 SPEC17·Datacenter에 몰리고 GAP은 거의 무손실(−0.27%p) — GAP 커널은 edge가 안정적이라 A가 거의 막지 않는다. workload별로 mcf 12.90 → **5.89%**, leela 7.27 → 5.73%, omnetpp 2.85 → 1.72%. A가 전파를 13.6M번 막아 신규 멤버가 1.08M → 0.27M로 줄고, **Target Load/loads 61.4 → 38.4%, RFP useful 25.3 → 17.3%** — RFP 의존도가 큰 mcf가 가장 크게 잃는다.
 - **B는 약하다**(filtering 7.7 / 9.1%, IPC −0.04%p). 탈퇴 멤버 158K / 308K뿐 — refresh(수명 20K)가 같은 decay sweep에서 이미 드물게 지목되는 멤버를 빼고 있어 겹친다(C11에서 예측한 대로).
 - **C는 거의 공짜다**(filtering 8.8%, IPC −0.02%p). 전파를 8.7M번 막지만 멤버십 차이는 1%p — 막힌 producer 대부분이 다른 경로로 이미 멤버다. tie에서 한쪽만 당겨 봐야 slack만큼만 버는 구조라 성능 손실이 없다.
-- **해석**: A가 SPEC17에서 크게 잃는 것은 (1) 임계 3(같은 producer 4연속)이 엄격하고, (2) **H2P root의 edge에도 A가 걸려** branch의 critical 입력이 번갈아 바뀌면 chain 전체가 시작되지 않으며, (3) 그 결과 Target Load가 사라져 RFP가 줄기 때문으로 보인다. SPEC17(게임 트리 탐색, 복잡한 제어 흐름)은 producer flip이 잦다 → TODO: A 조율.
+- **해석**: A가 SPEC17에서 크게 잃는 것은 (1) 임계 3(같은 producer 4연속)이 엄격하고, (2) **H2P root의 edge에도 A가 걸려** branch의 critical 입력이 번갈아 바뀌면 chain 전체가 시작되지 않으며, (3) 그 결과 Target Load가 사라져 RFP가 줄기 때문으로 보인다. SPEC17(게임 트리 탐색, 복잡한 제어 흐름)은 producer flip이 잦다 → A 조율(C13).
   **→ C13에서 (1)·(2)는 반증.** 임계를 1까지 낮춰도 거의 회복되지 않고, root(depth 0)에서 막힌 전파는 0.8%뿐이다. 실제로 막히는 곳은 한 단계 위 depth 1(비교 명령)이다 — x86 조건 분기는 flags만 읽으므로 branch 자신의 edge는 안정적이다.
 
 ### C13. A 조율 — 임계 · hysteresis · depth 면제 (`260911_critpath_edge_conf`)
@@ -410,4 +430,24 @@ base는 C12와 같다. 축: 임계 1/2/3(A1/A2/A3), 불일치 처리(reset = 0�
 - **depth ≤ 1 면제(e1)가 유일하게 듣는다.** IPC 손실 −1.20 → **−0.75%p**(37% 회복), SPEC17 −2.38 → −1.74%p, Target Load/loads 38.4 → 49.1%, filtering은 25.6%로 20% 목표를 유지한다. **GAP은 필터 없는 critical보다 오히려 높다**(13.95 vs 13.77%; sssp 10.41 → 11.23%, pr 4.45 → 4.82%) — GAP에서는 깊은 곳의 흔들리는 멤버가 가속을 방해하고 있었다.
 - **교환 비율은 모든 변형에서 거의 같다**(유도): full 대비 filtering 1%p당 IPC 0.040~0.046%p. knob은 같은 선 위의 위치만 바꾸고 선 자체는 못 바꾼다. e1이 비율이 가장 좋은 쪽(0.040)이다.
 - **남은 손실의 대부분은 mcf의 두 simpoint다.** 82875(weight 0.21)와 28781(0.20)에서 critical의 +13.2% / +8.1%가 **모든 A 변형에서 +0.1~0.5%로 사라진다** — e1, A1도 마찬가지. A가 priority op 비율은 33 → 31%로 조금만 줄이는데(상주 멤버 PC 30 → 21) 이득이 통째로 사라진다. 즉 depth 2 이상에서 critical producer가 거의 매번 바뀌는 edge 뒤의 소수 멤버가 이 phase의 이득 전체를 진다. SPEC17 손실(A3-e1 −1.74%p) 중 **mcf 몫이 1.26%p(72%)** — mcf만 critical 값으로 되돌리면 회복되는 양(유도, geomean 분해). 나머지 SPEC17 workload는 각 0.06~0.14%p. Datacenter 손실(−0.83%p)은 한곳에 몰리지 않는다(clang 0.38 / xgboost 0.26 / gcc 0.18%p).
-- **TEA 격차**: TEA SPEC17 +22.11% 대비 A3-e1 +4.55% → 17.6%p(critical 15.8%p). 필터가 격차를 1.7%p 넓힌다. TEA 수치는 자원을 맞춰 다시 잴 예정(TODO).
+- **TEA 격차**(옛 TEA run 기준): TEA SPEC17 +22.11% 대비 A3-e1 +4.55% → 17.6%p(critical 15.8%p). 필터가 격차를 1.7%p 넓힌다. 현재 TEA 비교 기준은 C14.
+
+### C14. TEA 비교 (`/home/lee/simulations/260913_TEA`, Periodic IPC)
+
+TEA 비교 폴더는 `260913_TEA`다(2026-09-13 사용자 결정, 논문에 이 수치를 쓴다). TEA run의 구성과 출처는
+`260913_TEA/analysis/ipc_speedup.py`에 있다. baseline = `260905_critpath_phaseB/baseline_randq`, 67 simpoint,
+IPC = core.stat의 `Periodic:` 줄(10M~20M), 집계는 C1과 같다. 그림 `260913_TEA/analysis/ipc_speedup.pdf`.
+
+| | GAP | SPEC17 | Datacenter |
+|---|---|---|---|
+| Baseline (Periodic IPC) | 0.931 | 1.291 | 2.246 |
+| TEA | 1.040 (**1.117**) | 1.481 (**1.147**) | 2.389 (**1.064**) |
+| ZERECO critical (필터 없음, `260910_critpath_refresh/crit_1b_10k`) | 1.053 (**1.131**) | 1.374 (**1.064**) | 2.411 (**1.074**) |
+| ZERECO 기준 설정 A3-e1 (`260911_critpath_edge_conf/crit_A3e1`) | 1.055 (**1.133**) | 1.355 (**1.049**) | 2.387 (**1.063**) |
+
+괄호 = baseline 대비 speedup. GAP은 ZERECO가 앞서고(1.133 vs 1.117), Datacenter는 비슷하며(1.063 vs 1.064),
+SPEC17은 TEA가 앞선다(1.147 vs 1.049, 9.8%p). SPEC17 격차는 leela(1.292 vs 1.070)·mcf(1.329 vs 1.080)·xz(1.149 vs 1.045)에서 나온다.
+**민감도 — SPEC17 제외 변형** (2026-09-10 사용자 확정 변형): SPEC17 workload마다 옛 TEA 격차가 가장 컸던 simpoint 1개씩
+(deepsjeng 7248, leela 163012, mcf 25133, omnetpp 66177, xz 23529)을 빼고 GAP·Datacenter는 모두 유지한 62 simpoint.
+TEA를 `260913_TEA`로 바꾼 그림 `260908_critpath_comparison/analysis/cmp62_specdrop_ipc_tea260913.pdf`(Cumulative, 제외 목록 고정):
+TEA SPEC17 1.125 vs Both crit(260908) 1.067. 옛 TEA로는 1.205 vs 1.067이었다(`cmp62_specdrop_ipc.pdf`).
