@@ -151,8 +151,8 @@ critical-path 관련 결정은 2026-09-14부터 코드 기본값(`core.param.def
 
 **읽는 법.** C1~C7은 `260908_critpath_comparison`의 설정(store→load edge 포함, brslice_tab 32K·전체 PC 할당,
 refresh 4 bit / 100K)으로 잰 것이고, 이후 절이 차례로 기준 설정에 도달한다(C8 용량 → C10 refresh → C12·C13 필터 A).
-설정 변경별 IPC 비용은 C11 끝의 분해 표에 있다. **IPC 지표는 C13까지 Cumulative**(warm-up 포함 20M 명령어),
-**C14는 Periodic**(warm-up 뒤 10M~20M 구간)이다 — speedup 차이는 0.007 이내.
+설정 변경별 IPC 비용은 C11 끝의 분해 표에 있다(Periodic 기준 P-IQ + RFP 분해는 C15). **IPC 지표는 C13까지 Cumulative**(warm-up 포함 20M 명령어),
+**C14·C15는 Periodic**(warm-up 뒤 10M~20M 구간)이다 — speedup 차이는 0.007 이내.
 
 **C1~C7 설정.** 352-entry 머신, random queue, 67 simpoint. 6 config = {P-IQ, RFP, P-IQ+RFP} × {critical slice, full slice}.
 P-IQ 25% partition non-stall, RFP PT 1K + store forwarding 모드 1, decay 100K, depth 무제한.
@@ -451,3 +451,26 @@ SPEC17은 TEA가 앞선다(1.147 vs 1.049, 9.8%p). SPEC17 격차는 leela(1.292 
 (deepsjeng 7248, leela 163012, mcf 25133, omnetpp 66177, xz 23529)을 빼고 GAP·Datacenter는 모두 유지한 62 simpoint.
 TEA를 `260913_TEA`로 바꾼 그림 `260908_critpath_comparison/analysis/cmp62_specdrop_ipc_tea260913.pdf`(Cumulative, 제외 목록 고정):
 TEA SPEC17 1.125 vs Both crit(260908) 1.067. 옛 TEA로는 1.205 vs 1.067이었다(`cmp62_specdrop_ipc.pdf`).
+
+### C15. 새 인프라에서 260908 비교 재현 (`260914_zereco_new_baseline`, Periodic IPC)
+
+6 config 모두 register edge만, brslice_tab 1K(128 × 8), 멤버 전용 할당이다. 메커니즘 flag는 260908과 같다.
+criticality 설정(사용자 결정 2026-09-14): P-IQ only·RFP only는 260908 그대로(refresh 4 bit / 100K, 필터 A 없음),
+Both crit = 기준 설정(코드 기본값: 1 bit / 10K + A3-e1), Both full = PUBS식 full slice + 1 bit / 10K.
+baseline·TEA·집계는 C14와 같다(67 simpoint). 정합성: Both crit은 `crit_A3e1`과, Both full은 `260910_critpath_refresh/full_1b_10k`와
+67 simpoint 모두 cycle까지 같다. 실험 폴더의 `baseline_randq`는 260905 원본의 복사본이다(67 simpoint 동일).
+스크립트 `analysis/plot_cmp67_periodic.py`(→ `cmp67_periodic.txt`), 그림 `analysis/cmp67_periodic_ipc.pdf`, 분해 `analysis/both_decomp.py`.
+
+| speedup | GAP | SPEC17 | Datacenter | Avg. (14 workload) |
+|---|---|---|---|---|
+| P-IQ crit / full | 1.055 / 1.055 | 1.031 / 1.030 | 1.019 / 1.018 | 1.039 / 1.038 |
+| RFP crit / full | 1.083 / 1.083 | 1.035 / 1.033 | 1.059 / 1.059 | 1.061 / 1.060 |
+| **Both crit (기준)** / full | **1.133** / 1.131 | **1.049** / 1.062 | **1.063** / 1.073 | **1.088** / 1.094 |
+| TEA | 1.117 | 1.147 | 1.064 | 1.116 |
+
+- **인프라 통일의 비용은 작다**(측정, 260908 대비 Avg.): P-IQ crit −0.19, P-IQ full −0.10, RFP crit·full +0.01%p. Both는 crit −0.31, full −0.12%p(아래 분해).
+- **Both 단계 분해**(측정, Avg., 앞 단계 대비): critical 1.0982(260908) → 새 인프라 1.0951(−0.31, `260910_critpath_depth/crit_inf`) → refresh 1b/10K 1.0944(−0.07, `crit_1b_10k`) → 필터 A3-e1 1.0875(**−0.69**). full 1.0940 → 1.0929(−0.12, `full_inf`) → 1.0937(+0.09).
+- **필터 A가 crit/full 순서를 뒤집는다.** A 전에는 crit이 full보다 높고(1.0944 vs 1.0937), A3-e1 뒤에는 낮다(1.0875). A 비용 −0.69%p의 workload별 몫: mcf −0.39(56%), clang −0.11, xgboost −0.08, 나머지 SPEC17·gcc 각 −0.02~−0.05, GAP은 sssp +0.06·pr +0.05로 이득. C13(Cumulative, −0.75%p·mcf 63%)과 같은 그림이다.
+- 필터 A가 없는 단독 행에서는 crit ≈ full이다(Avg. 차이 0.07%p).
+- **거의 가산적**(유도, 같은 설정 = 새 인프라·4b/100K·필터 A 없음): P-IQ +3.89 + RFP +6.05 = 9.94% vs Both +9.51%(`crit_inf`).
+- TEA 대비는 C14와 같다: GAP은 Both crit이 앞서고(1.133 vs 1.117), Datacenter는 비슷하며(1.063 vs 1.064), SPEC17은 TEA가 9.8%p 앞선다.
