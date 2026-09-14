@@ -90,6 +90,7 @@ knob은 전부 기본 0(off)이고 off일 때 타이밍이 기존과 동일(새 
   - config: 현재 base + `--zereco_critpath_edge_conf_min 2 --zereco_critpath_edge_conf_exempt_depth 1` / `... _exempt_depth 2`
 - **A 최종 설정은 4단계 후 결정.** 참고: A3-e1은 A3-h-e1보다 IPC·filtering 둘 다 낫다 — hysteresis는 쓰지 않는다
 - **mcf 82875 / 28781 진단 — 남은 손실의 핵심.** A3-e1의 전체 손실 −0.75%p 중 **mcf 하나가 0.47%p(63%)**, 나머지 workload는 각 0.08%p 이하. 어떤 멤버 PC가 이 phase의 이득을 지는지: critical vs A3-e1에서 brslice_tab 멤버(PC, depth, edge confidence, producer flip 빈도)를 끝에 dump해 비교 — 코드 필요(진단 전용 knob). 결과에 따라 "번갈아 오는 두 producer를 둘 다 따라가는" 식의 A 보완을 검토
+- (선택) **owner 기준 chain 제거 — 기본은 하지 않는다**(DESIGN 결정 표, 2026-09-14). 시험한다면 owner branch의 HBT counter가 **0**이 됐을 때만(강등 뒤 50K 동안 오예측 없음) 멤버에서 뺀다 — 3-bit counter의 여유를 hysteresis로 써서 강등·복귀를 반복하는 branch의 chain을 지우지 않게. refresh sweep에 조건 하나 추가(knob, 코드 몇 줄). 비교: refresh만 / refresh + owner 제거 / owner 제거만
 - **주의**: zereco run은 test 브랜치에서 빌드·실행할 것. TEA 브랜치에 있는 동안 `./sci --sim zereco_dbg`를 부르면 TEA 코드로 빌드된다
 
 **평가 모드 (2026-09-11 사용자 결정)**: 논문 평가는 **oracle(off-path 0) + commit 기준 filtering**으로 간다. 하드웨어 동작 수치는 C11에 보관(IPC −0.85%p). 논문에는 "wrong-path 명령어는 priority를 받지 않는다고 가정"을 명시하고 C11을 민감도로 제시. 이후 시뮬레이터에서만 가능한 관점의 결과(oracle/limit study)도 요청 예정 — 그런 결과는 상한(limit study)으로 표기.

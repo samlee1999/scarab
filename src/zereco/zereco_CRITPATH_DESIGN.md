@@ -80,7 +80,9 @@ dynamic producer), ② decode-time → **commit-time** 학습 (on-path만, wrong
 | 항목 | 결정 | 근거 |
 |---|---|---|
 | chain seed 게이트 | **H2P-only** (HBT counter > 1) | 전 branch 삽입은 멤버 인구만 키움 |
-| membership decay | 100K retire마다 confirm −1, 0이면 탈퇴 | phase 적응용 |
+| membership refresh | **confirm 1 bit, 10K commit(micro-op)마다 sweep** — 창 하나 동안 재지목(멤버의 전파가 이 PC를 지목하거나, root는 H2P 상태로 commit)이 없으면 탈퇴, 수명 10K~20K | C10: 효율 +13%, critical vs full 필터링 3.1 → 6.8%. 옛 설정(4 bit / 100K, 수명 1.6M)에서는 한 번 지목된 PC가 사실상 영구 멤버라 critical이 full로 수렴했다 |
+| brslice_tab 크기 | **1K entry** (128 set × 8-way) | C8: 512~32K 사이 차이가 작다. 상주 멤버 PC는 85~170 (C12·C13) |
+| chain 제거 방식 | **refresh만 — root branch가 H2P에서 강등돼도 owner 기준으로 chain을 한꺼번에 지우지 않는다** (2026-09-14 사용자 결정) | HBT는 오예측 한 번이면 H2P로 복귀하고(counter 1 → 2) 강등은 50K decay 때만 일어나, 경계선 branch는 강등·복귀를 반복할 수 있다. 일괄 제거는 그때마다 chain을 다시 쌓게 한다(branch instance당 한 층). refresh의 층별 연쇄 탈퇴가 유예 기간이 된다. owner 제거는 공유 멤버(재지목의 11.2%, A3-e1)도 함께 지우고, refresh를 대신하지도 못한다(살아 있는 chain 안의 정리, A의 불안정 edge는 처리 불가). 선택 실험은 TODO |
 | retention threshold | 불채택 | 재확인이 노화를 압도해 인구가 줄지 않음 |
 | Δ-window | Δ=0 (last producer만) | TODO D-2 |
 | depth 제한 | 없음 | 인구를 줄이는 유일한 지렛대 — TODO D-4 |
