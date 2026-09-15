@@ -12,7 +12,6 @@
 
 | # | 내용 | 상태 · 메모 |
 |---|---|---|
-| **N-1** | **필터 A만 끈 기준 설정** (`260915_zereco_new_baseline_noA`, descriptor `json/zereco_dbg_ipc.json`, 1 config × 67, 2026-09-15 사용자 요청): 260914 `piq_rfp_critical_slice` + `--zereco_critpath_edge_conf_min 0` (P-IQ 25%, brslice_tab 1K, refresh 1b/10K 그대로) | **descriptor 설정 완료, 실행 대기.** `260910_critpath_refresh/crit_1b_10k`(바이너리 7ea0a5f, Periodic 1.0944)와 같은 설정이라 simpoint별 cycle까지 같아야 한다. 짝: 260914 `piq_rfp_full_slice`(1.0937), `piq_rfp_critical_slice`(A3-e1, 1.0875) |
 | **N-2** | **필터 A 최적점**: A2-e1(임계 2, depth ≤ 1 면제) — filtering 여유(A3-e1 25.6% vs 목표 20%)를 성능으로 바꾼다. 같은 배치에 A2-e2(depth ≤ 2 면제) 권장 — 면제 깊이가 임계보다 센 지렛대다(A3-e1에서 남은 차단의 52%가 depth 2, GAP은 87%) | 예상(유도): A2-e1 IPC +0.05~0.10%p, filtering −1%p. config: 기준 + `--zereco_critpath_edge_conf_min 2` / 추가로 `--zereco_critpath_edge_conf_exempt_depth 2`. 결과로 A 최종값을 정한다 |
 | **N-3** | **mcf 82875 / 28781 진단** — A3-e1의 전체 손실 −0.75%p 중 mcf가 0.47%p(63%), 나머지 workload는 각 0.08%p 이하(Cumulative, C13). Periodic(C15)으로는 −0.69%p 중 mcf 0.39%p(56%), 다음이 clang 0.11·xgboost 0.08%p. 예산 sweep(C16)의 모든 점에서도 mcf의 crit − full이 −4.4~−4.8%p로, crit/full 순서를 정하는 요인이다. critical vs A3-e1에서 brslice_tab 멤버(PC, depth, edge 신뢰도, producer flip 빈도)를 끝에 dump해 어떤 멤버가 빠지는지 비교 | 진단 전용 knob 필요(코드). 결과에 따라 "번갈아 오는 두 producer를 둘 다 따라가는" 식의 A 보완 검토 |
 | (선택) | **owner 기준 chain 제거** — 기본은 하지 않는다(DESIGN 결정 표, 2026-09-14). 시험한다면 owner branch의 HBT counter가 **0**이 됐을 때만 제거(강등 뒤 50K 동안 오예측 없음) — 3-bit counter의 여유를 hysteresis로 써서 강등·복귀를 반복하는 branch의 chain을 지우지 않게 | refresh sweep에 조건 하나 추가(knob, 코드 몇 줄). 비교: refresh만 / refresh + owner 제거 / owner 제거만 |
@@ -48,7 +47,7 @@
 ## 4. 워크로드 · 방법론
 
 - **67 simpoint**(workload당 5, clang 4, gcc 3; 14 workload) — TEA 비교와 동일 표본. weight 가중 집계, 효과 기준 선별 금지.
-- **IPC 지표 — 사용자 확인 필요**: DESIGN C1~C13은 Cumulative(warm-up 포함 20M), C14(TEA 비교)·C15(비교 사다리)는 Periodic(10M~20M). 앞으로 어느 쪽을 기본으로 할지 정한다 — speedup 차이는 0.007 이내지만 절대 IPC는 다르다.
+- **IPC 지표 — 사용자 확인 필요**: DESIGN C1~C13은 Cumulative(warm-up 포함 20M), C14 이후(TEA 비교, 비교 사다리, 예산 sweep, 필터 A off)는 Periodic(10M~20M). 앞으로 어느 쪽을 기본으로 할지 정한다 — speedup 차이는 0.007 이내지만 절대 IPC는 다르다.
 - frontend watchdog으로 죽는 simpoint는 원인 추적 없이 제외한다(67 목록은 현재 머신에서 문제없음).
 - 다른 목록: 108 simpoint(`json/zereco_dbg_rs352.json`), Golden Cove 186용 105 simpoint(`json/zereco_dbg_gc186_sweep.json`) — 보류. 108로 돌아갈 경우 deepsjeng 133677·164928은 퇴화한 trace(H2P misprediction 0, uop/instruction 4.0, chain 멤버 0)라 결과와 무관한 기준으로 제외하고 명시한다.
 

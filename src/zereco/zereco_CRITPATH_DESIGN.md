@@ -152,7 +152,7 @@ critical-path 관련 결정은 2026-09-14부터 코드 기본값(`core.param.def
 **읽는 법.** C1~C7은 `260908_critpath_comparison`의 설정(store→load edge 포함, brslice_tab 32K·전체 PC 할당,
 refresh 4 bit / 100K)으로 잰 것이고, 이후 절이 차례로 기준 설정에 도달한다(C8 용량 → C10 refresh → C12·C13 필터 A).
 설정 변경별 IPC 비용은 C11 끝의 분해 표에 있다(Periodic 기준 P-IQ + RFP 분해는 C15). **IPC 지표는 C13까지 Cumulative**(warm-up 포함 20M 명령어),
-**C14·C15는 Periodic**(warm-up 뒤 10M~20M 구간)이다 — speedup 차이는 0.007 이내.
+**C14 이후는 Periodic**(warm-up 뒤 10M~20M 구간)이다 — speedup 차이는 0.007 이내.
 
 **C1~C7 설정.** 352-entry 머신, random queue, 67 simpoint. 6 config = {P-IQ, RFP, P-IQ+RFP} × {critical slice, full slice}.
 P-IQ 25% partition non-stall, RFP PT 1K + store forwarding 모드 1, decay 100K, depth 무제한.
@@ -500,3 +500,19 @@ Both crit(기준) vs Both full. 각 config는 260914의 `piq_rfp_*`에서 knob �
 - **full이 버티는 이유**(측정): fallback 비율이 두 규칙에서 거의 같다(10%에서 24.8 vs 26.2%). 후보가 34% 많아도 구획이 찬 cycle은 9.0 vs 11.6%로 차이가 작다. 테이블 쪽은 C8처럼 LRU가 cold PC부터 버려서, full이 128 entry(상주 71 PC)로 줄어도 IPC는 0.45%p만 잃는다.
 - **격차의 대부분은 mcf다**: 모든 점에서 crit − full이 −4.4~−4.8%p로 예산과 무관하다(C15의 필터 A 비용). GAP은 모든 점에서 crit이 앞선다(+0.05~+0.21%p). Datacenter는 점마다 흔들린다(xgboost ±1%p).
 - **결론**: 예산 축은 crit/full 순서를 정하지 못한다. 순서를 정하는 것은 필터 A의 mcf 손실이다(N-3).
+
+### C17. 필터 A만 끈 기준 설정 (`260915_zereco_new_baseline_noA`, Periodic IPC)
+
+260914 `piq_rfp_critical_slice` + `--zereco_critpath_edge_conf_min 0`(P-IQ 25%, brslice_tab 1K, refresh 1b/10K 그대로).
+정합성: `260910_critpath_refresh/crit_1b_10k`(필터 코드가 생기기 전 바이너리 7ea0a5f)와 67 simpoint 모두 cycle까지 같다 —
+현재 바이너리에서 필터 A를 끄면 필터가 없던 코드와 동일하게 동작한다. 스크립트 `analysis/noA_check.py` → `noA_check.txt`.
+
+| | GAP | SPEC17 | Datacenter | Avg. | 상주 멤버 PC | priority 후보 / commit op | Target Load / commit op |
+|---|---|---|---|---|---|---|---|
+| crit, 필터 A off | 1.1310 | 1.0643 | 1.0735 | **1.0944** | 165 | 48.3% | 10.70% |
+| crit, A3-e1 (기준) | 1.1332 | 1.0495 | 1.0629 | 1.0875 | 80 | 38.5% | 8.17% |
+| full slice | 1.1312 | 1.0623 | 1.0734 | 1.0937 | 215 | 51.7% | 11.47% |
+
+- **필터 A를 끄면 crit이 full과 같거나 약간 앞선다**(+0.07%p; SPEC17 +0.19, GAP −0.02, DC +0.01%p). 이 우위의 72%가 mcf(+0.70%p)에서 나온다.
+- **대신 절감이 작다**: full 대비 상주 멤버 −23%, priority 후보 −7%. A3-e1은 −63% / −26%. 절감 가운데 필터 A의 몫 = 멤버 PC 감소의 63%, priority 후보 감소의 74%(유도, 위 표).
+- **A3-e1은 GAP에서만 필터 A off보다 낫다**(+0.22%p; sssp +0.9, pr +0.6%p) — C13에서 본 "깊은 곳의 흔들리는 멤버가 가속을 방해하는" 효과다. SPEC17(−1.48%p)과 Datacenter(−1.06%p)에서는 잃는다.
