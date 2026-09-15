@@ -506,6 +506,7 @@ Both crit(기준) vs Both full. 각 config는 260914의 `piq_rfp_*`에서 knob �
 260914 `piq_rfp_critical_slice` + `--zereco_critpath_edge_conf_min 0`(P-IQ 25%, brslice_tab 1K, refresh 1b/10K 그대로).
 정합성: `260910_critpath_refresh/crit_1b_10k`(필터 코드가 생기기 전 바이너리 7ea0a5f)와 67 simpoint 모두 cycle까지 같다 —
 현재 바이너리에서 필터 A를 끄면 필터가 없던 코드와 동일하게 동작한다. 스크립트 `analysis/noA_check.py` → `noA_check.txt`.
+그림: 결과를 `260915_zereco_new_baseline_PIQ_sweep`에 복사해 C16의 두 sweep 그림 기준점(25% · 1K)에 "crit., filter A off" 막대로 넣었다(Avg. 그룹에 수치 표시).
 
 | | GAP | SPEC17 | Datacenter | Avg. | 상주 멤버 PC | priority 후보 / commit op | Target Load / commit op |
 |---|---|---|---|---|---|---|---|
