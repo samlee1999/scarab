@@ -499,11 +499,14 @@ void debug_print_ready_list() {
 
 /**************************************************************************************/
 /* tea_dispatch_to_rs: Dispatch TEA ops to Node Table for RS dispatch
- *   TEA ops use Node Table for issue/wakeup but skip retirement (commit bypass) */
+ *   TEA ops use Node Table for issue/wakeup but skip retirement (commit bypass).
+ *   *rs_budget = TEA ops that may still enter the RSs this cycle (shared with
+ *   tea_dispatch_retry); an op left in the rename stage waits for next cycle.
+ *   Returns TRUE if the budget held an op back. */
 
-static void tea_dispatch_to_rs(Stage_Data* tea_sd) {
+static Flag tea_dispatch_to_rs(Stage_Data* tea_sd, uns* rs_budget) {
   if (!tea_sd || tea_sd->op_count == 0) {
-    return;
+    return FALSE;
   }
 
   for (uns i = 0; i < tea_sd->max_op_count; i++) {
@@ -514,6 +517,10 @@ static void tea_dispatch_to_rs(Stage_Data* tea_sd) {
 
     ASSERT(node->proc_id, op->thread_id == 1);  /* Verify TEA op */
     ASSERT(node->proc_id, op->proc_id == node->proc_id);
+
+    if (*rs_budget == 0) {
+      return TRUE;
+    }
 
     /* Check Node Table capacity */
     if (is_node_table_full()) {
@@ -558,6 +565,7 @@ static void tea_dispatch_to_rs(Stage_Data* tea_sd) {
       op->rs_id = (Counter)rs_id;
       node_issue_queue_allocate_rs_entry(node, op, (uns)rs_id);
       rs->tea_op_count++;
+      (*rs_budget)--;
 
       /* Register in ready list if all sources are ready */
       if (op->srcs_not_rdy_vector == 0) {
@@ -578,16 +586,22 @@ static void tea_dispatch_to_rs(Stage_Data* tea_sd) {
 
     STAT_EVENT(node->proc_id, TEA_OPS_DISPATCHED);
   }
+  return FALSE;
 }
 
 /**************************************************************************************/
 /* tea_dispatch_retry: Retry RS dispatch for TEA ops that failed due to RS full.
- *   Called after node_issue_queue_update() so clear() has freed RS slots. */
+ *   Called after node_issue_queue_update() so clear() has freed RS slots.
+ *   Draws on the same per-cycle budget as tea_dispatch_to_rs(); returns TRUE if
+ *   the budget held an op back. */
 
-static void tea_dispatch_retry() {
+static Flag tea_dispatch_retry(uns* rs_budget) {
   for (Op* op = node->node_head; op; op = op->next_node) {
     if (op->thread_id != 1 || op->state != OS_IN_ROB)
       continue;
+
+    if (*rs_budget == 0)
+      return TRUE;
 
     int64 rs_id = node_dispatch_find_emptiest_rs(op);
     if (rs_id == NODE_ISSUE_QUEUE_RS_SLOT_INVALID) {
@@ -600,6 +614,7 @@ static void tea_dispatch_retry() {
     op->rs_id = (Counter)rs_id;
     node_issue_queue_allocate_rs_entry(node, op, (uns)rs_id);
     rs->tea_op_count++;
+    (*rs_budget)--;
 
     if (op->srcs_not_rdy_vector == 0) {
       op->state = (cycle_count + 1 >= op->rdy_cycle ? OS_READY : OS_WAIT_FWD);
@@ -608,6 +623,7 @@ static void tea_dispatch_retry() {
       op->in_rdy_list = TRUE;
     }
   }
+  return FALSE;
 }
 
 /**************************************************************************************/
@@ -625,9 +641,12 @@ void update_node_stage(Stage_Data* src_sd) {
   STAT_EVENT(node->proc_id, NODE_CYCLE);
   STAT_EVENT(node->proc_id, POWER_CYCLE);
 
-  /* TEA ops: Dispatch to RS first (bypassing ROB) */
+  /* TEA ops: Dispatch to RS first (bypassing ROB).  New and retried TEA ops
+   * share one per-cycle RS fill budget (tea_rs_fill_width, 0 = unlimited). */
+  uns tea_rs_budget = TEA_RS_FILL_WIDTH ? TEA_RS_FILL_WIDTH : MAX_UNS;
+  Flag tea_rs_fill_limited = FALSE;
   if (TEA_ENABLE && tea_is_active(node->proc_id)) {
-    tea_dispatch_to_rs(&tea_rename_stages[node->proc_id]->sd);
+    tea_rs_fill_limited = tea_dispatch_to_rs(&tea_rename_stages[node->proc_id]->sd, &tea_rs_budget);
   }
 
   /* insert ops coming from the previous stage*/
@@ -641,8 +660,10 @@ void update_node_stage(Stage_Data* src_sd) {
   /* TEA RS dispatch retry: previous cycle's RS-full TEA ops get another chance
    * after clear() has freed RS slots. */
   if (TEA_ENABLE && tea_is_active(node->proc_id)) {
-    tea_dispatch_retry();
+    tea_rs_fill_limited |= tea_dispatch_retry(&tea_rs_budget);
   }
+  if (tea_rs_fill_limited)
+    STAT_EVENT(node->proc_id, TEA_RS_FILL_WIDTH_LIMITED_CYCLES);
 
   /* get rid of the ops that are finished */
   node_retire();

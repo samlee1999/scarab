@@ -381,6 +381,9 @@ DEF_PARAM(fill_buffer_size, FILL_BUFFER_SIZE, uns, uns, 512, )
 // TEA Thread Parameters
 DEF_PARAM(tea_enable, TEA_ENABLE, Flag, Flag, FALSE, )
 DEF_PARAM(tea_fetch_width, TEA_FETCH_WIDTH, uns, uns, 2, )
+/* TEA ops that may enter the reservation stations per cycle, new ops from the TEA rename stage and ops retried after
+ * a full RS partition together.  0 = unlimited, the behavior of every TEA run before 2026-09-16. */
+DEF_PARAM(tea_rs_fill_width, TEA_RS_FILL_WIDTH, uns, uns, 0, )
 DEF_PARAM(tea_rs_reservation, TEA_RS_RESERVATION, uns, uns, 192, )
 DEF_PARAM(tea_preg_reservation, TEA_PREG_RESERVATION, uns, uns, 192, )
 DEF_PARAM(tea_store_buffer_size, TEA_STORE_BUFFER_SIZE, uns, uns, 64, )
