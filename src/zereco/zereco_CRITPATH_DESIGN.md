@@ -333,6 +333,7 @@ brslice_tab 1K entry 고정, register-only edge, P-IQ 25%, RFP PT 1K + store for
 
 brslice_tab 1K, register-only edge, depth 무제한. 멤버 수명(재확인 없이 버티는 retire 수) = interval × 2^bits. 기준점 4b/100K는 C9의 `*_inf`를 재사용(같은 바이너리).
 스크립트 `analysis/analyze_refresh.py` → `refresh_results.txt`, 그림 `analysis/refresh_vs_depth.pdf`.
+IPC 외 효과 그림(2026-09-15, warm-up 뒤 구간 통계): `analysis/refresh_members.pdf`(수명별 상주 멤버 PC crit / full과 격차 −5.8 → −23.2%), `analysis/refresh_exits.pdf`(멤버 탈퇴 경로 — LRU 축출 vs refresh, refresh 몫 2 → 76%). 스크립트 `analysis/plot_refresh_effect.py`.
 
 | 수명 | 1.6M (기준) | 400K | 200K | 160K | 40K | **20K** |
 |---|---|---|---|---|---|---|
