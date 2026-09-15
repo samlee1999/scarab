@@ -153,6 +153,7 @@ critical-path 관련 결정은 2026-09-14부터 코드 기본값(`core.param.def
 refresh 4 bit / 100K)으로 잰 것이고, 이후 절이 차례로 기준 설정에 도달한다(C8 용량 → C10 refresh → C12·C13 필터 A).
 설정 변경별 IPC 비용은 C11 끝의 분해 표에 있다(Periodic 기준 P-IQ + RFP 분해는 C15). **IPC 지표는 C13까지 Cumulative**(warm-up 포함 20M 명령어),
 **C14 이후는 Periodic**(warm-up 뒤 10M~20M 구간)이다 — speedup 차이는 0.007 이내.
+**머신은 C17까지 352-entry 머신(`PARAMS.golden_cove_rs352`)이고, C18부터 원본 Golden Cove 머신(`PARAMS.golden_cove_original`, main RS 186)이다** — 두 머신의 수치는 직접 비교하지 않는다.
 
 **C1~C7 설정.** 352-entry 머신, random queue, 67 simpoint. 6 config = {P-IQ, RFP, P-IQ+RFP} × {critical slice, full slice}.
 P-IQ 25% partition non-stall, RFP PT 1K + store forwarding 모드 1, decay 100K, depth 무제한.
@@ -461,6 +462,8 @@ Both crit = 기준 설정(코드 기본값: 1 bit / 10K + A3-e1), Both full = PU
 baseline·TEA·집계는 C14와 같다(67 simpoint). 정합성: Both crit은 `crit_A3e1`과, Both full은 `260910_critpath_refresh/full_1b_10k`와
 67 simpoint 모두 cycle까지 같다. 실험 폴더의 `baseline_randq`는 260905 원본의 복사본이다(67 simpoint 동일).
 스크립트 `analysis/plot_cmp67_periodic.py`(→ `cmp67_periodic.txt`), 그림 `analysis/cmp67_periodic_ipc.pdf`, 분해 `analysis/both_decomp.py`.
+**주의(2026-09-15 확인):** 이 폴더(현재 이름 `260914_zereco_new_baseline (Keep)`)의 `piq_rfp_critical_slice`는 2026-09-15 13:36에 필터 A off run(`--zereco_critpath_edge_conf_min 0`, C17)으로 바뀌어 있다.
+그 뒤에 만든 `analysis/suite_ipc_speedup_vs_baseline_randq.pdf`의 "P-IQ + RFP crit."(Avg. 1.094)은 필터 A off 값이다. 아래 표의 Both crit(1.088)은 교체 전의 A3-e1 run이다.
 
 | speedup | GAP | SPEC17 | Datacenter | Avg. (14 workload) |
 |---|---|---|---|---|
@@ -518,3 +521,28 @@ Both crit(기준) vs Both full. 각 config는 260914의 `piq_rfp_*`에서 knob �
 - **필터 A를 끄면 crit이 full과 같거나 약간 앞선다**(+0.07%p; SPEC17 +0.19, GAP −0.02, DC +0.01%p). 이 우위의 72%가 mcf(+0.70%p)에서 나온다.
 - **대신 절감이 작다**: full 대비 상주 멤버 −23%, priority 후보 −7%. A3-e1은 −63% / −26%. 절감 가운데 필터 A의 몫 = 멤버 PC 감소의 63%, priority 후보 감소의 74%(유도, 위 표).
 - **A3-e1은 GAP에서만 필터 A off보다 낫다**(+0.22%p; sssp +0.9, pr +0.6%p) — C13에서 본 "깊은 곳의 흔들리는 멤버가 가속을 방해하는" 효과다. SPEC17(−1.48%p)과 Datacenter(−1.06%p)에서는 잃는다.
+
+### C18. 원본 Golden Cove 머신에서 전체 재추출 (`260915_zereco_golden_cove_original`, Periodic IPC)
+
+- **머신:** `PARAMS.golden_cove_original` — RS 97/70/19(main 186, TEA 예약 없음), PRF 280/332, issue 6 / retire 8, ROB 512, LQ/SQ 192/114, dcache 3R/2W, realistic return stack, mem_req buffer 32.
+- **표본:** 66 simpoint. 67개에서 gcc/939를 뺐고(watchdog, 사용자 결정), gcc는 2766·907만 남는다.
+- **baseline:** `baseline_randq`(random queue, 메커니즘 전부 끔). oldest first 행도 이 baseline 대비라 scheduler 자체의 효과를 포함한다. oldest first baseline은 의도적으로 두지 않았다.
+- **config:** crit 행은 모두 기준 설정(코드 기본값: A3-e1 + 1b/10K)이고, full 행은 `--zereco_critpath_full_slice 1`만 더했다. P-IQ 25%는 24/18/5 entry다.
+- **정합성:** 13 config × 66 run이 모두 20M에 도달했고, 리비전은 전부 b9bd563이며, 머신과 config flag를 검증했다.
+- **집계:** C15와 같다(workload 안에서 weight 재정규화, Avg. = 14 workload geomean).
+- **산출물:** 스크립트 `analysis/plot_suite_ipc_speedup.py`(→ `suite_ipc_speedup_vs_baseline_randq.txt/.csv`, workload별 `workload_ipc_speedup_vs_baseline_randq.csv`), 그림 `analysis/suite_ipc_speedup_vs_baseline_randq.pdf`(위 random queue, 아래 oldest first).
+
+| speedup (crit / full) | GAP | SPEC17 | Datacenter | Avg. |
+|---|---|---|---|---|
+| P-IQ, random queue | 1.020 / 1.020 | 1.012 / 1.012 | 0.999 / 1.001 | 1.013 / 1.013 |
+| RFP, random queue | 1.072 / 1.070 | 1.023 / 1.034 | 1.045 / 1.048 | 1.049 / 1.052 |
+| **P-IQ + RFP, random queue (기준)** | **1.086** / 1.084 | **1.035** / 1.045 | **1.045** / 1.052 | **1.058** / 1.063 |
+| P-IQ, oldest first | 1.027 / 1.027 | 1.024 / 1.024 | 1.008 / 1.013 | 1.022 / 1.023 |
+| RFP, oldest first | 1.096 / 1.094 | 1.048 / 1.058 | 1.058 / 1.061 | 1.070 / 1.074 |
+| P-IQ + RFP, oldest first | 1.095 / 1.093 | 1.048 / 1.058 | 1.054 / 1.061 | 1.069 / 1.073 |
+
+- **이득이 352-entry 머신보다 작다**(측정, 같은 설정인 P-IQ + RFP만 비교): crit 1.0875(C15) → 1.0584, full 1.0937 → 1.0629. 단독 행은 C15와 criticality 설정이 달라 비교하지 않는다.
+- **이 머신에서도 full이 crit보다 높다**(측정, Avg.): P-IQ + RFP −0.45 / −0.41%p(random / oldest), RFP −0.37 / −0.35, P-IQ −0.03 / −0.10.
+  - P-IQ + RFP random 격차의 절반(−0.23%p)이 mcf에서 나온다. C15에서 본 필터 A 비용과 같은 양상이다.
+  - GAP에서는 crit이 앞선다(P-IQ + RFP random 1.086 vs 1.084). workload 중에서는 sssp가 crit 쪽으로 가장 크게 기운다.
+- **oldest first에서는 P-IQ가 RFP 위에 더하는 것이 없다**(crit 1.070 → 1.069). random queue에서는 +0.97%p(1.049 → 1.058)다. P-IQ only 자체도 random queue에서 1.3%로 작다.
