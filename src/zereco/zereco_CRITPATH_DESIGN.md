@@ -474,3 +474,29 @@ baseline·TEA·집계는 C14와 같다(67 simpoint). 정합성: Both crit은 `cr
 - 필터 A가 없는 단독 행에서는 crit ≈ full이다(Avg. 차이 0.07%p).
 - **거의 가산적**(유도, 같은 설정 = 새 인프라·4b/100K·필터 A 없음): P-IQ +3.89 + RFP +6.05 = 9.94% vs Both +9.51%(`crit_inf`).
 - TEA 대비는 C14와 같다: GAP은 Both crit이 앞서고(1.133 vs 1.117), Datacenter는 비슷하며(1.063 vs 1.064), SPEC17은 TEA가 9.8%p 앞선다.
+
+### C16. 하드웨어 예산 sweep — P-IQ 구획과 brslice_tab 크기 (`260915_zereco_new_baseline_PIQ_sweep`, Periodic IPC)
+
+Both crit(기준) vs Both full. 각 config는 260914의 `piq_rfp_*`에서 knob 하나만 바꿨다(descriptor `json/zereco_dbg_ipc.json`, 바이너리 코드는 260914와 같음).
+25% · 1K 기준점은 260914 결과다. 집계는 C15와 같다(67 simpoint, Avg. = 14 workload geomean, 비율 통계는 가중 카운터를 합한 뒤 나눔).
+스크립트 `analysis/plot_budget_sweep.py`(→ `budget_sweep.txt`), 그림 `analysis/piq_sweep_periodic_ipc.pdf`, `analysis/tab_sweep_periodic_ipc.pdf`.
+
+| P-IQ 구획 (entry / 353) | 10% (36) | 15% (53) | 20% (70) | 25% (88) |
+|---|---|---|---|---|
+| Avg. speedup crit / full | 1.0806 / 1.0842 | 1.0836 / 1.0888 | 1.0862 / 1.0909 | 1.0875 / 1.0937 |
+| crit − full | −0.35%p | −0.52%p | −0.47%p | −0.62%p |
+| priority 후보의 fallback crit / full | 24.8 / 26.2% | 16.9 / 17.3% | 11.8 / 11.6% | 8.4 / 8.0% |
+| 구획이 찬 cycle crit / full | 9.0 / 11.6% | 6.7 / 8.8% | 5.2 / 6.6% | 4.1 / 5.1% |
+
+| brslice_tab (8-way) | 128 | 256 | 512 | 1K |
+|---|---|---|---|---|
+| Avg. speedup crit / full | 1.0845 / 1.0892 | 1.0866 / 1.0900 | 1.0876 / 1.0927 | 1.0875 / 1.0937 |
+| crit − full | −0.47%p | −0.34%p | −0.51%p | −0.62%p |
+| 상주 멤버 PC crit / full | 51 / 71 | 65 / 113 | 77 / 171 | 80 / 215 |
+| 멤버 축출 / 1K commit op crit / full | 4.2 / 15.0 | 2.1 / 14.4 | 0.5 / 8.9 | 0.02 / 2.2 |
+
+- **예산을 줄이면 격차는 좁아지지만 어느 점에서도 crit이 full을 넘지 못한다**(−0.62 → −0.34~−0.52%p). 구획을 25 → 10%로 줄일 때 full이 더 잃고(−0.95 vs −0.69%p), 테이블을 1K → 128로 줄일 때도 full이 더 잃는다(−0.45 vs −0.30%p). 방향은 가설과 같지만 크기가 격차를 덮지 못한다.
+- **자원 절감은 분명하다**(측정, 1K · 25%): 상주 멤버 PC 80 vs 215(−63%), priority 후보 = commit op의 38.5 vs 51.7%(−26%). full은 1K에서도 멤버를 축출하고(2.2 / 1K op) crit은 거의 축출하지 않는다(0.02).
+- **full이 버티는 이유**(측정): fallback 비율이 두 규칙에서 거의 같다(10%에서 24.8 vs 26.2%). 후보가 34% 많아도 구획이 찬 cycle은 9.0 vs 11.6%로 차이가 작다. 테이블 쪽은 C8처럼 LRU가 cold PC부터 버려서, full이 128 entry(상주 71 PC)로 줄어도 IPC는 0.45%p만 잃는다.
+- **격차의 대부분은 mcf다**: 모든 점에서 crit − full이 −4.4~−4.8%p로 예산과 무관하다(C15의 필터 A 비용). GAP은 모든 점에서 crit이 앞선다(+0.05~+0.21%p). Datacenter는 점마다 흔들린다(xgboost ±1%p).
+- **결론**: 예산 축은 crit/full 순서를 정하지 못한다. 순서를 정하는 것은 필터 A의 mcf 손실이다(N-3).

@@ -12,9 +12,8 @@
 
 | # | 내용 | 상태 · 메모 |
 |---|---|---|
-| **N-1** | **하드웨어 예산 sweep** (`260915_critpath_budget_sweep`, descriptor `json/zereco_dbg_ipc.json`, 12 config × 67 = 804 run, 2026-09-15 사용자 요청): Both crit(기준) vs Both full을 (1) P-IQ 구획 10 / 15 / 20%(36 / 53 / 70 entry, 기준 25% = 88), (2) brslice_tab 512 / 256 / 128 entry(8-way)에서 비교한다. 멤버와 priority op가 적은 critical slice가 예산이 빠듯할 때 앞서는지 본다 | **descriptor 설정 완료, 실행 대기.** 기준점(25% · 1K)은 `260914_zereco_new_baseline/piq_rfp_*`를 재사용한다. 볼 통계: P-IQ fallback 비율, brslice_tab 축출, H2P resolution latency. 참고: 25%에서 구획 점유 12.2%, 구획이 찬 cycle 4.3%(C11, oracle) — 25%는 병목이 아니다 |
 | **N-2** | **필터 A 최적점**: A2-e1(임계 2, depth ≤ 1 면제) — filtering 여유(A3-e1 25.6% vs 목표 20%)를 성능으로 바꾼다. 같은 배치에 A2-e2(depth ≤ 2 면제) 권장 — 면제 깊이가 임계보다 센 지렛대다(A3-e1에서 남은 차단의 52%가 depth 2, GAP은 87%) | 예상(유도): A2-e1 IPC +0.05~0.10%p, filtering −1%p. config: 기준 + `--zereco_critpath_edge_conf_min 2` / 추가로 `--zereco_critpath_edge_conf_exempt_depth 2`. 결과로 A 최종값을 정한다 |
-| **N-3** | **mcf 82875 / 28781 진단** — A3-e1의 전체 손실 −0.75%p 중 mcf가 0.47%p(63%), 나머지 workload는 각 0.08%p 이하(Cumulative, C13). Periodic(C15)으로는 −0.69%p 중 mcf 0.39%p(56%), 다음이 clang 0.11·xgboost 0.08%p. critical vs A3-e1에서 brslice_tab 멤버(PC, depth, edge 신뢰도, producer flip 빈도)를 끝에 dump해 어떤 멤버가 빠지는지 비교 | 진단 전용 knob 필요(코드). 결과에 따라 "번갈아 오는 두 producer를 둘 다 따라가는" 식의 A 보완 검토 |
+| **N-3** | **mcf 82875 / 28781 진단** — A3-e1의 전체 손실 −0.75%p 중 mcf가 0.47%p(63%), 나머지 workload는 각 0.08%p 이하(Cumulative, C13). Periodic(C15)으로는 −0.69%p 중 mcf 0.39%p(56%), 다음이 clang 0.11·xgboost 0.08%p. 예산 sweep(C16)의 모든 점에서도 mcf의 crit − full이 −4.4~−4.8%p로, crit/full 순서를 정하는 요인이다. critical vs A3-e1에서 brslice_tab 멤버(PC, depth, edge 신뢰도, producer flip 빈도)를 끝에 dump해 어떤 멤버가 빠지는지 비교 | 진단 전용 knob 필요(코드). 결과에 따라 "번갈아 오는 두 producer를 둘 다 따라가는" 식의 A 보완 검토 |
 | (선택) | **owner 기준 chain 제거** — 기본은 하지 않는다(DESIGN 결정 표, 2026-09-14). 시험한다면 owner branch의 HBT counter가 **0**이 됐을 때만 제거(강등 뒤 50K 동안 오예측 없음) — 3-bit counter의 여유를 hysteresis로 써서 강등·복귀를 반복하는 branch의 chain을 지우지 않게 | refresh sweep에 조건 하나 추가(knob, 코드 몇 줄). 비교: refresh만 / refresh + owner 제거 / owner 제거만 |
 | (선택) | **refresh를 끈 짝** (`--zereco_critpath_decay_interval 0`) — 필터 A가 있는 상태에서 refresh의 추가 기여 측정 | 제안만 됨, 미결정 |
 | (선택) | **후보 G — H2P 그림자 priority 차단**: 아직 resolve되지 않은 H2P branch 뒤에서 fetch된 op에는 priority bit를 주지 않는다. off-path 켬(C11)에서는 priority 자격 dispatch의 67.8%가 wrong-path라 하드웨어 동작에서 줄일 몫이 크다 | 평가 모드가 oracle이라 우선순위 낮음(사용자: A/B/C 이후 방향이 없으면 시험). 구현은 frontend의 "in-flight 미해결 H2P branch 수" 카운터 하나 |
@@ -24,7 +23,7 @@
 
 | # | 항목 | 현재 | 상태 |
 |---|---|---|---|
-| D-10 | P-IQ partition 예약률 | 25% (88 entry) | C4: 상주 priority op는 partition의 15%, fallback 8%(oracle). 15~20%로 줄일 여지 — 축소 시 fallback 증가와 맞바꿈. **사용자 결정** |
+| D-10 | P-IQ partition 예약률 | 25% (88 entry) | C4: 상주 priority op는 partition의 15%, fallback 8%(oracle). 15~20%로 줄일 여지 — 축소 시 fallback 증가와 맞바꿈. C16: 25 → 20 / 15 / 10%에서 Both crit IPC −0.13 / −0.39 / −0.69%p, fallback 8 → 12 / 17 / 25%. **사용자 결정** |
 | D-2 | Δ-window (`\|t_last − t_second\| < Δ`면 **양쪽** producer 삽입) | 미구현. Δ=0이고 wake 훅이 strict 비교라 동률이면 먼저 관측된 producer가 LPR | 멤버를 늘리므로 filtering 방향과 반대. 정확도 관점의 후보, 후순위(대상 모집단은 멤버 commit의 5.2%) |
 | E | H2P branch별 chain 분리 (owner 여러 칸) | entry당 owner 1칸(통계용), 공유 멤버는 마지막에 지목한 branch로 덮어씀 — 재지목의 11.2%(A3-e1) | 저장 비용 때문에 보류 |
 
@@ -58,5 +57,5 @@
 - TEA 비교 수치는 `260913_TEA`(DESIGN C14). 비교 사다리(P-IQ / RFP / Both × crit / full, 새 인프라)는 C15.
 - 평가 모드: wrong-path 명령어는 priority를 받지 않는다고 가정(oracle)함을 명시하고, 하드웨어 동작(C11: IPC −0.85%p)을 민감도로 제시한다. 시뮬레이터에서만 가능한 결과는 상한(limit study)으로 표기한다.
 - 1차 지표는 H2P resolution latency (IPC 실현률은 그보다 낮음).
-- critical vs full slice: C3의 6~7%는 refresh·필터 A 이전의 정적 PC 단위 한계이고, 기준 설정(A3-e1)에서는 full 대비 25.6%다(C13). 그 대가로 IPC는 Both crit이 full보다 0.6%p 낮다(필터 A 비용, C15).
+- critical vs full slice: C3의 6~7%는 refresh·필터 A 이전의 정적 PC 단위 한계이고, 기준 설정(A3-e1)에서는 full 대비 25.6%다(C13). 그 대가로 IPC는 Both crit이 full보다 0.6%p 낮다(필터 A 비용, C15). P-IQ 구획이나 brslice_tab을 줄여도 뒤집히지 않는다(C16). 대신 자원 절감은 측정됐다: 상주 멤버 PC −63%, priority 후보 −26%(C16).
 - xgboost·tc 표본 성격은 methodology에 적지 않는다(사용자 방침) — 결과 해석에서만 유의.
