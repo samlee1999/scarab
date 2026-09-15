@@ -3,7 +3,7 @@
 > Last updated: 2026-09-15 · branch `test`
 > **이 문서 = 할 일만.** 설계와 확정된 결과는 [zereco_CRITPATH_DESIGN.md](zereco_CRITPATH_DESIGN.md).
 > 기준 설정 = 코드 기본값(2026-09-14): register edge만, brslice_tab 1K·멤버 전용, refresh 1b/10K, 필터 A 임계 3 + depth ≤ 1 면제 (DESIGN 결정 표).
-> 라이브 디스크립터: `scarab-infra/json/zereco_dbg.json` (experiment `260914_zereco_new_baseline`). TEA 비교 폴더: `/home/lee/simulations/260913_TEA` (DESIGN C14).
+> **머신 전환(2026-09-15, 교수님 지적):** `PARAMS.golden_cove_original`(RS 97/70/19, PRF 280/332, issue 6 / retire 8, dcache 3R/2W). 새 사다리 descriptor: `scarab-infra/json/zereco_dbg_ipc.json` (experiment `260915_zereco_gc_original`, N-0). 이전 머신(`golden_cove_rs352`) 결과: `json/zereco_dbg.json` (`260914_zereco_new_baseline`), TEA 비교 `/home/lee/simulations/260913_TEA` (DESIGN C14).
 > zereco run은 test 브랜치에서 빌드·실행한다. 다른 브랜치에 있는 동안 `./sci --sim zereco_dbg`를 부르면 그 브랜치 코드로 빌드된다.
 
 ---
@@ -12,6 +12,7 @@
 
 | # | 내용 | 상태 · 메모 |
 |---|---|---|
+| **N-0** | **원본 Golden Cove 머신으로 전체 재추출** (`260915_zereco_gc_original`, descriptor `json/zereco_dbg_ipc.json`, 13 config × 67 = 871 run, 2026-09-15 사용자 요청): `baseline_randq` + P-IQ only / RFP only / P-IQ + RFP × critical / full × oldest first(`_oldest`) / random queue(`_randq`). 모든 mechanism 행은 채택 critical-path 설정(코드 기본값)이고 full은 `--zereco_critpath_full_slice 1`만 더한다. `piq_rfp_critical_slice_randq` = 제안 설계 | **descriptor 설정 완료, 실행 대기.** 소스 수정 불필요(RS 분할·P-IQ·scheduler·RFP·critpath 모두 머신 크기에 무관, P-IQ 25% = 24/18/5 entry). PARAMS의 `--debug_bp`/`--debug_btb`는 껐다(dbg 빌드에서 매 run 처음 50만 cycle의 BP/BTB 로그). 미결: ① LQ/SQ — 원본 파일에 없어 코드 기본값 128/72(Sunny Cove 값), 실제 Golden Cove는 192/114 ② gcc/939 watchdog 재발 예상(§3) ③ oldest-first baseline 없음(사용자 목록) ④ TEA 비교는 새 머신에서 따로 정해야 한다(260913_TEA는 rs352 머신) |
 | **N-1** | **oldest-first scheduler에서의 critical slice** (`260915_zereco_new_baseline_oldest_first`, descriptor `json/zereco_dbg_ipc.json`, 3 config × 67, 2026-09-15 사용자 요청): P-IQ only / RFP only / P-IQ + RFP, 모두 기준 critical-path 설정(1b/10K + 필터 A3-e1)에 `--node_issue_queue_schedule_scheme 0` | **descriptor 설정 완료, 실행 대기.** baseline = `260901_critpath_phaseA/baseline_of`(scheduler 외 flag가 260905 baseline과 같고, 같은 시기 random-queue run이 260905와 67 simpoint cycle 일치 — 재사용 가능, 유도). random-queue 짝은 P-IQ + RFP만 있다(260914 `piq_rfp_critical_slice`) — 260914의 단독 행은 4b/100K·필터 A 없음 |
 | **N-2** | **필터 A 최적점**: A2-e1(임계 2, depth ≤ 1 면제) — filtering 여유(A3-e1 25.6% vs 목표 20%)를 성능으로 바꾼다. 같은 배치에 A2-e2(depth ≤ 2 면제) 권장 — 면제 깊이가 임계보다 센 지렛대다(A3-e1에서 남은 차단의 52%가 depth 2, GAP은 87%) | 예상(유도): A2-e1 IPC +0.05~0.10%p, filtering −1%p. config: 기준 + `--zereco_critpath_edge_conf_min 2` / 추가로 `--zereco_critpath_edge_conf_exempt_depth 2`. 결과로 A 최종값을 정한다 |
 | **N-3** | **mcf 82875 / 28781 진단** — A3-e1의 전체 손실 −0.75%p 중 mcf가 0.47%p(63%), 나머지 workload는 각 0.08%p 이하(Cumulative, C13). Periodic(C15)으로는 −0.69%p 중 mcf 0.39%p(56%), 다음이 clang 0.11·xgboost 0.08%p. 예산 sweep(C16)의 모든 점에서도 mcf의 crit − full이 −4.4~−4.8%p로, crit/full 순서를 정하는 요인이다. critical vs A3-e1에서 brslice_tab 멤버(PC, depth, edge 신뢰도, producer flip 빈도)를 끝에 dump해 어떤 멤버가 빠지는지 비교 | 진단 전용 knob 필요(코드). 결과에 따라 "번갈아 오는 두 producer를 둘 다 따라가는" 식의 A 보완 검토 |
@@ -43,7 +44,7 @@
 - `RFP_INFLIGHT_UNDERFLOW` (PT 축출 후 같은 PC 재할당 시 0 카운터 감소) — 무해(injected의 0.02%), 미수정.
 - full-slice 모드의 priority op 분류는 commit 시점 shadow 멤버십 기준(bit는 fetch 시점) — 소수 오분류 가능, 비율 통계에는 무시할 수준.
 - (선택) `LEGACY_WALK_NEEDED()`가 false일 때 Fill Buffer/walk 메모리 할당 자체도 생략 (host 메모리).
-- PRF가 작은 머신에서 `datacenter/gcc/939`가 교착한다(frontend watchdog "No forward progress") — GC186 baseline(PRF 280)과 TEA PRF 400 run에서 발생, PRF 592 머신에서는 없음. 원인 미확인, 현재 머신에는 영향 없음.
+- PRF가 작은 머신에서 `datacenter/gcc/939`가 교착한다(frontend watchdog "No forward progress") — GC186 baseline(PRF 280)과 TEA PRF 400 run에서 발생, PRF 592 머신에서는 없음. 원인 미확인. **새 머신(RS 186, PRF 280, N-0)에서 재발 예상.** 단서: GC186에서는 baseline 포함 5개 config 중 4개가 retire 기준 같은 지점(I=16,308,185, O=20,751,145)에서 멈췄다(타이밍 무관, 나머지 1개는 I=16,014,036). TEA PRF 400은 I=14,726,427. rs352 run의 timeline상 그 직후 구간은 uop/명령어 2.2로 uop가 많은 명령어가 몰린 곳. 코드 검토로 배제한 것: rename 문턱(op당 목적지 4·2 × issue 폭 ≪ 빈 PRF), decode 복구 시 레지스터 누수(복구가 rename보다 먼저 걸림, 여유 0 cycle), 명령어 단위 retire(uop 단위임).
 
 ## 4. 워크로드 · 방법론
 
@@ -54,7 +55,7 @@
 
 ## 5. 논문 서술 시 유의
 
-- 머신 = 352 entry(`PARAMS.golden_cove_rs352`; main 한도는 정확히 353), partition %의 분모 352.
+- 머신: DESIGN C1~C17은 352 entry 머신(`PARAMS.golden_cove_rs352`; main 한도는 정확히 353, partition %의 분모 352) 결과다. 논문 수치는 원본 Golden Cove 머신(N-0, main RS 186) 결과로 바꾼다.
 - TEA 비교 수치는 `260913_TEA`(DESIGN C14). 비교 사다리(P-IQ / RFP / Both × crit / full, 새 인프라)는 C15.
 - 평가 모드: wrong-path 명령어는 priority를 받지 않는다고 가정(oracle)함을 명시하고, 하드웨어 동작(C11: IPC −0.85%p)을 민감도로 제시한다. 시뮬레이터에서만 가능한 결과는 상한(limit study)으로 표기한다.
 - 1차 지표는 H2P resolution latency (IPC 실현률은 그보다 낮음).
