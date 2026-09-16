@@ -516,6 +516,60 @@ static inline Flag node_issue_queue_op_can_schedule(Op* op) {
   return FALSE;
 }
 
+/* FU ids this op could be scheduled to (its RS's connected FUs that execute its op type). */
+static inline uns64 node_issue_queue_op_fu_mask(const Op* op) {
+  ASSERTM(node->proc_id, node->sd.max_op_count <= 64, "FU sharing stats support at most 64 FUs\n");
+  Reservation_Station* rs = &node->rs[op->rs_id];
+  uns64 op_type = get_fu_type(op->table_info->op_type, op->table_info->is_simd);
+  uns64 mask = 0;
+  for (uns ii = 0; ii < rs->num_fus; ++ii) {
+    Func_Unit* fu = rs->connected_fus[ii];
+    if (op_type & fu->type)
+      mask |= 1ull << fu->fu_id;
+  }
+  return mask;
+}
+
+/* How the two threads share the FUs at select, where TEA goes first (pass 1).  A ready main op that ends the cycle
+   unscheduled while a TEA op holds an FU it could have used is counted as blocked by TEA; the main op may also have
+   lost to another main op, so this is an upper bound on what TEA's priority costs. */
+static void node_issue_queue_collect_fu_sharing_stats() {
+  uns64 tea_fu_mask = 0;
+  Counter tea_slots = 0, main_slots = 0;
+  for (uns fu_id = 0; fu_id < (uns)node->sd.max_op_count; ++fu_id) {
+    Op* selected = node->sd.ops[fu_id];
+    if (!selected)
+      continue;
+    if (selected->thread_id == 1) {
+      tea_slots++;
+      tea_fu_mask |= 1ull << fu_id;
+    } else {
+      main_slots++;
+    }
+  }
+  INC_STAT_EVENT(node->proc_id, MAIN_FU_SLOTS_TAKEN_TOTAL, main_slots);
+  INC_STAT_EVENT(node->proc_id, TEA_FU_SLOTS_TAKEN_TOTAL, tea_slots);
+  if (!tea_fu_mask)
+    return;
+
+  Counter blocked = 0;
+  for (Op* op = node->rdy_head; op; op = op->next_rdy) {
+    if (op->thread_id != 0 || !node_issue_queue_op_can_schedule(op))
+      continue;
+    Flag selected = FALSE;
+    for (uns fu_id = 0; fu_id < (uns)node->sd.max_op_count; ++fu_id)
+      selected |= node->sd.ops[fu_id] == op;
+    if (selected)
+      continue;
+    if (node_issue_queue_op_fu_mask(op) & tea_fu_mask)
+      blocked++;
+  }
+  if (blocked) {
+    STAT_EVENT(node->proc_id, MAIN_OPS_BLOCKED_BY_TEA_FU_CYCLES);
+    INC_STAT_EVENT(node->proc_id, MAIN_OPS_BLOCKED_BY_TEA_FU_TOTAL, blocked);
+  }
+}
+
 /*
  * Schedule ready ops (ops that are currently in the ready list).
  *
@@ -592,6 +646,8 @@ void node_issue_queue_schedule() {
 
     schedule_func_table[NODE_ISSUE_QUEUE_SCHEDULE_SCHEME](op);
   }
+
+  node_issue_queue_collect_fu_sharing_stats();
 }
 
 /**************************************************************************************/

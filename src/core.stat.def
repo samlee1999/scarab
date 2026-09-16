@@ -77,6 +77,12 @@ DEF_STAT(  MAIN_DISPATCH_RS_FULL_CYCLES,  PERCENT,  NODE_CYCLE  )  /* main dispa
 DEF_STAT(  MAIN_RS_OCCUPANCY_TOTAL,       COUNT,    NO_RATIO    )  /* per cycle sum; / NODE_CYCLE = mean main RS entries */
 DEF_STAT(  TEA_RS_OCCUPANCY_TOTAL,        COUNT,    NO_RATIO    )  /* per cycle sum; / NODE_CYCLE = mean TEA RS entries */
 
+/* Main thread against the TEA thread at select, where the TEA thread goes first. */
+DEF_STAT(  MAIN_FU_SLOTS_TAKEN_TOTAL,        COUNT,   NO_RATIO    )  /* per cycle sum of FU slots holding a main op */
+DEF_STAT(  TEA_FU_SLOTS_TAKEN_TOTAL,         COUNT,   NO_RATIO    )  /* per cycle sum of FU slots holding a TEA op */
+DEF_STAT(  MAIN_OPS_BLOCKED_BY_TEA_FU_TOTAL, COUNT,   NO_RATIO    )  /* ready main ops left unscheduled while a TEA op held an FU they could have used */
+DEF_STAT(  MAIN_OPS_BLOCKED_BY_TEA_FU_CYCLES, PERCENT, NODE_CYCLE )  /* cycles with at least one such op */
+
 DEF_STAT(  FULL_WINDOW_MEM_OP  ,  DIST,   NO_RATIO  )
 DEF_STAT(  FULL_WINDOW_FP_OP   ,  COUNT,  NO_RATIO  )
 DEF_STAT(  FULL_WINDOW_OTHER_OP,  DIST,   NO_RATIO  )
