@@ -70,6 +70,13 @@ DEF_STAT( NODE_UOP_COUNT,       COUNT,   NO_RATIO    )
 
 DEF_STAT(  FULL_WINDOW_STALL,  PERCENT,  NODE_CYCLE  )
 
+/* Main thread against the TEA thread in the shared reservation stations (all four are collected with TEA off too,
+   so a TEA run can be read against a baseline run of the same binary). */
+DEF_STAT(  MAIN_OPS_ISSUED,               COUNT,    NO_RATIO    )  /* main ops leaving the RS; OP_ISSUED counts both threads */
+DEF_STAT(  MAIN_DISPATCH_RS_FULL_CYCLES,  PERCENT,  NODE_CYCLE  )  /* main dispatch stopped: no compatible RS had room */
+DEF_STAT(  MAIN_RS_OCCUPANCY_TOTAL,       COUNT,    NO_RATIO    )  /* per cycle sum; / NODE_CYCLE = mean main RS entries */
+DEF_STAT(  TEA_RS_OCCUPANCY_TOTAL,        COUNT,    NO_RATIO    )  /* per cycle sum; / NODE_CYCLE = mean TEA RS entries */
+
 DEF_STAT(  FULL_WINDOW_MEM_OP  ,  DIST,   NO_RATIO  )
 DEF_STAT(  FULL_WINDOW_FP_OP   ,  COUNT,  NO_RATIO  )
 DEF_STAT(  FULL_WINDOW_OTHER_OP,  DIST,   NO_RATIO  )

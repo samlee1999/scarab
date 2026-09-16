@@ -416,6 +416,8 @@ void node_issue_queue_clear() {
       STAT_EVENT(node->proc_id, TEA_READY_LIST_DONE_CLEARED);
 
     STAT_EVENT(node->proc_id, OP_ISSUED);
+    if (op->thread_id == 0)
+      STAT_EVENT(node->proc_id, MAIN_OPS_ISSUED);
     op = next;
   }
 }
@@ -441,8 +443,12 @@ void node_issue_queue_dispatch() {
       continue;
 
     int64 rs_id = dispatch_func_table[NODE_ISSUE_QUEUE_DISPATCH_SCHEME](op);
-    if (rs_id == NODE_ISSUE_QUEUE_RS_SLOT_INVALID)
+    if (rs_id == NODE_ISSUE_QUEUE_RS_SLOT_INVALID) {
+      /* A main op is waiting for an RS entry.  With TEA on, the entries it is
+         waiting for include the ones reserved for the TEA thread. */
+      STAT_EVENT(node->proc_id, MAIN_DISPATCH_RS_FULL_CYCLES);
       break;
+    }
     ASSERT(node->proc_id, rs_id >= 0 && rs_id < NUM_RS);
 
     Reservation_Station* rs = &node->rs[rs_id];
@@ -591,12 +597,24 @@ void node_issue_queue_schedule() {
 /**************************************************************************************/
 /* External Function */
 
+/* How the two threads share the reservation stations, one sample per cycle. */
+static inline void node_issue_queue_collect_rs_occupancy() {
+  Counter main_ops = 0, tea_ops = 0;
+  for (uns rs_id = 0; rs_id < NUM_RS; ++rs_id) {
+    main_ops += node->rs[rs_id].main_op_count;
+    tea_ops += node->rs[rs_id].tea_op_count;
+  }
+  INC_STAT_EVENT(node->proc_id, MAIN_RS_OCCUPANCY_TOTAL, main_ops);
+  INC_STAT_EVENT(node->proc_id, TEA_RS_OCCUPANCY_TOTAL, tea_ops);
+}
+
 void node_issue_queue_update() {
   /* remove scheduled ops from RS and ready list */
   node_issue_queue_clear();
 
   /* fill RS with oldest ops waiting for it */
   node_issue_queue_dispatch();
+  node_issue_queue_collect_rs_occupancy();
 
   /* first schedule 1 ready op per NUM_FUS  */
   node_issue_queue_schedule();
