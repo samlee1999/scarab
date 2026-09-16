@@ -568,6 +568,40 @@ TEA 논문은 코어부터 키웠다(8-wide, RS 352, PR 400에 TEA 전용 RS·PR
 - **논문대로 모든 H2P 분기에 TEA를 띄우면 baseline보다 11% 느리다**(측정). chain slot 4개가 맞게 예측된 분기로 차서, trigger 시도 5,430만 건 중 4,590만 건이 slot full로 버려지고 early flush는 42만 건뿐이다. oracle trigger에서는 4,680만 건을 oracle이 걸러 내고 early flush가 340만 건(8배)이다.
 - 그래서 **이후 비교에는 oracle trigger 쪽만 쓴다**(사용자 결정). 다만 이 설정은 논문보다 TEA에 유리하다(맞게 예측된 H2P에는 자원을 전혀 쓰지 않는다).
 
+**TEA 프로파일링 (oracle trigger, TEA off 같은 바이너리와 비교, Periodic 구간. op 지표는 공통 460 SimPoint, 공유 계수기는 계수기가 있는 396 SimPoint)**
+
+| 파이프라인이 처리한 op (TEA on ÷ off) | GAP | SPEC17 | DC | 전체 |
+|---|---|---|---|---|
+| main on-path rename op | 1.000 | 1.000 | 1.000 | 1.000 |
+| main off-path(wrong path) rename op | 0.512 | 0.331 | 0.200 | **0.447** |
+| TEA thread op (main rename op 대비) | +30.1% | +9.6% | +3.7% | **+20.2%** |
+| 전체 op(main + TEA) ÷ TEA off | 0.856 | 0.713 | 0.852 | **0.806** |
+
+- **TEA는 자기 thread로 20.2%의 op를 더 넣지만, main의 wrong-path op가 55% 줄어 총 처리량은 오히려 19% 적다.** on-path op가 정확히 1.000인 것이 같은 구간을 비교하고 있다는 확인이다.
+
+| 자원 공유 비용 (TEA on / off) | GAP | SPEC17 | DC | 전체 |
+|---|---|---|---|---|
+| main RS 평균 점유 (entry) | 29.6 / 52.9 | 34.2 / 57.8 | 27.4 / 52.4 | 30.5 / 54.2 |
+| TEA thread RS 평균 점유 (예약 100 entry) | 4.8 | 3.0 | 1.0 | **4.0** |
+| RS 부족으로 main dispatch가 멈춘 cycle | 24.6 / 15.4% | 37.8 / 26.4% | 52.8 / 42.4% | **30.8 / 20.5%** |
+| rename이 register 부족으로 멈춘 cycle | 67.5 / 53.1% | 57.6 / 42.2% | 71.5 / 57.7% | **65.5 / 50.5%** |
+| FU slot 평균 (TEA / main on / main off) | 0.41 / 1.20 / 1.79 | 0.18 / 2.04 / 2.48 | 0.06 / 1.55 / 2.17 | 0.32 / 1.44 / 2.01 |
+| TEA에 FU를 밀린 main op (cycle당, 발생 cycle 비율) | 0.39, 9.9% | 0.14, 4.6% | 0.05, 1.5% | 0.29, 7.7% |
+
+- **TEA는 RS 100 entry와 PR 136개를 예약해 두고 평균 4 entry만 쓴다**(GAP 4.8, DC 1.0). 그동안 main은 RS 부족으로 멈추는 cycle이 20.5 → 30.8%, register 부족으로 멈추는 cycle이 50.5 → 65.5%로 늘었다. TEA 자신은 RS를 못 잡은 적이 사실상 없다(`TEA_RS_STALLS` ≈ 0).
+- 이 손해가 가장 큰 곳은 Datacenter(main dispatch 정지 42 → 53%)이고, 이는 C20에서 Datacenter의 TEA speedup이 1.003에 그친 것과 같은 방향이다.
+
+| TEA 쪽 낭비 | GAP | SPEC17 | DC | 전체 |
+|---|---|---|---|---|
+| 버려진 TEA op (flush / dispatch) | 9.2% | 3.3% | 4.6% | 8.4% |
+| H2P를 풀기 전에 끝난 chain | 44.9% | 18.7% | 36.7% | **39.6%** |
+| 너무 늦은 early flush | 28.2% | 10.8% | 10.4% | 22.7% |
+| main보다 늦게 계산한 H2P | 22.0% | 9.7% | 9.4% | 18.5% |
+| main이 이미 가져온 줄을 다시 읽은 TEA load | 96.6% | 95.4% | 95.9% | **96.3%** |
+
+- **띄운 chain의 39.6%가 목표 H2P를 풀기 전에 끝난다**(GAP 44.9%). early flush의 22.7%는 main이 이미 복구한 뒤에 도착한다.
+- **TEA load의 96.3%는 main이 이미 채운 캐시 줄을 다시 읽는다** — dcache 포트를 쓰는 만큼이 그대로 비용이다.
+
 ### C20. 새 baseline(`baseline_nopref`) 기준 비교 (Periodic IPC)
 
 **baseline이 바뀌었다(사용자 결정 2026-09-16): `baseline_nopref`** — 같은 원본 Golden Cove 머신에 메커니즘 전부 끔, RS 예약 0, **stream prefetcher 끔**(TEA run과 조건을 맞추기 위해서다). 폴더는 `260915_zereco_golden_cove_original/baseline_nopref`. 예전 `baseline_randq`와의 설정 차이는 prefetcher 두 flag뿐이고(파라미터 980개 전수 비교), 같은 SimPoint에서 prefetcher를 끄면 IPC가 geomean 4.1% 낮다(mcf 21%, pr 11%).
