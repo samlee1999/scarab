@@ -154,6 +154,7 @@ refresh 4 bit / 100K)으로 잰 것이고, 이후 절이 차례로 기준 설정
 설정 변경별 IPC 비용은 C11 끝의 분해 표에 있다(Periodic 기준 P-IQ + RFP 분해는 C15). **IPC 지표는 C13까지 Cumulative**(warm-up 포함 20M 명령어),
 **C14 이후는 Periodic**(warm-up 뒤 10M~20M 구간)이다 — speedup 차이는 0.007 이내.
 **머신은 C17까지 352-entry 머신(`PARAMS.golden_cove_rs352`)이고, C18부터 원본 Golden Cove 머신(`PARAMS.golden_cove_original`, main RS 186)이다** — 두 머신의 수치는 직접 비교하지 않는다.
+**baseline은 C19까지 `baseline_randq`(prefetcher 켬), C20부터 `baseline_nopref`(prefetcher 끔)다**(사용자 결정 2026-09-16). 통계는 Periodic 구간만 쓴다.
 
 **C1~C7 설정.** 352-entry 머신, random queue, 67 simpoint. 6 config = {P-IQ, RFP, P-IQ+RFP} × {critical slice, full slice}.
 P-IQ 25% partition non-stall, RFP PT 1K + store forwarding 모드 1, decay 100K, depth 무제한.
@@ -546,3 +547,43 @@ Both crit(기준) vs Both full. 각 config는 260914의 `piq_rfp_*`에서 knob �
   - P-IQ + RFP random 격차의 절반(−0.23%p)이 mcf에서 나온다. C15에서 본 필터 A 비용과 같은 양상이다.
   - GAP에서는 crit이 앞선다(P-IQ + RFP random 1.086 vs 1.084). workload 중에서는 sssp가 crit 쪽으로 가장 크게 기운다.
 - **oldest first에서는 P-IQ가 RFP 위에 더하는 것이 없다**(crit 1.070 → 1.069). random queue에서는 +0.97%p(1.049 → 1.058)다. P-IQ only 자체도 random queue에서 1.3%로 작다.
+
+### C19. TEA를 원본 Golden Cove에 맞춰 재실행 (`260915_TEA_golden_cove_original`, Periodic IPC)
+
+TEA 논문은 코어부터 키웠다(8-wide, RS 352, PR 400에 TEA 전용 RS·PR 192 예약). 여기서는 그 구성을 **우리 baseline 코어에 맞춰 조정**하고, 그 조건에서 나오는 TEA의 단점을 본다(사용자 방침 2026-09-16). 브랜치 `tea-random-queue`, 머신은 C18과 같은 `PARAMS.golden_cove_original`(머신 flag 덮어쓰기 없음).
+
+- **자원**: 논문 비율로 축소 — `--tea_rs_reservation 101`(TEA 52/38/10, main 45/32/9 = 86), `--tea_preg_reservation 136`(main 144 int / 196 vector). 예약은 run 내내 유지된다(논문은 TEA가 활성일 때만 — 이 점은 구현이 논문보다 TEA에 불리하다).
+- **폭**: TEA fetch·rename 6(GC 폭). RS 투입은 cycle당 TEA 6 + main 6 — 새 파라미터 `tea_rs_fill_width`를 넣어 재시도 경로까지 묶었다(예전에는 재시도에 제한이 없었다). 이 제한이 실제로 걸린 cycle은 0.06% 이하라 결과에 영향이 없다.
+- **그 밖**: store buffer 16, fill buffer 512, chain 4, 복구 cycle 1/7, HBT 256 — 260913_TEA와 같다. stream prefetcher는 예전 TEA run처럼 꺼져 있다.
+- **표본**: gcc 제외 전 SimPoint 464개로 돌린 뒤, watchdog으로 죽은 4개(clang 1270·1305·2249, xgboost 3311)를 빼 460개. clang 2249와 xgboost 3311은 TEA를 꺼도 죽는다.
+- **프로파일링 계수기 추가**(TEA off에서도 수집): `MAIN_OPS_ISSUED`, `MAIN_DISPATCH_RS_FULL_CYCLES`, `MAIN_RS_OCCUPANCY_TOTAL`/`TEA_RS_OCCUPANCY_TOTAL`, `MAIN_FU_SLOTS_TAKEN_TOTAL`/`TEA_FU_SLOTS_TAKEN_TOTAL`, `MAIN_OPS_BLOCKED_BY_TEA_FU_TOTAL`/`_CYCLES`. TEA 자체 계수기는 원래 388개가 flag 없이 수집된다.
+
+| trigger 조건 | GAP | SPEC17 | Datacenter | Avg. |
+|---|---|---|---|---|
+| oracle(이번에 틀릴 H2P만, 예전 TEA run의 설정) | 0.996 | 1.131 | 0.985 | 1.040 |
+| 모든 H2P 분기(논문) | 0.866 | 0.911 | 0.901 | **0.889** |
+
+(위 표는 460 SimPoint를 `260915_zereco_golden_cove_original/baseline_randq`와 비교한 값 — 표본이 달라 참고용이다. 같은 조건 비교는 C20.)
+
+- **논문대로 모든 H2P 분기에 TEA를 띄우면 baseline보다 11% 느리다**(측정). chain slot 4개가 맞게 예측된 분기로 차서, trigger 시도 5,430만 건 중 4,590만 건이 slot full로 버려지고 early flush는 42만 건뿐이다. oracle trigger에서는 4,680만 건을 oracle이 걸러 내고 early flush가 340만 건(8배)이다.
+- 그래서 **이후 비교에는 oracle trigger 쪽만 쓴다**(사용자 결정). 다만 이 설정은 논문보다 TEA에 유리하다(맞게 예측된 H2P에는 자원을 전혀 쓰지 않는다).
+
+### C20. 새 baseline(`baseline_nopref`) 기준 비교 (Periodic IPC)
+
+**baseline이 바뀌었다(사용자 결정 2026-09-16): `baseline_nopref`** — 같은 원본 Golden Cove 머신에 메커니즘 전부 끔, RS 예약 0, **stream prefetcher 끔**(TEA run과 조건을 맞추기 위해서다). 폴더는 `260915_zereco_golden_cove_original/baseline_nopref`. 예전 `baseline_randq`와의 설정 차이는 prefetcher 두 flag뿐이고(파라미터 980개 전수 비교), 같은 SimPoint에서 prefetcher를 끄면 IPC가 geomean 4.1% 낮다(mcf 21%, pr 11%).
+
+8개 run에 모두 있는 **64 SimPoint(13 workload)** 기준. 스크립트 `260915_zereco_golden_cove_original/analysis/plot_suite_ipc_speedup_vs_nopref.py`, 그림 `analysis/suite_ipc_speedup_vs_baseline_nopref.pdf`(geomean)와 `..._arithmean.pdf`(산술평균).
+
+| speedup (geomean / 산술평균) | GAP | SPEC17 | Datacenter | Avg. |
+|---|---|---|---|---|
+| P-IQ crit. | 1.075 / 1.076 | 1.075 / 1.080 | 1.019 / 1.019 | 1.066 / 1.069 |
+| P-IQ full | 1.068 / 1.068 | 1.062 / 1.067 | 1.011 / 1.011 | 1.056 / 1.059 |
+| RFP crit. | 1.147 / 1.147 | 1.100 / 1.106 | 1.082 / 1.083 | **1.119 / 1.122** |
+| RFP full | 1.120 / 1.120 | 1.085 / 1.093 | 1.073 / 1.074 | 1.099 / 1.103 |
+| P-IQ + RFP crit. | 1.146 / 1.147 | 1.100 / 1.106 | 1.078 / 1.079 | **1.118 / 1.121** |
+| P-IQ + RFP full | 1.134 / 1.135 | 1.097 / 1.105 | 1.077 / 1.078 | 1.111 / 1.115 |
+| TEA (oracle) | 1.043 / 1.050 | **1.188 / 1.205** | 1.003 / 1.008 | 1.090 / 1.103 |
+
+- **Avg.는 우리 쪽이 앞선다**(P-IQ + RFP crit 1.118 vs TEA 1.090). **SPEC17만 TEA가 8.8%p 앞서고**, GAP(1.146 vs 1.043)과 Datacenter(1.078 vs 1.003)는 우리가 앞선다. workload로 보면 TEA는 mcf 1.585·leela 1.284로 크게 이기고 pr 0.842·clang 0.913으로 진다.
+- geomean과 산술평균의 차이는 작다(Avg. 최대 0.4%p, TEA만 1.3%p).
+- **읽을 때 두 가지 주의**: ① ZERECO 6행은 prefetcher가 켜져 있어 약 4.1% 유리하게 잡혀 있다(baseline·TEA는 꺼짐). ② crit 행은 oldest first, full 행은 random queue로 돌린 결과다(사용자 지시로 그림에는 scheduler를 적지 않는다) — scheduler만으로 약 +1%p이므로 이 표의 crit − full 차이를 slice 효과로 읽으면 안 된다. 같은 scheduler로 맞춘 비교는 C18이다.

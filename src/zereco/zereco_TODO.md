@@ -3,6 +3,7 @@
 > Last updated: 2026-09-15 · branch `test`
 > **이 문서 = 할 일만.** 설계와 확정된 결과는 [zereco_CRITPATH_DESIGN.md](zereco_CRITPATH_DESIGN.md).
 > 기준 설정 = 코드 기본값(2026-09-14): register edge만, brslice_tab 1K·멤버 전용, refresh 1b/10K, 필터 A 임계 3 + depth ≤ 1 면제 (DESIGN 결정 표).
+> **baseline = `260915_zereco_golden_cove_original/baseline_nopref`**(사용자 결정 2026-09-16: 메커니즘 전부 끔 + stream prefetcher 끔, TEA run과 조건을 맞춤). 예전 `baseline_randq`(prefetcher 켬) 대비 차이와 비교표는 DESIGN C20.
 > **머신 전환(2026-09-15, 교수님 지적):** `PARAMS.golden_cove_original`(RS 97/70/19, PRF 280/332, issue 6 / retire 8, dcache 3R/2W). 새 머신의 사다리 결과: `/home/lee/simulations/260915_zereco_golden_cove_original` (descriptor `scarab-infra/json/zereco_dbg_ipc.json`, DESIGN C18). 이전 머신(`golden_cove_rs352`) 결과: `json/zereco_dbg.json` (`260914_zereco_new_baseline`), TEA 비교 `/home/lee/simulations/260913_TEA` (DESIGN C14).
 > zereco run은 test 브랜치에서 빌드·실행한다. 다른 브랜치에 있는 동안 `./sci --sim zereco_dbg`를 부르면 그 브랜치 코드로 빌드된다.
 
@@ -48,14 +49,14 @@
 ## 4. 워크로드 · 방법론
 
 - **67 simpoint**(workload당 5, clang 4, gcc 3; 14 workload) — TEA 비교와 동일 표본. weight 가중 집계, 효과 기준 선별 금지. **새 머신(C18~)은 gcc/939를 뺀 66개**: gcc는 2766·907만 남는데, 이 둘은 gcc 실행의 14.7%에 해당한다(939를 포함한 3개는 46.0%, 939 혼자 31.3%). gcc 결과를 해석할 때 유의한다.
-- **IPC 지표 — 사용자 확인 필요**: DESIGN C1~C13은 Cumulative(warm-up 포함 20M), C14 이후(TEA 비교, 비교 사다리, 예산 sweep, 필터 A off)는 Periodic(10M~20M). 앞으로 어느 쪽을 기본으로 할지 정한다 — speedup 차이는 0.007 이내지만 절대 IPC는 다르다.
-- frontend watchdog으로 죽는 simpoint는 원인 추적 없이 제외한다(67 목록은 현재 머신에서 문제없음).
+- **IPC 지표 = Periodic만**(사용자 결정 2026-09-16): 모든 통계는 warm-up 뒤 10M~20M 구간만 쓴다. DESIGN C1~C13은 Cumulative(warm-up 포함 20M)로 잰 옛 값이고, C14부터 Periodic이다.
+- frontend watchdog으로 죽는 simpoint는 원인 추적 없이 제외한다. 원본 Golden Cove 머신에서 죽은 것: gcc/939, clang 1270·1305·2249, xgboost 3311 (clang 2249와 xgboost 3311은 TEA를 꺼도 죽는다).
 - 다른 목록: 108 simpoint(`json/zereco_dbg_rs352.json`), Golden Cove 186용 105 simpoint(`json/zereco_dbg_gc186_sweep.json`) — 보류. 108로 돌아갈 경우 deepsjeng 133677·164928은 퇴화한 trace(H2P misprediction 0, uop/instruction 4.0, chain 멤버 0)라 결과와 무관한 기준으로 제외하고 명시한다.
 
 ## 5. 논문 서술 시 유의
 
 - 머신: DESIGN C1~C17은 352 entry 머신(`PARAMS.golden_cove_rs352`; main 한도는 정확히 353, partition %의 분모 352) 결과다. 논문 수치는 원본 Golden Cove 머신(main RS 186) 결과(C18~)로 바꾼다.
-- TEA 비교 수치는 `260913_TEA`(DESIGN C14). 비교 사다리(P-IQ / RFP / Both × crit / full, 새 인프라)는 C15.
+- TEA 비교 수치는 원본 Golden Cove 머신 결과(C19·C20)를 쓴다. `260913_TEA`(C14)는 옛 352-entry 머신 결과다. 새 TEA는 oracle trigger 설정만 쓴다 — 논문대로 모든 H2P에 띄우면 baseline보다 11% 느리다(C19).
 - 평가 모드: wrong-path 명령어는 priority를 받지 않는다고 가정(oracle)함을 명시하고, 하드웨어 동작(C11: IPC −0.85%p)을 민감도로 제시한다. 시뮬레이터에서만 가능한 결과는 상한(limit study)으로 표기한다.
 - 1차 지표는 H2P resolution latency (IPC 실현률은 그보다 낮음).
 - critical vs full slice: C3의 6~7%는 refresh·필터 A 이전의 정적 PC 단위 한계이고, 기준 설정(A3-e1)에서는 full 대비 25.6%다(C13). 그 대가로 IPC는 Both crit이 full보다 0.6%p 낮다(필터 A 비용, C15). P-IQ 구획이나 brslice_tab을 줄여도 뒤집히지 않는다(C16). 대신 자원 절감은 측정됐다: 상주 멤버 PC −63%, priority 후보 −26%(C16).
