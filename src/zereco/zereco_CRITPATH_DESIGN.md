@@ -576,14 +576,17 @@ TEA 논문은 코어부터 키웠다(8-wide, RS 352, PR 400에 TEA 전용 RS·PR
 
 | speedup (geomean / 산술평균) | GAP | SPEC17 | Datacenter | Avg. |
 |---|---|---|---|---|
-| P-IQ crit. | 1.075 / 1.076 | 1.075 / 1.080 | 1.019 / 1.019 | 1.066 / 1.069 |
+| P-IQ crit. | 1.068 / 1.068 | 1.062 / 1.067 | 1.009 / 1.009 | 1.056 / 1.059 |
 | P-IQ full | 1.068 / 1.068 | 1.062 / 1.067 | 1.011 / 1.011 | 1.056 / 1.059 |
-| RFP crit. | 1.147 / 1.147 | 1.100 / 1.106 | 1.082 / 1.083 | **1.119 / 1.122** |
+| RFP crit. | 1.122 / 1.123 | 1.074 / 1.080 | 1.069 / 1.070 | 1.095 / 1.098 |
 | RFP full | 1.120 / 1.120 | 1.085 / 1.093 | 1.073 / 1.074 | 1.099 / 1.103 |
-| P-IQ + RFP crit. | 1.146 / 1.147 | 1.100 / 1.106 | 1.078 / 1.079 | **1.118 / 1.121** |
-| P-IQ + RFP full | 1.134 / 1.135 | 1.097 / 1.105 | 1.077 / 1.078 | 1.111 / 1.115 |
+| P-IQ + RFP crit. | 1.146 / 1.147 | 1.100 / 1.106 | 1.078 / 1.079 | 1.118 / 1.121 |
+| P-IQ + RFP full | 1.144 / 1.144 | 1.110 / 1.118 | 1.086 / 1.086 | **1.122 / 1.125** |
 | TEA (oracle) | 1.043 / 1.050 | **1.188 / 1.205** | 1.003 / 1.008 | 1.090 / 1.103 |
 
-- **Avg.는 우리 쪽이 앞선다**(P-IQ + RFP crit 1.118 vs TEA 1.090). **SPEC17만 TEA가 8.8%p 앞서고**, GAP(1.146 vs 1.043)과 Datacenter(1.078 vs 1.003)는 우리가 앞선다. workload로 보면 TEA는 mcf 1.585·leela 1.284로 크게 이기고 pr 0.842·clang 0.913으로 진다.
+**행 구성(사용자 선택 2026-09-16 최종)**: P-IQ와 RFP는 crit·full 모두 random queue, P-IQ + RFP는 둘 다 oldest first다. 그래서 **같은 메커니즘 안의 crit − full 차이는 slice 규칙만의 차이**다. 메커니즘 사이는 scheduler가 섞여 있다(P-IQ + RFP만 oldest first, 약 +1%p).
+
+- **Avg.는 우리 쪽이 앞선다**(P-IQ + RFP full 1.122, crit 1.118 vs TEA 1.090). **SPEC17만 TEA가 7.8%p 앞서고**(1.188 vs 1.110), GAP(1.144 vs 1.043)과 Datacenter(1.086 vs 1.003)는 우리가 앞선다. workload로 보면 TEA는 mcf 1.585·leela 1.284로 크게 이기고 pr 0.842·clang 0.913으로 진다.
+- **scheduler를 맞춘 crit vs full에서도 full이 같거나 앞선다**(C18과 같은 결론): P-IQ 1.0563 vs 1.0565, RFP 1.0953 vs 1.0993(+0.40%p), P-IQ + RFP 1.1177 vs 1.1219(+0.42%p).
 - geomean과 산술평균의 차이는 작다(Avg. 최대 0.4%p, TEA만 1.3%p).
-- **읽을 때 두 가지 주의**: ① ZERECO 6행은 prefetcher가 켜져 있어 약 4.1% 유리하게 잡혀 있다(baseline·TEA는 꺼짐). ② crit 행은 oldest first, full 행은 random queue로 돌린 결과다(사용자 지시로 그림에는 scheduler를 적지 않는다) — scheduler만으로 약 +1%p이므로 이 표의 crit − full 차이를 slice 효과로 읽으면 안 된다. 같은 scheduler로 맞춘 비교는 C18이다.
+- **주의**: ZERECO 6행은 prefetcher가 켜져 있어 약 4.1% 유리하게 잡혀 있다(baseline·TEA는 꺼짐). 그림에는 사용자 지시로 scheduler를 적지 않았다.
