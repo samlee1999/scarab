@@ -74,6 +74,7 @@
 #include "tea/tea_thread.h"
 #include "tea/tea_fetch_stage.h"
 #include "tea/tea_rename.h"
+#include "tea/main_h2p_resolution.h"
 
 /**************************************************************************************/
 /* Global vars */
@@ -115,6 +116,7 @@ void cmp_init(uns mode) {
 
   freq_init();
   cmp_init_cmp_model();
+  reset_main_h2p_resolution_profiler();
 
   for (proc_id = 0; proc_id < NUM_CORES; proc_id++) {
     /* initialize the stages */
@@ -201,6 +203,7 @@ void cmp_reset() {
     }
   }
   reset_memory();
+  reset_main_h2p_resolution_profiler();
 }
 
 /**************************************************************************************/
@@ -510,6 +513,9 @@ void cmp_recover() {
   ASSERT(bp_recovery_info->proc_id, bp_recovery_info->recovery_cycle != MAX_CTR);
   ASSERT(bp_recovery_info->proc_id, bp_recovery_info->proc_id == g_bp_data->proc_id);
   ASSERT(bp_recovery_info->proc_id, bp_recovery_info->proc_id == map_data->proc_id);
+  main_h2p_resolution_begin_recovery(bp_recovery_info->recovery_op,
+                                     bp_recovery_info->late_bp_recovery,
+                                     cycle_count);
 
   Op* tea_early_recovery_op = NULL;
   Flag tea_early_recovery = FALSE;

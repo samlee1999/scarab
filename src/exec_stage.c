@@ -805,7 +805,8 @@ static inline void tea_mark_early_flush_detection(Op* main_h2p,
 }
 
 static inline void tea_record_main_h2p_fetch_to_exec(Op* op) {
-  if (!TEA_ENABLE || !op || op->thread_id == 1)
+  /* also with TEA off, so a baseline run of this branch has the same numbers */
+  if (!op || op->thread_id == 1)
     return;
 
   if (!op->off_path && op->oracle_info.hbt_pred_is_hard) {

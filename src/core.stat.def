@@ -83,6 +83,29 @@ DEF_STAT(  TEA_FU_SLOTS_TAKEN_TOTAL,         COUNT,   NO_RATIO    )  /* per cycl
 DEF_STAT(  MAIN_OPS_BLOCKED_BY_TEA_FU_TOTAL, COUNT,   NO_RATIO    )  /* ready main ops left unscheduled while a TEA op held an FU they could have used */
 DEF_STAT(  MAIN_OPS_BLOCKED_BY_TEA_FU_CYCLES, PERCENT, NODE_CYCLE )  /* cycles with at least one such op */
 
+/* Mispredicted main-thread H2P branches (tea/main_h2p_resolution.c; collected with TEA off too).  Resolution is the
+   branch's own execution or the TEA H2P execution that scheduled its early flush.  Cycles, per branch. */
+DEF_STAT(  MAIN_H2P_MISPRED_EVENTS,                          COUNT,  NO_RATIO                                )
+DEF_STAT(  MAIN_H2P_MISPRED_RESOLVED_BY_EXEC,                COUNT,  NO_RATIO                                )
+DEF_STAT(  MAIN_H2P_MISPRED_RESOLVED_BY_TEA,                 COUNT,  NO_RATIO                                )
+DEF_STAT(  MAIN_H2P_MISPRED_PREDICT_TO_RESOLUTION_TOTAL,     COUNT,  NO_RATIO                                )
+DEF_STAT(  MAIN_H2P_MISPRED_PREDICT_TO_RESOLUTION_AVG,       RATIO,  MAIN_H2P_MISPRED_EVENTS                 )
+DEF_STAT(  MAIN_H2P_MISPRED_EXEC_PREDICT_TO_RESOLUTION_TOTAL, COUNT, NO_RATIO                                )
+DEF_STAT(  MAIN_H2P_MISPRED_EXEC_PREDICT_TO_RESOLUTION_AVG,  RATIO,  MAIN_H2P_MISPRED_RESOLVED_BY_EXEC       )
+DEF_STAT(  MAIN_H2P_MISPRED_TEA_PREDICT_TO_RESOLUTION_TOTAL, COUNT,  NO_RATIO                                )
+DEF_STAT(  MAIN_H2P_MISPRED_TEA_PREDICT_TO_RESOLUTION_AVG,   RATIO,  MAIN_H2P_MISPRED_RESOLVED_BY_TEA        )
+DEF_STAT(  MAIN_H2P_MISPRED_RESOLVED_BEFORE_FETCH,           COUNT,  NO_RATIO                                )  /* TEA early flush while the branch sat in the FTQ */
+DEF_STAT(  MAIN_H2P_MISPRED_FETCH_TO_RESOLUTION_TOTAL,       COUNT,  NO_RATIO                                )  /* as ZERECO_H2P_FETCH_TO_RESOLUTION; 0 for the above */
+DEF_STAT(  MAIN_H2P_MISPRED_FETCH_TO_RESOLUTION_AVG,         RATIO,  MAIN_H2P_MISPRED_EVENTS                 )
+DEF_STAT(  MAIN_H2P_MISPRED_RESOLUTION_TO_RECOVERY_TOTAL,    COUNT,  NO_RATIO                                )
+DEF_STAT(  MAIN_H2P_MISPRED_RESOLUTION_TO_RECOVERY_AVG,      RATIO,  MAIN_H2P_MISPRED_EVENTS                 )
+DEF_STAT(  MAIN_H2P_MISPRED_RECOVERY_TO_CORRECT_FETCH_TOTAL, COUNT,  NO_RATIO                                )
+DEF_STAT(  MAIN_H2P_MISPRED_RECOVERY_TO_CORRECT_FETCH_AVG,   RATIO,  MAIN_H2P_MISPRED_EVENTS                 )
+DEF_STAT(  MAIN_H2P_MISPRED_PREDICT_TO_CORRECT_FETCH_TOTAL,  COUNT,  NO_RATIO                                )
+DEF_STAT(  MAIN_H2P_MISPRED_PREDICT_TO_CORRECT_FETCH_AVG,    RATIO,  MAIN_H2P_MISPRED_EVENTS                 )
+DEF_STAT(  MAIN_H2P_MISPRED_INVALID_TIMING,                  COUNT,  NO_RATIO                                )
+DEF_STAT(  MAIN_H2P_MISPRED_PENDING_OVERWRITTEN,             COUNT,  NO_RATIO                                )
+
 DEF_STAT(  FULL_WINDOW_MEM_OP  ,  DIST,   NO_RATIO  )
 DEF_STAT(  FULL_WINDOW_FP_OP   ,  COUNT,  NO_RATIO  )
 DEF_STAT(  FULL_WINDOW_OTHER_OP,  DIST,   NO_RATIO  )

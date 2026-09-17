@@ -66,6 +66,7 @@
 #include "statistics.h"
 #include "thread.h"
 #include "uop_queue_stage.h"
+#include "tea/main_h2p_resolution.h"
 
 /**************************************************************************************/
 /* Macros */
@@ -905,6 +906,7 @@ static inline void icache_process_ops(Stage_Data* cur_data, Flag fetched_from_uo
     STAT_EVENT(op->proc_id, ORACLE_ON_PATH_INST_MEM + (op->table_info->mem_type == NOT_MEM) + 2 * op->off_path);
 
     op->fetch_cycle = cycle_count;
+    main_h2p_resolution_record_fetch(op);
 
     op_count[ic->proc_id]++; /* increment instruction counters */
     unique_count_per_core[ic->proc_id]++;
