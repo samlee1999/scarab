@@ -385,7 +385,20 @@ DEF_PARAM(tea_fetch_width, TEA_FETCH_WIDTH, uns, uns, 2, )
  * a full RS partition together.  0 = unlimited, the behavior of every TEA run before 2026-09-16. */
 DEF_PARAM(tea_rs_fill_width, TEA_RS_FILL_WIDTH, uns, uns, 0, )
 DEF_PARAM(tea_rs_reservation, TEA_RS_RESERVATION, uns, uns, 192, )
+/* Release the RS reservation while the TEA thread has no active chain.  0 = the reservation is held for the whole run,
+ * the behavior of every TEA run before 2026-09-18.  1 = the main thread may fill the whole RS while TEA is idle; when a
+ * chain starts, main ops already in the RS stay and only new main dispatch is blocked until main drains back under its
+ * limit, and TEA takes entries as they come free. */
+DEF_PARAM(tea_rs_reservation_dynamic, TEA_RS_RESERVATION_DYNAMIC, Flag, Flag, FALSE, )
 DEF_PARAM(tea_preg_reservation, TEA_PREG_RESERVATION, uns, uns, 192, )
+/* One TEA PREG pool per register file shared by every chain slot, instead of TEA_PREG_RESERVATION / TEA_MAX_CHAINS
+ * registers bound to each slot.  Only one chain is ever active in the oracle-trigger configuration, so the split
+ * leaves three quarters of the reservation unusable while TEA runs. */
+DEF_PARAM(tea_preg_pool_shared, TEA_PREG_POOL_SHARED, Flag, Flag, FALSE, )
+/* Reserve this many vector registers instead of tea_preg_reservation; 0 keeps them equal.  The TEA thread almost
+ * never renames a vector register (0.05 of them per PREG stall), so its vector reservation can be cut much further
+ * than its integer one. */
+DEF_PARAM(tea_preg_reservation_vec, TEA_PREG_RESERVATION_VEC, uns, uns, 0, )
 DEF_PARAM(tea_store_buffer_size, TEA_STORE_BUFFER_SIZE, uns, uns, 64, )
 DEF_PARAM(tea_max_chains, TEA_MAX_CHAINS, uns, uns, 4, )
 DEF_PARAM(backward_walk_cycles, BACKWARD_WALK_CYCLES, uns, uns, 500, )

@@ -47,6 +47,7 @@ extern "C" {
 #include "exec_ports.h"
 #include "node_stage.h"
 #include "statistics.h"
+#include "tea/tea_rename.h"
 #include "tea/tea_thread.h"
 }
 
@@ -198,6 +199,15 @@ int64 node_dispatch_find_emptiest_rs(Op* op) {
 
   Flag is_tea_op = (op->thread_id == 1);
 
+  /* The reservation is held for the whole run unless TEA_RS_RESERVATION_DYNAMIC, where the main thread gets the whole
+   * RS back while no chain is running.  A chain that starts never evicts main ops already in the RS: their entries are
+   * over the limit and the limit only stops new main dispatch until they issue. */
+  Flag reserved_now = TRUE;
+  if (TEA_RS_RESERVATION_DYNAMIC)
+    reserved_now = TEA_ENABLE && tea_is_active(node->proc_id);
+  Flag saw_compatible_rs = FALSE;  /* an RS that can run this op at all */
+  Flag saw_physical_room = FALSE;  /* ... and that had a free entry, so only a partition limit turned the op away */
+
   /*
    * Iterate through RSs looking for an available RS that is connected to
    * an FU that can execute the OP.
@@ -216,6 +226,19 @@ int64 node_dispatch_find_emptiest_rs(Op* op) {
         continue;
       }
 
+      saw_compatible_rs = TRUE;
+
+      /* Free physical entries are the one hard limit.  A held reservation keeps main under size - tea_per_rs and so
+       * leaves TEA its entries, but a released one lets main hold entries a starting chain would have found free, and
+       * node_issue_queue_allocate_rs_entry() asserts on an empty free list.  With the reservation held this test never
+       * fires: main_op_count < main_rs_limit together with an empty free list would already have crashed that
+       * allocation, so a static run behaves exactly as before. */
+      uns32 phys_free = rs->free_entry_count;
+      if (phys_free == 0) {
+        continue;
+      }
+      saw_physical_room = TRUE;
+
       /* Phase 4: Check per-thread partition limits */
       uns num_empty_slots;
       if (is_tea_op) {
@@ -226,10 +249,15 @@ int64 node_dispatch_find_emptiest_rs(Op* op) {
         num_empty_slots = rs->tea_rs_limit - rs->tea_op_count;
       } else {
         /* Main op: Check Main partition availability */
-        if (rs->main_op_count >= rs->main_rs_limit) {
+        uns32 main_limit = reserved_now ? rs->main_rs_limit : rs->size;
+        if (rs->main_op_count >= main_limit) {
           continue;  /* Main partition full */
         }
-        num_empty_slots = rs->main_rs_limit - rs->main_op_count;
+        num_empty_slots = main_limit - rs->main_op_count;
+      }
+
+      if (num_empty_slots > phys_free) {
+        num_empty_slots = phys_free;
       }
 
       if (num_empty_slots == 0) {
@@ -242,6 +270,18 @@ int64 node_dispatch_find_emptiest_rs(Op* op) {
         emptiest_rs_slots = num_empty_slots;
       }
     }
+  }
+
+  /* Why the op was turned away, when a compatible RS existed at all.  The callers count every TEA failure in
+   * TEA_RS_STALLS and every main failure in MAIN_DISPATCH_RS_FULL_CYCLES; these two name the cause. */
+  if (emptiest_rs_id == NODE_ISSUE_QUEUE_RS_SLOT_INVALID && saw_compatible_rs) {
+    /* A chain that starts while main holds every entry waits for main to issue.  Only reachable with the reservation
+     * released; with it held, the TEA partition keeps entries free for the chain. */
+    if (is_tea_op && !saw_physical_room)
+      STAT_EVENT(node->proc_id, TEA_RS_STALL_NO_PHYSICAL_ENTRY);
+    /* Entries were free and the reservation alone stopped the main thread: the cost the release is meant to remove. */
+    if (!is_tea_op && saw_physical_room)
+      STAT_EVENT(node->proc_id, MAIN_DISPATCH_RS_RESERVED_CYCLES);
   }
 
   return emptiest_rs_id;
@@ -656,12 +696,38 @@ void node_issue_queue_schedule() {
 /* How the two threads share the reservation stations, one sample per cycle. */
 static inline void node_issue_queue_collect_rs_occupancy() {
   Counter main_ops = 0, tea_ops = 0;
+  Flag main_over_limit = FALSE;
   for (uns rs_id = 0; rs_id < NUM_RS; ++rs_id) {
     main_ops += node->rs[rs_id].main_op_count;
     tea_ops += node->rs[rs_id].tea_op_count;
+    if (node->rs[rs_id].main_op_count > node->rs[rs_id].main_rs_limit)
+      main_over_limit = TRUE;
   }
   INC_STAT_EVENT(node->proc_id, MAIN_RS_OCCUPANCY_TOTAL, main_ops);
   INC_STAT_EVENT(node->proc_id, TEA_RS_OCCUPANCY_TOTAL, tea_ops);
+
+  /* How large the reservation would have to be: the cycles TEA holds more than N entries, over TEA_ACTIVE_CYCLES,
+   * is the share of active time a reservation of N would have blocked (TEA_RS_STALLS then says what it cost). */
+  if (tea_ops > 8)
+    STAT_EVENT(node->proc_id, TEA_RS_OCCUPANCY_ABOVE_8);
+  if (tea_ops > 16)
+    STAT_EVENT(node->proc_id, TEA_RS_OCCUPANCY_ABOVE_16);
+  if (tea_ops > 24)
+    STAT_EVENT(node->proc_id, TEA_RS_OCCUPANCY_ABOVE_24);
+  if (tea_ops > 32)
+    STAT_EVENT(node->proc_id, TEA_RS_OCCUPANCY_ABOVE_32);
+  if (tea_ops > 48)
+    STAT_EVENT(node->proc_id, TEA_RS_OCCUPANCY_ABOVE_48);
+  if (tea_ops > 64)
+    STAT_EVENT(node->proc_id, TEA_RS_OCCUPANCY_ABOVE_64);
+
+  /* Cycles a chain is running while main still holds more entries than its limit: the window a released reservation
+   * has to claw back after a trigger.  Always zero with TEA_RS_RESERVATION_DYNAMIC off. */
+  if (TEA_ENABLE && main_over_limit && tea_is_active(node->proc_id))
+    STAT_EVENT(node->proc_id, MAIN_RS_OVERSUBSCRIBED_CYCLES);
+
+  /* Sampled here so the RS and the PREG reservations are read in the same cycle. */
+  tea_rename_collect_preg_occupancy(node->proc_id);
 }
 
 void node_issue_queue_update() {

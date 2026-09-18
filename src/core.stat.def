@@ -76,6 +76,10 @@ DEF_STAT(  MAIN_OPS_ISSUED,               COUNT,    NO_RATIO    )  /* main ops l
 DEF_STAT(  MAIN_DISPATCH_RS_FULL_CYCLES,  PERCENT,  NODE_CYCLE  )  /* main dispatch stopped: no compatible RS had room */
 DEF_STAT(  MAIN_RS_OCCUPANCY_TOTAL,       COUNT,    NO_RATIO    )  /* per cycle sum; / NODE_CYCLE = mean main RS entries */
 DEF_STAT(  TEA_RS_OCCUPANCY_TOTAL,        COUNT,    NO_RATIO    )  /* per cycle sum; / NODE_CYCLE = mean TEA RS entries */
+DEF_STAT(  MAIN_RS_OVERSUBSCRIBED_CYCLES, PERCENT,  NODE_CYCLE  )  /* chain running while main still holds more than
+   its limit: the window a released reservation (tea_rs_reservation_dynamic) claws back after a trigger */
+DEF_STAT(  MAIN_DISPATCH_RS_RESERVED_CYCLES, PERCENT, NODE_CYCLE )  /* the subset of MAIN_DISPATCH_RS_FULL_CYCLES where
+   a compatible RS did have free entries and only the TEA reservation turned the main op away */
 
 /* Main thread against the TEA thread at select, where the TEA thread goes first. */
 DEF_STAT(  MAIN_FU_SLOTS_TAKEN_TOTAL,        COUNT,   NO_RATIO    )  /* per cycle sum of FU slots holding a main op */

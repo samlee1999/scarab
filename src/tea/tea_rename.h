@@ -109,12 +109,21 @@ typedef struct Tea_Rename_Stage_struct {
    * reset individually on per-chain termination. */
   Shadow_RAT* chain_srats[MAX_TEA_CHAINS];
 
+  /* tea_preg_pool_shared: every chain points at one pool per register file; owner[i] is the chain slot + 1 holding
+   * reservation index i, 0 when the register is free.  Unused when each slot owns its own sub-pool. */
+  uns8* shared_gp_owner;
+  uns8* shared_vec_owner;
+
 } Tea_Rename_Stage;
 
 /**************************************************************************************/
 /* Global Variables */
 
 extern Tea_Rename_Stage** tea_rename_stages;  /* Per-core TEA rename stage */
+
+/* One sample per cycle of the reserved PREGs the TEA thread holds (see tea_rename.c). */
+void tea_rename_collect_preg_occupancy(uns proc_id);
+
 
 /**************************************************************************************/
 /* Function Prototypes */

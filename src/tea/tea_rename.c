@@ -255,6 +255,27 @@ static int tea_preg_pool_alloc(Tea_Preg_Free_List* pool) {
   return preg_idx;
 }
 
+/* owner[i] tracks whether reservation index i is free in the shared TEA pool or held by a chain.  Every move through
+ * it is guarded, so a register can never be returned twice -- the per-chain pools used to hide that because a
+ * terminating chain rebuilt its whole pool. */
+#define TEA_PREG_OWNER_FREE 0
+
+static Flag tea_preg_release_to_pool(uns proc_id, Tea_Preg_Free_List* pool, uns8* owner, int base, int preg,
+                                     uns8 expect) {
+  if (!pool || preg < base || preg >= base + (int)pool->size)
+    return FALSE;
+  if (owner) {
+    if (owner[preg - base] != expect)
+      return FALSE;                    /* already free, or held by someone else: nothing to return */
+    owner[preg - base] = TEA_PREG_OWNER_FREE;
+  }
+  ASSERT(proc_id, pool->count < pool->size);
+  pool->indices[pool->tail] = (uns)preg;
+  pool->tail = (pool->tail + 1) % pool->size;
+  pool->count++;
+  return TRUE;
+}
+
 static Tea_Preg_Free_List* create_tea_preg_pool(int start_idx, int count) {
   Tea_Preg_Free_List* pool = (Tea_Preg_Free_List*)calloc(1, sizeof(Tea_Preg_Free_List));
   pool->size  = count;
@@ -309,15 +330,22 @@ void init_tea_preg_pools(uns proc_id) {
   /* TEA_PREG_RESERVATION / TEA_MAX_CHAINS PREGs per active chain slot.
    * Must divide evenly; remainder would be removed from main list but wasted. */
   uns max_chains = tea_max_chains(proc_id);
-  ASSERT(proc_id, TEA_PREG_RESERVATION > 0);
-  ASSERT(proc_id, TEA_PREG_RESERVATION <= REG_TABLE_INTEGER_PHYSICAL_SIZE);
-  ASSERT(proc_id, TEA_PREG_RESERVATION <= REG_TABLE_VECTOR_PHYSICAL_SIZE);
-  ASSERT(proc_id, TEA_PREG_RESERVATION % max_chains == 0);
-  uns per_chain = TEA_PREG_RESERVATION / max_chains;
-  ASSERT(proc_id, per_chain > 0);
+  uns gp_res  = TEA_PREG_RESERVATION;
+  uns vec_res = TEA_PREG_RESERVATION_VEC ? TEA_PREG_RESERVATION_VEC : TEA_PREG_RESERVATION;
+  ASSERT(proc_id, gp_res > 0 && vec_res > 0);
+  ASSERT(proc_id, gp_res <= REG_TABLE_INTEGER_PHYSICAL_SIZE);
+  ASSERT(proc_id, vec_res <= REG_TABLE_VECTOR_PHYSICAL_SIZE);
+  uns gp_per = gp_res, vec_per = vec_res;
+  if (!TEA_PREG_POOL_SHARED) {
+    /* one sub-pool per chain slot: the reservation has to divide evenly */
+    ASSERT(proc_id, gp_res % max_chains == 0 && vec_res % max_chains == 0);
+    gp_per  = gp_res / max_chains;
+    vec_per = vec_res / max_chains;
+  }
+  ASSERT(proc_id, gp_per > 0 && vec_per > 0);
 
-  int gp_base  = REG_TABLE_INTEGER_PHYSICAL_SIZE - TEA_PREG_RESERVATION;
-  int vec_base = REG_TABLE_VECTOR_PHYSICAL_SIZE  - TEA_PREG_RESERVATION;
+  int gp_base  = REG_TABLE_INTEGER_PHYSICAL_SIZE - (int)gp_res;
+  int vec_base = REG_TABLE_VECTOR_PHYSICAL_SIZE  - (int)vec_res;
 
   /* GP pools */
   if (reg_file[REG_FILE_REG_TYPE_GENERAL_PURPOSE]) {
@@ -327,11 +355,16 @@ void init_tea_preg_pools(uns proc_id) {
     /* Remove all TEA GP indices from main free list (one contiguous block) */
     remove_tea_entries_from_main_free_list(gp_phys, gp_base);
 
-    /* Create one sub-pool per runtime-active chain slot */
+    /* One pool for every chain, or one sub-pool per runtime-active chain slot */
+    Tea_Preg_Free_List* shared = TEA_PREG_POOL_SHARED ?
+                                   create_tea_preg_pool(gp_base, gp_per) : NULL;
+    if (TEA_PREG_POOL_SHARED)
+      rename->shared_gp_owner = (uns8*)calloc(gp_per, sizeof(uns8));
     for (uns i = 0; i < max_chains; i++) {
       Shadow_RAT* srat = rename->chain_srats[i];
-      srat->tea_gp_start_idx = gp_base + i * (int)per_chain;
-      srat->tea_gp_preg_pool = create_tea_preg_pool(srat->tea_gp_start_idx, per_chain);
+      srat->tea_gp_start_idx = TEA_PREG_POOL_SHARED ? gp_base : gp_base + i * (int)gp_per;
+      srat->tea_gp_preg_pool = shared ? shared :
+                                 create_tea_preg_pool(srat->tea_gp_start_idx, gp_per);
     }
   }
 
@@ -342,10 +375,15 @@ void init_tea_preg_pools(uns proc_id) {
 
     remove_tea_entries_from_main_free_list(vec_phys, vec_base);
 
+    Tea_Preg_Free_List* shared = TEA_PREG_POOL_SHARED ?
+                                   create_tea_preg_pool(vec_base, vec_per) : NULL;
+    if (TEA_PREG_POOL_SHARED)
+      rename->shared_vec_owner = (uns8*)calloc(vec_per, sizeof(uns8));
     for (uns i = 0; i < max_chains; i++) {
       Shadow_RAT* srat = rename->chain_srats[i];
-      srat->tea_vec_start_idx = vec_base + i * (int)per_chain;
-      srat->tea_vec_preg_pool = create_tea_preg_pool(srat->tea_vec_start_idx, per_chain);
+      srat->tea_vec_start_idx = TEA_PREG_POOL_SHARED ? vec_base : vec_base + i * (int)vec_per;
+      srat->tea_vec_preg_pool = shared ? shared :
+                                  create_tea_preg_pool(srat->tea_vec_start_idx, vec_per);
     }
   }
 }
@@ -376,24 +414,14 @@ void tea_preg_pool_return_prev(uns proc_id, int chain_slot, Op* op) {
     int prev_preg = op->prev_dst_reg_id[i][REG_TABLE_TYPE_PHYSICAL];
     if (prev_preg == REG_TABLE_REG_ID_INVALID) continue;
 
-    if (reg_type == REG_FILE_REG_TYPE_GENERAL_PURPOSE && srat->tea_gp_preg_pool) {
-      Tea_Preg_Free_List* pool = srat->tea_gp_preg_pool;
-      if (prev_preg >= srat->tea_gp_start_idx &&
-          prev_preg < srat->tea_gp_start_idx + (int)pool->size) {
-        ASSERT(proc_id, pool->count < pool->size);
-        pool->indices[pool->tail] = (uns)prev_preg;
-        pool->tail  = (pool->tail + 1) % pool->size;
-        pool->count++;
-      }
-    } else if (reg_type == REG_FILE_REG_TYPE_VECTOR && srat->tea_vec_preg_pool) {
-      Tea_Preg_Free_List* pool = srat->tea_vec_preg_pool;
-      if (prev_preg >= srat->tea_vec_start_idx &&
-          prev_preg < srat->tea_vec_start_idx + (int)pool->size) {
-        ASSERT(proc_id, pool->count < pool->size);
-        pool->indices[pool->tail] = (uns)prev_preg;
-        pool->tail  = (pool->tail + 1) % pool->size;
-        pool->count++;
-      }
+    if (reg_type == REG_FILE_REG_TYPE_GENERAL_PURPOSE) {
+      tea_preg_release_to_pool(proc_id, srat->tea_gp_preg_pool,
+                               tea_rename_stages[proc_id]->shared_gp_owner, srat->tea_gp_start_idx,
+                               prev_preg, (uns8)(chain_slot + 1));
+    } else if (reg_type == REG_FILE_REG_TYPE_VECTOR) {
+      tea_preg_release_to_pool(proc_id, srat->tea_vec_preg_pool,
+                               tea_rename_stages[proc_id]->shared_vec_owner, srat->tea_vec_start_idx,
+                               prev_preg, (uns8)(chain_slot + 1));
     }
   }
 }
@@ -406,6 +434,27 @@ void reset_tea_preg_pool(uns proc_id, int chain_slot) {
   ASSERT(proc_id, tea_chain_slot_is_valid(proc_id, chain_slot));
 
   Shadow_RAT* srat = tea_rename_stages[proc_id]->chain_srats[chain_slot];
+
+  if (TEA_PREG_POOL_SHARED) {
+    /* The pool is shared, so only the registers this chain still owns go back. */
+    Tea_Rename_Stage* rename = tea_rename_stages[proc_id];
+    uns8 tag = (uns8)(chain_slot + 1);
+    struct {
+      Tea_Preg_Free_List* pool;
+      uns8* owner;
+      int base;
+    } files[2] = {{srat->tea_gp_preg_pool, rename->shared_gp_owner, srat->tea_gp_start_idx},
+                  {srat->tea_vec_preg_pool, rename->shared_vec_owner, srat->tea_vec_start_idx}};
+    for (uns f = 0; f < 2; f++) {
+      Tea_Preg_Free_List* pool = files[f].pool;
+      uns8* owner = files[f].owner;
+      if (!pool || !owner)
+        continue;
+      for (uns i = 0; i < pool->size; i++)
+        tea_preg_release_to_pool(proc_id, pool, owner, files[f].base, files[f].base + (int)i, tag);
+    }
+    return;
+  }
 
   if (srat->tea_gp_preg_pool) {
     Tea_Preg_Free_List* pool = srat->tea_gp_preg_pool;
@@ -611,6 +660,17 @@ void tea_rename_op(uns proc_id, Op* op) {
     ASSERT(proc_id, new_phys_reg_id >= 0);
     STAT_EVENT(proc_id, TEA_PREGS_ALLOCATED);
 
+    if (TEA_PREG_POOL_SHARED) {
+      uns8* owner = (reg_type == REG_FILE_REG_TYPE_GENERAL_PURPOSE) ? rename->shared_gp_owner
+                                                                    : rename->shared_vec_owner;
+      int base = (reg_type == REG_FILE_REG_TYPE_GENERAL_PURPOSE) ? srat->tea_gp_start_idx
+                                                                 : srat->tea_vec_start_idx;
+      if (owner) {
+        ASSERT(proc_id, owner[new_phys_reg_id - base] == TEA_PREG_OWNER_FREE);
+        owner[new_phys_reg_id - base] = (uns8)(slot + 1);
+      }
+    }
+
     op->dst_reg_id[i][REG_TABLE_TYPE_ARCHITECTURAL] = arch_reg_id;
     op->dst_reg_id[i][REG_TABLE_TYPE_PHYSICAL]      = new_phys_reg_id;
 
@@ -706,4 +766,55 @@ static void shadow_rat_write_mapping(Shadow_RAT* srat, int arch_reg_id,
     if (vec_idx >= 0 && vec_idx < (int)srat->vec_size)
       srat->vec_mappings[vec_idx] = phys_reg_id;
   }
+}
+
+/**************************************************************************************/
+/* tea_rename_collect_preg_occupancy: how many of the reserved PREGs the TEA thread actually holds, one sample per
+ * cycle.  TEA_PREG_RESERVATION registers are taken out of the main free list for the whole run and split into one
+ * pool per chain slot, so a pool's size minus its free count is what that chain holds right now.  Divided by
+ * TEA_ACTIVE_CYCLES the totals give the mean while a chain runs; the thresholds say how much of the reservation a
+ * dynamic scheme would have to hand back. */
+
+void tea_rename_collect_preg_occupancy(uns proc_id) {
+  if (!TEA_ENABLE || !tea_rename_stages || !tea_rename_stages[proc_id])
+    return;
+
+  Tea_Rename_Stage* rename = tea_rename_stages[proc_id];
+  Counter gp = 0, vec = 0;
+  /* With tea_preg_pool_shared every chain slot points at the same pool, so it is read once; with a pool per slot the
+   * slots hold different registers and are summed. */
+  uns slots = TEA_PREG_POOL_SHARED ? 1 : tea_max_chains(proc_id);
+  for (uns i = 0; i < slots; i++) {
+    Shadow_RAT* srat = rename->chain_srats[i];
+    if (!srat)
+      continue;
+    if (srat->tea_gp_preg_pool)
+      gp += srat->tea_gp_preg_pool->size - srat->tea_gp_preg_pool->count;
+    if (srat->tea_vec_preg_pool)
+      vec += srat->tea_vec_preg_pool->size - srat->tea_vec_preg_pool->count;
+  }
+
+  INC_STAT_EVENT(proc_id, TEA_PREG_GP_OCCUPANCY_TOTAL, gp);
+  INC_STAT_EVENT(proc_id, TEA_PREG_VEC_OCCUPANCY_TOTAL, vec);
+
+  if (gp > 8)
+    STAT_EVENT(proc_id, TEA_PREG_GP_OCCUPANCY_ABOVE_8);
+  if (gp > 16)
+    STAT_EVENT(proc_id, TEA_PREG_GP_OCCUPANCY_ABOVE_16);
+  if (gp > 24)
+    STAT_EVENT(proc_id, TEA_PREG_GP_OCCUPANCY_ABOVE_24);
+  if (gp > 34)
+    STAT_EVENT(proc_id, TEA_PREG_GP_OCCUPANCY_ABOVE_34);
+  if (gp > 68)
+    STAT_EVENT(proc_id, TEA_PREG_GP_OCCUPANCY_ABOVE_68);
+  if (vec > 8)
+    STAT_EVENT(proc_id, TEA_PREG_VEC_OCCUPANCY_ABOVE_8);
+  if (vec > 16)
+    STAT_EVENT(proc_id, TEA_PREG_VEC_OCCUPANCY_ABOVE_16);
+  if (vec > 24)
+    STAT_EVENT(proc_id, TEA_PREG_VEC_OCCUPANCY_ABOVE_24);
+  if (vec > 34)
+    STAT_EVENT(proc_id, TEA_PREG_VEC_OCCUPANCY_ABOVE_34);
+  if (vec > 68)
+    STAT_EVENT(proc_id, TEA_PREG_VEC_OCCUPANCY_ABOVE_68);
 }
