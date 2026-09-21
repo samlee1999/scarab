@@ -440,6 +440,15 @@ DEF_PARAM(zereco_iq_rf_covered_streak_threshold,
    priority ops; the remaining entries are normal entries. */
 DEF_PARAM(zereco_piq_enable, ZERECO_PIQ_ENABLE, Flag, Flag, FALSE, )
 DEF_PARAM(zereco_piq_entry_percent, ZERECO_PIQ_ENTRY_PERCENT, uns, uns, 10, )
+/* Hand the priority partition to the normal stream while no priority op is between decode and the reservation
+ * station.  The count rises when the decoder sees a critical-slice uop, which is far enough ahead of dispatch for the
+ * normal ops holding those entries to issue out of them. */
+DEF_PARAM(zereco_piq_reservation_dynamic, ZERECO_PIQ_RESERVATION_DYNAMIC, Flag, Flag, FALSE, )
+/* Cycles the count must stay at zero before the partition is released; re-engaging is always immediate.  0 releases
+ * on the first empty cycle.  A short empty stretch is not worth releasing for: the normal ops admitted into the
+ * priority entries take about a dozen cycles to issue out of them again, and a priority op that arrives meanwhile
+ * falls back to a normal entry and loses its priority. */
+DEF_PARAM(zereco_piq_release_dwell, ZERECO_PIQ_RELEASE_DWELL, uns, uns, 0, )
 /* Priority-entry admission policy:
    0 = stall when no compatible Priority entry is available,
    1 = non-stall fallback to a compatible Normal entry; a fallback op loses

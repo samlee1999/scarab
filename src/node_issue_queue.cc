@@ -48,6 +48,7 @@ extern "C" {
 #include "node_stage.h"
 #include "statistics.h"
 #include "tea/tea_thread.h"
+#include "zereco/critpath.h"
 }
 
 /**************************************************************************************/
@@ -71,21 +72,11 @@ static inline Flag node_issue_queue_rs_supports_op(
   return FALSE;
 }
 
-static inline Flag node_issue_queue_piq_partition_mismatch(
-  const Reservation_Station* rs) {
-  return rs->main_op_count != rs->zereco_priority_op_count +
-                                rs->zereco_normal_op_count ||
-         rs->zereco_priority_op_count > rs->zereco_priority_rs_limit ||
-         rs->zereco_normal_op_count > rs->zereco_normal_rs_limit ||
-         rs->zereco_priority_rs_limit + rs->zereco_normal_rs_limit !=
-           rs->main_rs_limit;
-}
-
 static void node_issue_queue_check_piq_partition(
   const Reservation_Station* rs, uns rs_id, const Op* op) {
   if (!ZERECO_PIQ_ENABLE)
     return;
-  Flag mismatch = node_issue_queue_piq_partition_mismatch(rs);
+  Flag mismatch = node_piq_partition_mismatch(rs);
   INC_STAT_EVENT(node->proc_id, ZERECO_PIQ_PARTITION_INTEGRITY_MISMATCHES,
                  mismatch);
   ASSERTM(node->proc_id, !mismatch,
@@ -199,6 +190,10 @@ void node_issue_queue_release_rs_entry(Node_Stage* node_local, Op* op) {
  */
 static int64 node_dispatch_find_emptiest_rs_for_piq_class(
   Op* op, Flag use_priority_partition) {
+  /* One read of the policy per dispatch decision: the partition is held unless the dynamic reservation is on and no
+     priority op has been between decode and the RS for long enough. */
+  const Flag piq_reservation_engaged =
+    ZERECO_PIQ_ENABLE ? zereco_piq_reservation_engaged(node->proc_id) : TRUE;
   int64 emptiest_rs_id = NODE_ISSUE_QUEUE_RS_SLOT_INVALID;
   uns emptiest_rs_slots = 0;
 
@@ -218,6 +213,13 @@ static int64 node_dispatch_find_emptiest_rs_for_piq_class(
     if (!node_issue_queue_rs_supports_op(rs, op))
       continue;
 
+    /* Free physical entries are the one hard limit.  A held partition keeps the two classes inside main_rs_limit on
+       its own, but a released one lets the normal stream hold entries a priority op would have found free, and
+       node_issue_queue_allocate_rs_entry() asserts on an empty free list. */
+    uns32 phys_free = rs->free_entry_count;
+    if (phys_free == 0)
+      continue;
+
     /* Phase 4: Check per-thread and optional P-IQ partition limits. */
     uns num_empty_slots;
     if (is_tea_op) {
@@ -232,16 +234,22 @@ static int64 node_dispatch_find_emptiest_rs_for_piq_class(
         num_empty_slots = rs->zereco_priority_rs_limit -
                           rs->zereco_priority_op_count;
       } else {
-        if (rs->zereco_normal_op_count >= rs->zereco_normal_rs_limit)
+        /* Released, the normal stream may use the whole main capacity; engaged, it stops at its own partition.  A
+           limit that drops never evicts: the ops already in those entries stay and only new dispatch waits. */
+        uns32 normal_limit = piq_reservation_engaged ? rs->zereco_normal_rs_limit
+                                                     : rs->main_rs_limit;
+        if (rs->zereco_normal_op_count >= normal_limit)
           continue;
-        num_empty_slots = rs->zereco_normal_rs_limit -
-                          rs->zereco_normal_op_count;
+        num_empty_slots = normal_limit - rs->zereco_normal_op_count;
       }
     } else {
       if (rs->main_op_count >= rs->main_rs_limit)
         continue;
       num_empty_slots = rs->main_rs_limit - rs->main_op_count;
     }
+
+    if (num_empty_slots > phys_free)
+      num_empty_slots = phys_free;
 
     if (num_empty_slots == 0)
       continue;
@@ -432,6 +440,7 @@ void node_issue_queue_clear() {
     op->next_rdy = NULL;
     op->in_rdy_list = FALSE;
     node_decrement_rs_counters_for_clear(node, op, TRUE);
+    zereco_piq_inflight_issued(op);
     if (tea_done_clear)
       STAT_EVENT(node->proc_id, TEA_READY_LIST_DONE_CLEARED);
 
@@ -552,6 +561,7 @@ void node_issue_queue_dispatch() {
     node_issue_queue_allocate_rs_entry(node, op, (uns)rs_id);
     rs->rs_op_count++;
     rs->main_op_count++;
+    zereco_piq_inflight_admitted_to_rs(op);
     if (ZERECO_PIQ_ENABLE || ZERECO_CRITPATH_PRIORITY) {
       op->zereco_piq_entry = op->zereco_iq_priority_bit;
       Flag fallback_mismatch =
@@ -713,6 +723,17 @@ static void node_issue_queue_collect_zereco_piq_occupancy(void) {
   }
 
   STAT_EVENT(node->proc_id, ZERECO_PIQ_CYCLES);
+  zereco_piq_inflight_sample(node->proc_id);
+  if (ZERECO_PIQ_ENABLE && !zereco_piq_reservation_engaged(node->proc_id))
+    STAT_EVENT(node->proc_id, ZERECO_PIQ_RESERVATION_RELEASED_CYCLES);
+  else if (ZERECO_PIQ_ENABLE) {
+    Flag over = FALSE;
+    for (uns rs_id = 0; rs_id < NUM_RS; ++rs_id)
+      over |= node->rs[rs_id].zereco_normal_op_count >
+              node->rs[rs_id].zereco_normal_rs_limit;
+    if (over)
+      STAT_EVENT(node->proc_id, ZERECO_PIQ_RESERVATION_OVERSUBSCRIBED_CYCLES);
+  }
   INC_STAT_EVENT(node->proc_id, ZERECO_PIQ_PRIORITY_CAPACITY_SLOT_CYCLES,
                  priority_capacity);
   INC_STAT_EVENT(node->proc_id, ZERECO_PIQ_NORMAL_CAPACITY_SLOT_CYCLES,

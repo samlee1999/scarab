@@ -472,3 +472,35 @@ DEF_STAT(CRITPATH_EDGE_CONF_BLOCKED_D1, COUNT, NO_RATIO)   /* its producer, e.g.
 DEF_STAT(CRITPATH_EDGE_CONF_BLOCKED_D2, COUNT, NO_RATIO)
 DEF_STAT(CRITPATH_EDGE_CONF_BLOCKED_D3P, COUNT, NO_RATIO)  /* depth 3 and beyond */
 
+
+/* P-IQ in-flight counter (measurement only, no policy attached): priority ops that the front end has tagged and that
+ * have not left the reservation station yet.  +1 where the priority bit is written, -1 when the op is scheduled out
+ * of the RS, and a full recount of the node table after a recovery, which is the exact form of "reset on flush".
+ * ZERO_CYCLES over ZERECO_PIQ_CYCLES is the share of time no priority op is anywhere between the front end and the
+ * RS -- the share a reservation released on that condition could hand to the normal stream. */
+DEF_STAT(ZERECO_PIQ_INFLIGHT_TAGGED_OPS, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_PIQ_INFLIGHT_SQUASHED_OPS, COUNT, NO_RATIO)   /* tagged ops that died before they issued */
+DEF_STAT(ZERECO_PIQ_INFLIGHT_TOTAL, COUNT, NO_RATIO)          /* per cycle sum; / ZERECO_PIQ_CYCLES = mean in flight */
+DEF_STAT(ZERECO_PIQ_INFLIGHT_ZERO_CYCLES, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_PIQ_INFLIGHT_ABOVE_1, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_PIQ_INFLIGHT_ABOVE_2, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_PIQ_INFLIGHT_ABOVE_4, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_PIQ_INFLIGHT_ABOVE_8, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_PIQ_INFLIGHT_ABOVE_16, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_PIQ_INFLIGHT_ABOVE_32, COUNT, NO_RATIO)
+/* How long the empty stretches last: RUNS counts them, RUNS_ABOVE_<n> the ones longer than n cycles.  ZERO_CYCLES
+ * over RUNS is the mean stretch, which is what sets the epoch of any release policy. */
+DEF_STAT(ZERECO_PIQ_INFLIGHT_ZERO_RUNS, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_PIQ_INFLIGHT_ZERO_RUNS_ABOVE_4, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_PIQ_INFLIGHT_ZERO_RUNS_ABOVE_16, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_PIQ_INFLIGHT_ZERO_RUNS_ABOVE_64, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_PIQ_INFLIGHT_ZERO_RUNS_ABOVE_256, COUNT, NO_RATIO)
+/* Priority bit written to RS entry: how much warning the counter gives before the op needs its slot. */
+DEF_STAT(ZERECO_PIQ_PRIORITY_FETCH_TO_RS_TOTAL, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_PIQ_PRIORITY_FETCH_TO_RS_OPS, COUNT, NO_RATIO)
+
+/* zereco_piq_reservation_dynamic: cycles the priority partition is on loan to the normal stream, and cycles a
+ * re-engaged partition is still held above its limit by normal ops that have not issued yet -- the window in which an
+ * arriving priority op can be pushed into a normal entry. */
+DEF_STAT(ZERECO_PIQ_RESERVATION_RELEASED_CYCLES, COUNT, NO_RATIO)
+DEF_STAT(ZERECO_PIQ_RESERVATION_OVERSUBSCRIBED_CYCLES, COUNT, NO_RATIO)

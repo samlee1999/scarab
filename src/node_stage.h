@@ -109,6 +109,9 @@ Flag is_node_stage_stalled(void);
 void flush_tea_ops_from_node_stage(uns proc_id);
 void flush_tea_ops_by_chain_id(uns proc_id, uns8 chain_id);
 Flag node_ready_op_should_clear_rs(Op* op);
+/* The P-IQ partition invariant; TRUE means the counters diverged.  Defined once in node_stage.c and used by the
+   issue queue too, so the dynamic reservation only has to be taught to one of them. */
+Flag node_piq_partition_mismatch(const Reservation_Station* rs);
 Flag node_decrement_rs_counters_for_clear(Node_Stage* node_local, Op* op,
                                           Flag strict);
 

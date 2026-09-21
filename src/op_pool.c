@@ -60,6 +60,7 @@ allocates them once and then hands out pointers every time 'alloc_op' is called.
 #include "uop_queue_stage.h"
 #include "tea/tea_fetch_stage.h"
 #include "tea/tea_rename.h"
+#include "zereco/critpath.h"
 #include "zereco/rfp.h"
 
 /**************************************************************************************/
@@ -162,6 +163,9 @@ void free_op(Op* op) {
      load gives back the in-flight count its rename took out.  Retired loads
      already released theirs during training and clear the flag. */
   rfp_note_op_freed(op);
+  /* Same reason: a priority op that dies before it issues gives back its in-flight count here, whichever stage
+     discarded it -- the front end on a redirect, the node stage on a flush. */
+  zereco_piq_inflight_discarded(op);
 
   op->op_pool_valid = FALSE;
   op_pool_active_ops--;
@@ -232,6 +236,8 @@ void op_pool_setup_op(uns proc_id, Op* op) {
   op->zereco_rf_covered = FALSE;
   op->zereco_iq_priority_candidate_bit = FALSE;
   op->zereco_iq_priority_bit = FALSE;
+  op->zereco_piq_inflight_counted = FALSE;
+  op->zereco_piq_tag_cycle = 0;
   op->zereco_piq_entry = FALSE;
   op->zereco_piq_fallback = FALSE;
   op->zereco_piq_dispatch_wait_cycles = 0;

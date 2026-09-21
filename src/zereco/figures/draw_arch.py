@@ -348,8 +348,69 @@ def fig6():
     save(fig, "fig6_rfp")
 
 
+# ============================================================================
+# Logic 3 -- slice membership at uop granularity (brslice_tab entry layout)
+# ============================================================================
+def fig7():
+    fig, ax, H = canvas(7.0, 3.7)
+
+    # --- the instruction and the uops it decodes into ------------------------
+    txt(ax, 2, H - 3, "x86 instruction", fs=FS, bold=True, ha="left")
+    box(ax, 2, H - 10, 30, 5.5, "[0x0340]  add rax, [rbx]", bold=True)
+    txt(ax, 2, H - 13.5, "two uops, both carrying PC 0x0340", fs=FS - 1.2, color=NOTE, ha="left")
+    box(ax, 2, H - 23, 14, 6, "uop 0\nload", fs=FS - 0.6)
+    box(ax, 17, H - 23, 14, 6, "uop 1\nadd", fs=FS - 0.6)
+    arrow(ax, (17, H - 10), (9, H - 17))
+    arrow(ax, (17, H - 10), (24, H - 17))
+    txt(ax, 9, H - 25.3, "index 0", fs=FS - 1.4, color=NOTE)
+    txt(ax, 24, H - 25.3, "index 1", fs=FS - 1.4, color=NOTE)
+
+    # --- the table ----------------------------------------------------------
+    cols = [("tag (PC)", 12), ("uop mask", 10), ("owner (H2P)", 13), ("depth", 8)]
+    rows = [["0x0288", "0 0 1 0", "0x0100", "2"],
+            ["0x0340", "1 0 0 0", "0x0100", "1"],
+            ["0x03C4", "1 1 0 0", "0x0334", "3"]]
+    tx, ty = 55, H - 4
+    bottom = table(ax, tx, ty, cols, rows, hl={(1, 0), (1, 1)},
+                   title="brslice_tab   (PC-indexed, one bit per uop)", gold_cols=(1,))
+    y_e = row_center(ty, 1)
+
+    # --- (1) one lookup, at decode ------------------------------------------
+    num(ax, 35.5, H - 20, 1)
+    box(ax, 38, H - 24, 13, 8, "lookup\nbrslice_tab[PC]", fs=FS - 0.5)
+    arrow(ax, (31, H - 20), (38, H - 20))
+    poly_arrow(ax, [(51, H - 20), (53, H - 20), (53, y_e), (tx, y_e)])
+    txt(ax, 52.2, H - 16.5, "PC", fs=FS - 1.2)
+
+    # --- (2) each uop takes its own bit -------------------------------------
+    poly_arrow(ax, [(tx, y_e - 1.4), (53, y_e - 1.4), (53, H - 30), (45.5, H - 30)], color=MAG)
+    txt(ax, 49.5, H - 27.7, "mask", fs=FS - 1.2, color=MAG)
+    num(ax, 4, H - 30, 2)
+    box(ax, 6.5, H - 33.5, 39, 7,
+        "uop i takes bit i of the mask\nuop 0 (load) = 1 → priority      uop 1 (add) = 0 → normal",
+        fs=FS - 0.7)
+
+    # --- (3) the bit rides down the pipeline --------------------------------
+    num(ax, 4, H - 42, 3)
+    box(ax, 6.5, H - 45.5, 39, 7,
+        "the 1-bit result rides with the uop\nrename → P-IQ admission → select", fs=FS - 0.7, fc=LIGHT)
+    arrow(ax, (26, H - 33.5), (26, H - 38.5))
+
+    # --- (4) fill path ------------------------------------------------------
+    num(ax, 56.5, H - 24.5, 4)
+    box(ax, 59, H - 28, 36, 7,
+        "at commit the backward walk sets the bit\nof the uop it reached, not of the whole PC", fs=FS - 0.7)
+    arrow(ax, (77, H - 21), (77, bottom - 0.4), color=RED, ls="--")
+    txt(ax, 81.5, H - 19.7, "update", fs=FS - 1.2, color=RED)
+
+    txt(ax, 50, 3.2, "bit i = uop i of that macro-op is on the critical slice;  four bits cover almost every x86 "
+                     "instruction", fs=FS - 1.1, color=NOTE)
+    save(fig, "fig7_brslice_tab_uop")
+
+
 if __name__ == "__main__":
     fig1()
+    fig7()
     fig4()
     fig5()
     fig6()

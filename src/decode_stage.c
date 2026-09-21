@@ -28,6 +28,7 @@
  ***************************************************************************************/
 
 #include "decode_stage.h"
+#include "zereco/critpath.h"
 
 #include "globals/assert.h"
 #include "globals/global_defs.h"
@@ -234,6 +235,11 @@ void update_decode_stage(Stage_Data* src_sd) {
 void decode_stage_process_op(Op* op) {
   Cf_Type cf = op->table_info->cf_type;
   op->decode_cycle = cycle_count;
+
+  /* A critical-slice uop is in flight from the moment the decoder produces it until it leaves the RS.  This is also
+   * the earliest point an x86 machine can know: the priority bit is a property of the instruction PC and the uop
+   * index, and neither is settled before decode. */
+  zereco_piq_inflight_tag(op);
 
   if (cf) {
     DEBUG(dec->proc_id, "Decode CF instruction bar:%i fetch_addr:%llx op_num:%llu recover:%i\n",

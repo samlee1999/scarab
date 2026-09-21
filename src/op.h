@@ -294,6 +294,9 @@ struct Op_struct {
   Flag zereco_rf_covered;
   Flag zereco_iq_priority_candidate_bit;
   Flag zereco_iq_priority_bit;
+  /* counted in the P-IQ in-flight counter at the front end; cleared when the op leaves the RS or is squashed */
+  Flag zereco_piq_inflight_counted;
+  Counter zereco_piq_tag_cycle;  /* cycle the front end wrote the priority bit */
   Flag zereco_piq_entry;
   Flag zereco_piq_fallback;
   Counter zereco_piq_dispatch_wait_cycles;

@@ -138,6 +138,26 @@ Flag node_ready_op_should_clear_rs(Op* op) {
   return FALSE;
 }
 
+/* The one definition of the P-IQ partition invariant, shared by the node stage and the issue queue.  It used to be
+ * written out in both places, and when the reservation became dynamic only one copy was updated -- every run of
+ * 260920_zereco_piq_dynamic died on the other one.
+ *
+ * With zereco_piq_reservation_dynamic the normal class is deliberately allowed past its own partition: while no
+ * critical-slice uop is between decode and the RS it may use the whole main capacity, and it stays above the
+ * partition after the reservation is re-engaged until those ops issue.  What still has to hold is that the two class
+ * counters add up to the main count and that neither the priority class nor the machine itself is overrun. */
+Flag node_piq_partition_mismatch(const Reservation_Station* rs) {
+  uns32 normal_bound = ZERECO_PIQ_RESERVATION_DYNAMIC ? rs->main_rs_limit
+                                                      : rs->zereco_normal_rs_limit;
+  return rs->main_op_count != rs->zereco_priority_op_count +
+                                rs->zereco_normal_op_count ||
+         rs->zereco_priority_op_count > rs->zereco_priority_rs_limit ||
+         rs->zereco_normal_op_count > normal_bound ||
+         rs->main_op_count > rs->main_rs_limit ||
+         rs->zereco_priority_rs_limit + rs->zereco_normal_rs_limit !=
+           rs->main_rs_limit;
+}
+
 Flag node_decrement_rs_counters_for_clear(Node_Stage* node_local, Op* op,
                                           Flag strict) {
   ASSERT(0, node_local);
@@ -199,13 +219,7 @@ Flag node_decrement_rs_counters_for_clear(Node_Stage* node_local, Op* op,
           op->state, cycle_count);
 
   if (ZERECO_PIQ_ENABLE) {
-    Flag mismatch =
-      rs->main_op_count != rs->zereco_priority_op_count +
-                             rs->zereco_normal_op_count ||
-      rs->zereco_priority_op_count > rs->zereco_priority_rs_limit ||
-      rs->zereco_normal_op_count > rs->zereco_normal_rs_limit ||
-      rs->zereco_priority_rs_limit + rs->zereco_normal_rs_limit !=
-        rs->main_rs_limit;
+    Flag mismatch = node_piq_partition_mismatch(rs);
     INC_STAT_EVENT(node_local->proc_id,
                    ZERECO_PIQ_PARTITION_INTEGRITY_MISMATCHES, mismatch);
     ASSERTM(node_local->proc_id, !mismatch,

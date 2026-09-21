@@ -72,6 +72,20 @@ Flag critpath_is_member(uns proc_id, Addr pc, uns max_depth);
    architecturally executed instructions contribute. */
 void critpath_note_retire(struct Op_struct* op);
 
+/* P-IQ in-flight counter: priority ops tagged by the front end that have not left the reservation station yet.
+   Measurement only -- nothing reads the value, so a run stays cycle-identical.  tag() counts an op in when the front
+   end writes its priority bit, issued() counts it out when it is scheduled out of the RS, discarded() gives the count
+   back for an op that dies before it issues (free_op() is the one place every op passes through, so a flush needs no
+   separate reset), and sample() takes the per-cycle statistics. */
+void zereco_piq_inflight_tag(struct Op_struct* op);
+void zereco_piq_inflight_issued(struct Op_struct* op);
+void zereco_piq_inflight_discarded(struct Op_struct* op);
+void zereco_piq_inflight_admitted_to_rs(struct Op_struct* op);
+void zereco_piq_inflight_sample(uns proc_id);
+/* Is the priority partition held right now?  TRUE unless zereco_piq_reservation_dynamic is on and the count has been
+   zero for zereco_piq_release_dwell cycles. */
+Flag zereco_piq_reservation_engaged(uns proc_id);
+
 #ifdef __cplusplus
 }
 #endif

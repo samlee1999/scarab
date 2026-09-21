@@ -818,3 +818,101 @@ void critpath_note_retire(Op* op) {
                         op->critpath_last_producer_pc, entry->depth,
                         entry->owner_pc);
 }
+
+/**************************************************************************************/
+/* P-IQ in-flight counter.
+ *
+ * The question this answers is how often no priority op is anywhere between the front end and the reservation
+ * station, because that is the condition under which the P-IQ reservation could be handed to the normal stream.  The
+ * count starts at the front end rather than at dispatch on purpose: the reservation has to be in place before the op
+ * asks for an entry, so the useful signal is the one that arrives earliest.  Nothing reads the value yet, so a run
+ * with these counters is cycle-identical to one without them. */
+
+static uns    zereco_piq_in_flight[MAX_NUM_PROCS];
+static Counter zereco_piq_zero_run[MAX_NUM_PROCS];
+
+void zereco_piq_inflight_tag(Op* op) {
+  if (!op || op->proc_id >= MAX_NUM_PROCS || !op->zereco_iq_priority_bit ||
+      op->zereco_piq_inflight_counted)
+    return;
+  op->zereco_piq_inflight_counted = TRUE;
+  op->zereco_piq_tag_cycle = cycle_count;
+  zereco_piq_in_flight[op->proc_id]++;
+  STAT_EVENT(op->proc_id, ZERECO_PIQ_INFLIGHT_TAGGED_OPS);
+}
+
+void zereco_piq_inflight_issued(Op* op) {
+  if (!op || op->proc_id >= MAX_NUM_PROCS || !op->zereco_piq_inflight_counted)
+    return;
+  op->zereco_piq_inflight_counted = FALSE;
+  if (zereco_piq_in_flight[op->proc_id] > 0)
+    zereco_piq_in_flight[op->proc_id]--;
+}
+
+/* An op that never issues -- squashed in the front end, flushed from the node stage, or freed any other way --
+ * gives its count back here.  free_op() is the one place every op passes through. */
+void zereco_piq_inflight_discarded(Op* op) {
+  if (!op || op->proc_id >= MAX_NUM_PROCS || !op->zereco_piq_inflight_counted)
+    return;
+  op->zereco_piq_inflight_counted = FALSE;
+  if (zereco_piq_in_flight[op->proc_id] > 0)
+    zereco_piq_in_flight[op->proc_id]--;
+  STAT_EVENT(op->proc_id, ZERECO_PIQ_INFLIGHT_SQUASHED_OPS);
+}
+
+/* How much warning the counter gives: the front end tags the op here, and it asks for its RS entry that many cycles
+ * later. */
+void zereco_piq_inflight_admitted_to_rs(Op* op) {
+  if (!op || op->proc_id >= MAX_NUM_PROCS || !op->zereco_piq_inflight_counted ||
+      !op->zereco_piq_tag_cycle || op->zereco_piq_tag_cycle > cycle_count)
+    return;
+  INC_STAT_EVENT(op->proc_id, ZERECO_PIQ_PRIORITY_FETCH_TO_RS_TOTAL,
+                 cycle_count - op->zereco_piq_tag_cycle);
+  STAT_EVENT(op->proc_id, ZERECO_PIQ_PRIORITY_FETCH_TO_RS_OPS);
+}
+
+Flag zereco_piq_reservation_engaged(uns proc_id) {
+  if (!ZERECO_PIQ_RESERVATION_DYNAMIC || proc_id >= MAX_NUM_PROCS)
+    return TRUE;
+  if (zereco_piq_in_flight[proc_id])
+    return TRUE;
+  return zereco_piq_zero_run[proc_id] < (Counter)ZERECO_PIQ_RELEASE_DWELL + 1;
+}
+
+void zereco_piq_inflight_sample(uns proc_id) {
+  if (proc_id >= MAX_NUM_PROCS)
+    return;
+  uns v = zereco_piq_in_flight[proc_id];
+  INC_STAT_EVENT(proc_id, ZERECO_PIQ_INFLIGHT_TOTAL, v);
+
+  if (v == 0) {
+    STAT_EVENT(proc_id, ZERECO_PIQ_INFLIGHT_ZERO_CYCLES);
+    if (zereco_piq_zero_run[proc_id] == 0)
+      STAT_EVENT(proc_id, ZERECO_PIQ_INFLIGHT_ZERO_RUNS);
+    zereco_piq_zero_run[proc_id]++;
+    /* each stretch is counted once, on the cycle it grows past the threshold */
+    if (zereco_piq_zero_run[proc_id] == 5)
+      STAT_EVENT(proc_id, ZERECO_PIQ_INFLIGHT_ZERO_RUNS_ABOVE_4);
+    if (zereco_piq_zero_run[proc_id] == 17)
+      STAT_EVENT(proc_id, ZERECO_PIQ_INFLIGHT_ZERO_RUNS_ABOVE_16);
+    if (zereco_piq_zero_run[proc_id] == 65)
+      STAT_EVENT(proc_id, ZERECO_PIQ_INFLIGHT_ZERO_RUNS_ABOVE_64);
+    if (zereco_piq_zero_run[proc_id] == 257)
+      STAT_EVENT(proc_id, ZERECO_PIQ_INFLIGHT_ZERO_RUNS_ABOVE_256);
+    return;
+  }
+
+  zereco_piq_zero_run[proc_id] = 0;
+  if (v > 1)
+    STAT_EVENT(proc_id, ZERECO_PIQ_INFLIGHT_ABOVE_1);
+  if (v > 2)
+    STAT_EVENT(proc_id, ZERECO_PIQ_INFLIGHT_ABOVE_2);
+  if (v > 4)
+    STAT_EVENT(proc_id, ZERECO_PIQ_INFLIGHT_ABOVE_4);
+  if (v > 8)
+    STAT_EVENT(proc_id, ZERECO_PIQ_INFLIGHT_ABOVE_8);
+  if (v > 16)
+    STAT_EVENT(proc_id, ZERECO_PIQ_INFLIGHT_ABOVE_16);
+  if (v > 32)
+    STAT_EVENT(proc_id, ZERECO_PIQ_INFLIGHT_ABOVE_32);
+}
