@@ -53,6 +53,11 @@
  *                                every retention threshold at once
  */
 
+/* Filter A, ratio form: operand positions with a counter of their own.  A µop's
+   register inputs rarely go past the third; a later position shares the last
+   counter (CRITPATH_EDGE_RATIO_FOLDED says how often). */
+#define CRITPATH_EDGE_RATIO_SLOTS 4
+
 typedef struct Critpath_PC_Entry_struct {
   Flag valid;
   Addr tag;             /* full PC; the table is scaffolding, so no hashing */
@@ -67,6 +72,8 @@ typedef struct Critpath_PC_Entry_struct {
   Addr edge_pc;         /* A: the producer that confidence is about */
   uns16 win_exec;       /* B: commits of this PC in the current decay window */
   uns16 win_crit;       /* B: times chosen as a last-arriving producer, same window */
+  uns16 ratio_exec;     /* A, ratio form: commits with a last-arriving operand, halved every window */
+  uns16 ratio_last[CRITPATH_EDGE_RATIO_SLOTS]; /* A, ratio form: times each operand position arrived last */
   Counter lru_touch;
 } Critpath_PC_Entry;
 
@@ -258,6 +265,15 @@ void critpath_init(uns proc_id) {
           "zereco_critpath_edge_conf_min must be 0 (off) or 1..3 (2-bit counter)\n");
   ASSERTM(proc_id, ZERECO_CRITPATH_EDGE_CONF_EXEMPT_DEPTH >= -1,
           "zereco_critpath_edge_conf_exempt_depth must be -1 (none) or a depth\n");
+  ASSERTM(proc_id, ZERECO_CRITPATH_EDGE_RATIO >= 0 && ZERECO_CRITPATH_EDGE_RATIO <= 100,
+          "zereco_critpath_edge_ratio is a percentage (0 = the consecutive form)\n");
+  ASSERTM(proc_id, !ZERECO_CRITPATH_EDGE_RATIO ||
+                     (ZERECO_CRITPATH_EDGE_RATIO_WINDOW >= 2 &&
+                      ZERECO_CRITPATH_EDGE_RATIO_WINDOW <= 0xFFFF &&
+                      ZERECO_CRITPATH_EDGE_RATIO_MIN_COUNT <=
+                        ZERECO_CRITPATH_EDGE_RATIO_WINDOW / 2),
+          "zereco_critpath_edge_ratio_window must be 2..65535 and "
+          "zereco_critpath_edge_ratio_min_count at most half of it\n");
   ASSERTM(proc_id, !ZERECO_CRITPATH_RATIO_MIN || ZERECO_CRITPATH_DECAY_INTERVAL,
           "zereco_critpath_ratio_min is evaluated at decay sweeps; set zereco_critpath_decay_interval\n");
   ASSERTM(proc_id, ZERECO_CRITPATH_INSERT_GATE <= 2,
@@ -304,6 +320,48 @@ void critpath_reset(uns proc_id) {
  * wrong-path fetch under zereco_critpath_priority_offpath) does influence which
  * member a later allocation evicts. */
 
+/* The consumption gate.  Membership says the PC is TRACKED; this says the chain it
+   belongs to is worth ACCELERATING right now, by dereferencing the branch that
+   claimed it -- the same move PUBS makes when it reads conf_tab through the pointer
+   stored in a slice entry.  With the gate off, tracked and accelerated are the same
+   set, which is what every earlier CLEAR run measured. */
+static Flag critpath_owner_accelerates(uns proc_id, const Critpath_PC_Entry* e) {
+  if (!ZERECO_CRITPATH_CONSUME_H2P_ONLY)
+    return TRUE;
+  Hbt_Lookup state = e->owner_pc ? hbt_lookup_state(e->owner_pc) : HBT_LOOKUP_MISS;
+  if (state == HBT_LOOKUP_HARD) {
+    STAT_EVENT(proc_id, CRITPATH_CONSUME_OWNER_HARD);
+    return TRUE;
+  }
+  /* Owner known but no longer hard, or lost from the HBT to a conflict.  The second
+     is a false negative of the gate, so the two are counted apart. */
+  STAT_EVENT(proc_id, state == HBT_LOOKUP_COLD ? CRITPATH_CONSUME_OWNER_COLD
+                                               : CRITPATH_CONSUME_OWNER_MISS);
+  return FALSE;
+}
+
+/* Does the gate positively refuse this PC?  TRUE only when the gate is on, the PC is
+   a tracked member, and the branch that claimed it is not H2P right now.  A PC the
+   table does not hold answers FALSE -- brslice_tab capacity must not silently switch
+   off a prefetch that Prefetch Table membership already authorised. */
+Flag critpath_owner_blocks(uns proc_id, Addr pc) {
+  if (!ZERECO_CRITPATH_CONSUME_H2P_ONLY || !ZERECO_CRITPATH_PROFILE)
+    return FALSE;
+  Critpath_PC_Entry* e = critpath_pc_lookup(proc_id, pc, FALSE);
+  if (!e || !e->in_slice)
+    return FALSE;
+  return e->owner_pc ? !hbt_is_hard_branch(e->owner_pc) : TRUE;
+}
+
+/* Raw membership, no gate: is this PC in brslice_tab at all?  Measurement only --
+   critpath_is_member() is what the machine consults, and it also asks the owner. */
+Flag critpath_pc_tracked(uns proc_id, Addr pc) {
+  if (!ZERECO_CRITPATH_PROFILE)
+    return FALSE;
+  Critpath_PC_Entry* e = critpath_pc_lookup(proc_id, pc, FALSE);
+  return e && e->in_slice;
+}
+
 Flag critpath_is_member(uns proc_id, Addr pc, uns max_depth) {
   if (!ZERECO_CRITPATH_PROFILE)
     return FALSE;
@@ -312,7 +370,7 @@ Flag critpath_is_member(uns proc_id, Addr pc, uns max_depth) {
     return FALSE;
   if (max_depth && e->depth > max_depth)
     return FALSE;
-  return TRUE;
+  return critpath_owner_accelerates(proc_id, e);
 }
 
 /**************************************************************************************/
@@ -352,6 +410,7 @@ void critpath_note_wake(Op* src_op, Op* dep_op, uns8 rdy_bit) {
       (uns8)dep_op->oracle_info.src_info[rdy_bit].type;
     dep_op->critpath_last_producer_pc =
       src_op->inst_info ? src_op->inst_info->addr : 0;
+    dep_op->critpath_last_producer_op_num = src_op->op_num;
   } else if (arrival > dep_op->critpath_second_cycle) {
     dep_op->critpath_second_cycle = arrival;
   }
@@ -485,6 +544,62 @@ static Flag critpath_edge_passes(const Critpath_PC_Entry* e, Flag match) {
   return match && e->edge_conf >= ZERECO_CRITPATH_EDGE_CONF_MIN;
 }
 
+/* Filter A, ratio form, bookkeeping: the operand at position `src` arrived last on
+   this instance.  The window is the entry's own commits, not time -- when it fills,
+   every count is halved, so each ratio keeps its value while old instances fade and
+   a phase change needs no refresh of its own. */
+static void critpath_ratio_observe(uns proc_id, Critpath_PC_Entry* e, uns8 src) {
+  if (src >= CRITPATH_EDGE_RATIO_SLOTS)
+    STAT_EVENT(proc_id, CRITPATH_EDGE_RATIO_FOLDED);
+  e->ratio_last[MIN2((uns)src, CRITPATH_EDGE_RATIO_SLOTS - 1)]++;
+  e->ratio_exec++;
+  if ((uns)e->ratio_exec >= ZERECO_CRITPATH_EDGE_RATIO_WINDOW) {
+    e->ratio_exec >>= 1;
+    for (uns ii = 0; ii < CRITPATH_EDGE_RATIO_SLOTS; ++ii)
+      e->ratio_last[ii] >>= 1;
+    STAT_EVENT(proc_id, CRITPATH_EDGE_RATIO_HALVINGS);
+  }
+}
+
+/* Filter A, ratio form: may the member follow the operand that arrived last on this
+   instance?  Only if that operand has arrived last min_count times in the window --
+   early on a ratio means nothing (1 of 1 is 100%) -- and on at least the given
+   share of the window's commits.  Two operands that take turns both qualify; one
+   that is rarely last does not, however long it waits. */
+static Flag critpath_ratio_passes(uns proc_id, const Critpath_PC_Entry* e, uns8 src) {
+  uns32 last = e->ratio_last[MIN2((uns)src, CRITPATH_EDGE_RATIO_SLOTS - 1)];
+  if (last < ZERECO_CRITPATH_EDGE_RATIO_MIN_COUNT) {
+    STAT_EVENT(proc_id, CRITPATH_EDGE_RATIO_BLOCKED_COUNT);
+    return FALSE;
+  }
+  if ((double)last * 100.0 < (double)ZERECO_CRITPATH_EDGE_RATIO * e->ratio_exec) {
+    STAT_EVENT(proc_id, CRITPATH_EDGE_RATIO_BLOCKED_SHARE);
+    return FALSE;
+  }
+  return TRUE;
+}
+
+/* Filter A in whichever form is on.  Members near the branch are exempt in both.
+   With the ratio form on, the consecutive form's verdict on the same instance is
+   still worked out, only to be counted against it. */
+static Flag critpath_edge_filter(uns proc_id, const Critpath_PC_Entry* e, Flag match,
+                                 uns8 src) {
+  if (!ZERECO_CRITPATH_EDGE_RATIO && !ZERECO_CRITPATH_EDGE_CONF_MIN)
+    return TRUE;
+  if ((int)e->depth <= ZERECO_CRITPATH_EDGE_CONF_EXEMPT_DEPTH)
+    return TRUE;
+  STAT_EVENT(proc_id, CRITPATH_EDGE_FILTER_CHECKED);
+  Flag consecutive = critpath_edge_passes(e, match);
+  if (!ZERECO_CRITPATH_EDGE_RATIO)
+    return consecutive;
+  Flag pass = critpath_ratio_passes(proc_id, e, src);
+  if (pass && !consecutive)
+    STAT_EVENT(proc_id, CRITPATH_EDGE_RATIO_PASS_CONSEC_BLOCK);
+  else if (!pass && consecutive)
+    STAT_EVENT(proc_id, CRITPATH_EDGE_RATIO_BLOCK_CONSEC_PASS);
+  return pass;
+}
+
 /* Filter C: a near-tie means both producers are effectively critical; pushing
    one of them alone buys at most the slack, so neither is followed. */
 static Flag critpath_slack_passes(const Op* op) {
@@ -526,13 +641,24 @@ static void critpath_propagate_to(uns proc_id, Critpath_Core_State* state,
   if (producer->confirm < state->confirm_max)
     producer->confirm++;
   if (producer->owner_pc != my_owner) {
+    Flag steals_from_h2p = producer->owner_pc && hbt_is_hard_branch(producer->owner_pc) &&
+                           !(my_owner && hbt_is_hard_branch(my_owner));
     if (is_main) {
       STAT_EVENT(proc_id, CRITPATH_OWNER_OVERWRITE);
-      if (producer->owner_pc && hbt_is_hard_branch(producer->owner_pc) &&
-          !(my_owner && hbt_is_hard_branch(my_owner)))
+      if (steals_from_h2p)
         STAT_EVENT(proc_id, CRITPATH_OWNER_OVERWRITE_H2P_LOST);
     }
-    producer->owner_pc = my_owner;
+    /* One owner field per entry, so a PC on two chains keeps the last claimant.  Once
+       the owner decides whether the member is accelerated, letting a branch that is
+       not H2P take it away would silently drop it from a live chain -- so an H2P
+       owner is kept.  It heals itself: when that owner is demoted the next claimant
+       takes the field. */
+    if (ZERECO_CRITPATH_OWNER_PROTECT && steals_from_h2p) {
+      if (is_main)
+        STAT_EVENT(proc_id, CRITPATH_OWNER_PROTECTED);
+    } else {
+      producer->owner_pc = my_owner;
+    }
   } else if (is_main) {
     STAT_EVENT(proc_id, CRITPATH_PROPAGATION_REFRESHED);
   }
@@ -662,6 +788,12 @@ void critpath_note_retire(Op* op) {
     /* A load on a critical chain is a Target Load.  Under RFP_TARGET_CRITPATH
        this commit is what grants it a Prefetch Table entry, replacing the
        backward walk that used to own that decision. */
+    /* NOT gated by the consumption gate on purpose: this is where the Prefetch
+       Table learns a Target Load's stride, and learning has to stay as wide as
+       tracking.  If it stopped while a branch is not H2P, the chain would be
+       ready at the next promotion but the address predictor would have to start
+       over -- which is exactly what tracking early is meant to avoid.  The gate
+       sits on the launch instead (rfp_rename_launch). */
     if (RFP_TARGET_CRITPATH && op->table_info->mem_type == MEM_LD &&
         (!ZERECO_CRITPATH_PRIORITY_MAX_DEPTH ||
          entry->depth <= ZERECO_CRITPATH_PRIORITY_MAX_DEPTH)) {
@@ -723,6 +855,9 @@ void critpath_note_retire(Op* op) {
        repeating. */
     edge_match = critpath_edge_observe(entry, entry->has_last,
                                        op->critpath_last_producer_pc);
+    /* Its ratio form counts the same instances, by operand position. */
+    if (ZERECO_CRITPATH_EDGE_RATIO)
+      critpath_ratio_observe(proc_id, entry, op->critpath_last_src);
     if (!entry->has_last) {
       STAT_EVENT(proc_id, CRITPATH_LPR_FIRST_OBSERVATION);
     } else {
@@ -806,7 +941,7 @@ void critpath_note_retire(Op* op) {
     STAT_EVENT(proc_id, CRITPATH_SLACK_BLOCKED);
     return;
   }
-  if (!critpath_edge_passes(entry, edge_match)) {
+  if (!critpath_edge_filter(proc_id, entry, edge_match, op->critpath_last_src)) {
     STAT_EVENT(proc_id, CRITPATH_EDGE_CONF_BLOCKED);
     STAT_EVENT(proc_id, CRITPATH_EDGE_CONF_BLOCKED_D0 + MIN2(entry->depth, 3));
     return;

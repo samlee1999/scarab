@@ -188,6 +188,32 @@ void node_issue_queue_release_rs_entry(Node_Stage* node_local, Op* op) {
  *
  * Phase 4: Thread-aware dispatch - checks per-thread partition limits
  */
+/* Room a main-thread op of one P-IQ class has in this RS right now, bounded by the free physical entries.  This is
+   the ONE definition the dispatch search and the non-stall check share.  Written out twice, the rule has diverged
+   before: under the dynamic reservation a released partition lets the normal class grow past its own limit, and when
+   the partition is held again those ops stay (nothing is evicted), so normal_op_count can exceed
+   zereco_normal_rs_limit.  A copy that subtracted without a floor wrapped around in unsigned arithmetic, reported
+   ~4 billion free normal entries, and killed runs with a false "non-stall missed compatible Normal capacity". */
+static uns node_piq_class_room(const Reservation_Station* rs, Flag priority_class, Flag engaged) {
+  uns32 phys_free = rs->free_entry_count;
+  if (phys_free == 0)
+    return 0;
+  uns32 limit, count;
+  if (priority_class) {
+    limit = rs->zereco_priority_rs_limit;
+    count = rs->zereco_priority_op_count;
+  } else {
+    /* Released, the normal stream may use the whole main capacity; engaged, it stops at its own partition.  A limit
+       that drops never evicts: the ops already in those entries stay and only new dispatch waits. */
+    limit = engaged ? rs->zereco_normal_rs_limit : rs->main_rs_limit;
+    count = rs->zereco_normal_op_count;
+  }
+  if (count >= limit)
+    return 0;
+  uns room = limit - count;
+  return room > phys_free ? phys_free : room;
+}
+
 static int64 node_dispatch_find_emptiest_rs_for_piq_class(
   Op* op, Flag use_priority_partition) {
   /* One read of the policy per dispatch decision: the partition is held unless the dynamic reservation is on and no
@@ -227,21 +253,9 @@ static int64 node_dispatch_find_emptiest_rs_for_piq_class(
         continue;
       num_empty_slots = rs->tea_rs_limit - rs->tea_op_count;
     } else if (ZERECO_PIQ_ENABLE) {
-      if (use_priority_partition) {
-        if (rs->zereco_priority_op_count >=
-            rs->zereco_priority_rs_limit)
-          continue;
-        num_empty_slots = rs->zereco_priority_rs_limit -
-                          rs->zereco_priority_op_count;
-      } else {
-        /* Released, the normal stream may use the whole main capacity; engaged, it stops at its own partition.  A
-           limit that drops never evicts: the ops already in those entries stay and only new dispatch waits. */
-        uns32 normal_limit = piq_reservation_engaged ? rs->zereco_normal_rs_limit
-                                                     : rs->main_rs_limit;
-        if (rs->zereco_normal_op_count >= normal_limit)
-          continue;
-        num_empty_slots = normal_limit - rs->zereco_normal_op_count;
-      }
+      num_empty_slots = node_piq_class_room(rs, use_priority_partition, piq_reservation_engaged);
+      if (num_empty_slots == 0)
+        continue;
     } else {
       if (rs->main_op_count >= rs->main_rs_limit)
         continue;
@@ -496,6 +510,7 @@ void node_issue_queue_dispatch() {
 
     if (rs_id == NODE_ISSUE_QUEUE_RS_SLOT_INVALID) {
       if (ZERECO_PIQ_ENABLE) {
+        const Flag engaged = zereco_piq_reservation_engaged(node->proc_id);
         Counter unused_other_slots = 0;
         for (uns candidate_rs_id = 0; candidate_rs_id < NUM_RS;
              ++candidate_rs_id) {
@@ -504,12 +519,8 @@ void node_issue_queue_dispatch() {
             continue;
           node_issue_queue_check_piq_partition(candidate_rs,
                                                candidate_rs_id, op);
-          if (op->zereco_iq_priority_bit)
-            unused_other_slots += candidate_rs->zereco_normal_rs_limit -
-                                  candidate_rs->zereco_normal_op_count;
-          else
-            unused_other_slots += candidate_rs->zereco_priority_rs_limit -
-                                  candidate_rs->zereco_priority_op_count;
+          /* The other class's room, by the definition the dispatch search used a moment ago. */
+          unused_other_slots += node_piq_class_room(candidate_rs, !op->zereco_iq_priority_bit, engaged);
         }
 
         Flag nonstall_mismatch =

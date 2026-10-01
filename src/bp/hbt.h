@@ -5,13 +5,20 @@
 #include "op.h"                   // Op 구조체
 
 // ==========================================================
-// HBT (Hard Branch Table) 관련 상수(매크로) 정의
-// Per TEA paper Section IV-B:
-// - 3-bit saturating counter (max value 7)
-// - H2P if counter > 1 (i.e., >= 2)
-// - Decrement all counters by 1 every 50K instructions
+// HBT (Hard Branch Table)
+// TEA paper (MICRO 2024) Table II and Section IV-B:
+//   - 256 entries, 8-way set associative, indexed by branch PC (0.2KB, 1-cycle)
+//   - 3-bit saturating counter; an entry is created ON A MISPREDICTION with the
+//     counter at 1, and a later misprediction of the same branch increments it
+//   - H2P if the counter is greater than 1
+//   - every counter is decremented by 1 every 50K retired instructions
+//   - entries whose counter is 0 take replacement priority
+// The geometry is a parameter (hbt_entries / hbt_assoc, defaults 256 / 8) so it
+// can be swept; everything else above is fixed by the paper.
+//
+// The table is global, not per-core -- the simulations this is used in are
+// single-core, and the previous implementation was global as well.
 // ==========================================================
-#define HBT_SIZE 1024         // HBT 테이블의 전체 크기
 #define HBT_CTR_BITS 3        // HBT 카운터의 비트 수 (논문: 3-bit)
 #define HBT_CTR_MAX ((1 << HBT_CTR_BITS) - 1) // HBT 카운터의 최댓값 (7)
 #define HBT_H2P_THRESHOLD 1   // counter > 1이면 H2P (논문 기준)
@@ -21,21 +28,31 @@
 // HBT 자료구조 정의
 // ==========================================================
 typedef struct {
-  uns64 tag;
-  uns32 counter;
+  uns64   tag;
+  uns32   counter;
+  Flag    valid;
+  Counter lru;          // 마지막 접근 시점 (counter 0인 way들 중 희생자 선택용)
 } HbtEntry;
+
+/* What a lookup found.  Separating "not in the table" from "in the table with a
+   low counter" matters: the first is a capacity/conflict miss of the HBT itself,
+   the second is a branch the HBT has seen and judged easy.  Consumers that gate
+   on H2P status inherit the first as a false negative, so it has to be
+   measurable. */
+typedef enum {
+  HBT_LOOKUP_MISS = 0,  // 그 PC의 entry가 없다 (충돌/용량)
+  HBT_LOOKUP_COLD,      // entry는 있고 counter <= 1
+  HBT_LOOKUP_HARD       // entry가 있고 counter > 1 = H2P
+} Hbt_Lookup;
 
 // ==========================================================
 // 전역 변수 선언 (extern)
-// 변수의 실체는 hbt.c에 있고, 여기서는 '이런 변수가 외부에 있다'고 알려주는 역할만 합니다.
 // ==========================================================
-extern HbtEntry hbt_table[HBT_SIZE];
-extern uns64    retired_branch_count;
-extern uns64    hbt_retired_instruction_count;
+extern uns64 retired_branch_count;
+extern uns64 hbt_retired_instruction_count;
 
 // ==========================================================
 // 외부 공개 함수 원형(Prototype) 선언
-// 다른 파일에서 호출할 수 있는 함수 목록입니다.
 // ==========================================================
 
 /**
@@ -61,7 +78,11 @@ void hbt_retire_instruction_tick(uns proc_id);
  */
 Flag hbt_is_hard_branch(Addr pc);
 
-
 uns32 hbt_get_counter(Addr pc);
+
+/**
+ * @brief 조회 결과를 miss / cold / hard로 구분해 돌려줍니다 (계측용).
+ */
+Hbt_Lookup hbt_lookup_state(Addr pc);
 
 #endif /* #ifndef __HBT_H__ */

@@ -70,7 +70,9 @@
 #include "tea/tea_thread.h"
 #include "tea/tea_rename.h"
 #include "cmp_model.h"
+#include "zereco/branch_state.h"
 #include "zereco/critpath.h"
+#include "zereco/critpath_precision.h"
 #include "zereco/rfp.h"
 
 /* Macros */
@@ -1002,6 +1004,7 @@ void node_retire() {
        * All other retires are "optional" to release resources in the PIN frontend */
       inst_count[node->proc_id]++;
       hbt_retire_instruction_tick(node->proc_id);
+      branch_state_retire_tick(node->proc_id);
       STAT_EVENT(op->proc_id, NODE_INST_COUNT);
 
       if (op->fetched_instruction) {
@@ -1053,6 +1056,11 @@ void node_retire() {
 
     op->oracle_info.hbt_pred_is_hard = hbt_is_hard_branch(op->inst_info->addr);
     op->oracle_info.hbt_misp_counter = hbt_get_counter(op->inst_info->addr);
+    /* The branch-state ledger files this instance under the same counter value the
+       critical-path seed gate reads below, so the population tables and the gate
+       agree on what state the branch was in. */
+    if (op->table_info->cf_type != NOT_CF)
+      branch_state_note_retire(op, op->oracle_info.hbt_misp_counter);
     /* Address prediction trains here, on every committed instance in order.
        The backward walk that fills the buffer below cannot do this job: it
        drops ops while walking, and base_va + stride * inflight only holds if
@@ -1061,6 +1069,9 @@ void node_retire() {
     /* Critical-path observation: taken at commit so only on-path, architecturally
        executed instructions contribute. */
     critpath_note_retire(op);
+    /* After the line above, so membership and the priority fields describe this
+       same instance. */
+    critpath_precision_note_retire(op);
     if (LEGACY_WALK_NEEDED())
       fill_buffer_add(op->proc_id, op);
 

@@ -471,6 +471,21 @@ DEF_STAT(CRITPATH_EDGE_CONF_BLOCKED_D0, COUNT, NO_RATIO)   /* the H2P branch its
 DEF_STAT(CRITPATH_EDGE_CONF_BLOCKED_D1, COUNT, NO_RATIO)   /* its producer, e.g. the compare */
 DEF_STAT(CRITPATH_EDGE_CONF_BLOCKED_D2, COUNT, NO_RATIO)
 DEF_STAT(CRITPATH_EDGE_CONF_BLOCKED_D3P, COUNT, NO_RATIO)  /* depth 3 and beyond */
+/* A: every decision the filter actually made -- a member past the exempt depth, about to propagate -- in either form.
+   CRITPATH_EDGE_CONF_BLOCKED over this is the share of those propagations the filter withheld. */
+DEF_STAT(CRITPATH_EDGE_FILTER_CHECKED, COUNT, NO_RATIO)
+/* A, ratio form (zereco_critpath_edge_ratio, 2026-10-01).  The two BLOCKED counts split CRITPATH_EDGE_CONF_BLOCKED by
+   reason: the operand that arrived last has not yet done so min_count times in the window (COUNT), or it has but on
+   less than the required share of the member's commits (SHARE).  The CONSEC pair compares each decision with the one
+   the consecutive form (zereco_critpath_edge_conf_min) would have made on the same instance: followed only by the
+   ratio form, or withheld only by it.  HALVINGS counts window ends; FOLDED counts last-arriving operands past the last
+   counted position, which share its counter. */
+DEF_STAT(CRITPATH_EDGE_RATIO_BLOCKED_COUNT, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_EDGE_RATIO_BLOCKED_SHARE, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_EDGE_RATIO_PASS_CONSEC_BLOCK, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_EDGE_RATIO_BLOCK_CONSEC_PASS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_EDGE_RATIO_HALVINGS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_EDGE_RATIO_FOLDED, COUNT, NO_RATIO)
 
 
 /* P-IQ in-flight counter (measurement only, no policy attached): priority ops that the front end has tagged and that
@@ -504,3 +519,197 @@ DEF_STAT(ZERECO_PIQ_PRIORITY_FETCH_TO_RS_OPS, COUNT, NO_RATIO)
  * arriving priority op can be pushed into a normal entry. */
 DEF_STAT(ZERECO_PIQ_RESERVATION_RELEASED_CYCLES, COUNT, NO_RATIO)
 DEF_STAT(ZERECO_PIQ_RESERVATION_OVERSUBSCRIBED_CYCLES, COUNT, NO_RATIO)
+
+/**************************************************************************************/
+/* Per-branch H2P state ledger (zereco/branch_state.c, ZERECO_BRANCH_STATE_PROFILE).
+   Measurement only.  The population tables are emitted once at the end of the run, so
+   they land in the same window as the Periodic region the analysis reads. */
+
+DEF_STAT(BRANCH_STATE_BRANCHES_TOTAL, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_COMMITS_TOTAL, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_MISPREDICTS_TOTAL, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_H2P_COMMITS_TOTAL, COUNT, NO_RATIO)
+
+/* Table 1 -- population by the highest HBT counter the branch ever held.  Tracking at
+   threshold T admits exactly the branches with a maximum of T or more, so the cost of
+   each candidate threshold is read straight off these rows; a branch whose maximum is
+   0 or 1 never becomes H2P and contributes no acceleration at all. */
+DEF_STAT(BRANCH_STATE_MAXCTR0_BRANCHES, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_MAXCTR0_COMMITS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_MAXCTR1_BRANCHES, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_MAXCTR1_COMMITS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_MAXCTR2_BRANCHES, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_MAXCTR2_COMMITS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_MAXCTR2_H2P_COMMITS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_MAXCTR3_BRANCHES, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_MAXCTR3_COMMITS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_MAXCTR3_H2P_COMMITS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_MAXCTR4_7_BRANCHES, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_MAXCTR4_7_COMMITS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_MAXCTR4_7_H2P_COMMITS, COUNT, NO_RATIO)
+
+/* Table 2 -- how much of a branch's execution happens while it is H2P. */
+DEF_STAT(BRANCH_STATE_SHARE_0_BRANCHES, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_SHARE_0_COMMITS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_SHARE_LT1_BRANCHES, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_SHARE_LT1_COMMITS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_SHARE_1_10_BRANCHES, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_SHARE_1_10_COMMITS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_SHARE_10_50_BRANCHES, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_SHARE_10_50_COMMITS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_SHARE_50_99_BRANCHES, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_SHARE_50_99_COMMITS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_SHARE_100_BRANCHES, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_SHARE_100_COMMITS, COUNT, NO_RATIO)
+
+/* Table 3 -- lead time: instances a branch runs tracked (counter >= 1) but not yet H2P,
+   before its first promotion.  This is the warm-up a low admission threshold buys. */
+DEF_STAT(BRANCH_STATE_LEAD_BRANCHES, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_LEAD_INSTANCES_TOTAL, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_LEAD_LT10, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_LEAD_10_100, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_LEAD_100_1K, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_LEAD_1K_10K, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_LEAD_10K_PLUS, COUNT, NO_RATIO)
+
+/* Table 4 -- how long each state lasts, in retired instructions, so it compares with the
+   brslice_tab refresh window, and how often a branch crosses the threshold. */
+DEF_STAT(BRANCH_STATE_PROMOTIONS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_DEMOTIONS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_H2P_DWELL_LT1K, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_H2P_DWELL_1K_10K, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_H2P_DWELL_10K_100K, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_H2P_DWELL_100K_PLUS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_COLD_DWELL_LT1K, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_COLD_DWELL_1K_10K, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_COLD_DWELL_10K_100K, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_COLD_DWELL_100K_PLUS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_FLIPS_0, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_FLIPS_1, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_FLIPS_2_3, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_FLIPS_4_7, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_FLIPS_8_PLUS, COUNT, NO_RATIO)
+
+/* Table 5 -- the unbounded shadow HBT against the real 256-entry 8-way table.  A branch
+   the shadow calls H2P and the real table does not is one the real table lost to a
+   conflict: the false-negative bound of anything gated on H2P status. */
+DEF_STAT(BRANCH_STATE_SHADOW_DECAYS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_SHADOW_H2P_COMMITS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_XTAB_BOTH, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_XTAB_SHADOW_ONLY, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_XTAB_SHADOW_ONLY_COMMITS, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_XTAB_REAL_ONLY, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_XTAB_NEITHER, COUNT, NO_RATIO)
+/* Intervals that had not ended when the run stopped: censored, so they are kept out of
+   the dwell histogram above.  A branch that is H2P for the whole run appears only here. */
+DEF_STAT(BRANCH_STATE_H2P_OPEN_AT_END, COUNT, NO_RATIO)
+DEF_STAT(BRANCH_STATE_COLD_OPEN_AT_END, COUNT, NO_RATIO)
+
+/* Consumption gate (ZERECO_CRITPATH_CONSUME_H2P_ONLY): every membership hit that reached
+   the gate, split by what the owning branch looks like in the HBT right now.  _MISS is the
+   gate's own false negative -- the owner is gone from the HBT, so a live chain reads as
+   dead.  _PROTECTED counts members an H2P owner kept against a non-H2P claimant. */
+DEF_STAT(CRITPATH_CONSUME_OWNER_HARD, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_CONSUME_OWNER_COLD, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_CONSUME_OWNER_MISS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_OWNER_PROTECTED, COUNT, NO_RATIO)
+/* Target Loads whose prefetch the consumption gate withheld because the branch that
+   owns their chain is not H2P right now.  The Prefetch Table entry is kept and keeps
+   learning, so the prefetch resumes at once when the branch is promoted again. */
+DEF_STAT(RFP_LAUNCH_BLOCKED_BY_GATE, COUNT, NO_RATIO)
+/* rfp_launch_member_only: on-path loads with a Prefetch Table entry that passed the gate above but are not a
+   brslice_tab member right now (critpath_is_member() false), so no prefetch is launched.  Counted after the
+   in-flight count, so the entry's address prediction stays aligned for the next launch. */
+DEF_STAT(RFP_LAUNCH_BLOCKED_NOT_MEMBER, COUNT, NO_RATIO)
+
+/**************************************************************************************/
+/* Per-instance criticality of accelerated ops (zereco/critpath_precision.c,
+   ZERECO_CRITPATH_PRECISION_PROFILE).  Measurement only.  Counted when a record leaves
+   the ring, so every verdict below is final. */
+
+DEF_STAT(CRITPATH_PREC_OPS, COUNT, NO_RATIO)          /* committed on-path main ops seen */
+DEF_STAT(CRITPATH_PREC_MEMBER, COUNT, NO_RATIO)       /* brslice_tab called the PC a member */
+DEF_STAT(CRITPATH_PREC_CAND, COUNT, NO_RATIO)         /* carried the priority bit into dispatch */
+DEF_STAT(CRITPATH_PREC_ENTRY, COUNT, NO_RATIO)        /* took a priority RS entry (no fallback) */
+DEF_STAT(CRITPATH_PREC_L1, COUNT, NO_RATIO)           /* was its consumer's last-arriving source */
+DEF_STAT(CRITPATH_PREC_L1M, COUNT, NO_RATIO)          /* ... of a consumer that is itself tracked */
+DEF_STAT(CRITPATH_PREC_L2, COUNT, NO_RATIO)           /* on an H2P branch instance's backward chain */
+DEF_STAT(CRITPATH_PREC_L2_MISP, COUNT, NO_RATIO)      /* ... of one that mispredicted */
+
+/* The 2 x 2s.  precision = <X>_L<n> / <X>; recall = <X>_L<n> / L<n>. */
+DEF_STAT(CRITPATH_PREC_CAND_L1, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_CAND_L1M, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_CAND_L2, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_CAND_L2_MISP, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_ENTRY_L1, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_ENTRY_L1M, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_ENTRY_L2, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_ENTRY_L2_MISP, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_L2_WITHOUT_L1, COUNT, NO_RATIO) /* must stay 0: level 2 implies level 1 */
+
+/* Accelerated in fact, by either mechanism: RFP = the load's value came from a useful register-file prefetch
+   (op->zereco_rf_covered); ACCEL = took a priority RS entry or RFP; CAND_OR_RFP = carried the priority bit or RFP.
+   ACCEL_L2 / ACCEL is the share of accelerated ops still on an H2P branch's critical chain after the acceleration. */
+DEF_STAT(CRITPATH_PREC_RFP, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_RFP_L2, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_RFP_NOT_CAND, COUNT, NO_RATIO)  /* RFP on a load that had no priority bit */
+DEF_STAT(CRITPATH_PREC_ACCEL, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_ACCEL_L2, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_CAND_OR_RFP, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_CAND_OR_RFP_L2, COUNT, NO_RATIO)
+
+/* Where on the chain the critical instances sit, and how many of them we accelerate. */
+DEF_STAT(CRITPATH_PREC_L2_D0, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_L2_D0_ACCEL, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_L2_D1, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_L2_D1_ACCEL, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_L2_D2_3, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_L2_D2_3_ACCEL, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_L2_D4_7, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_L2_D4_7_ACCEL, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_L2_D8P, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_L2_D8P_ACCEL, COUNT, NO_RATIO)
+
+/* Critical edges as they are exercised, independent of any chain: the recall base for
+   level 1 taken at the consumer, where the verdict is made. */
+DEF_STAT(CRITPATH_PREC_EDGES, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_EDGES_ACCEL, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_EDGES_MEMBER, COUNT, NO_RATIO)       /* the consumer is a tracked member */
+DEF_STAT(CRITPATH_PREC_EDGES_MEMBER_ACCEL, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_EDGE_MISS, COUNT, NO_RATIO)     /* producer had left the ring */
+
+/* The backward walk.  MISS is the one to watch -- it says the ring was too short and
+   the level-2 numbers are understated by that much. */
+DEF_STAT(CRITPATH_PREC_WALK_STARTS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_WALK_STARTS_MISP, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_WALK_NO_CHAIN, COUNT, NO_RATIO) /* branch waited on nothing */
+DEF_STAT(CRITPATH_PREC_WALK_STEPS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_WALK_FRONTIER, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_WALK_MISS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_WALK_MAXDEPTH, COUNT, NO_RATIO)
+
+/* Per static PC: of the instances of this PC that were accelerated, how many were really
+   critical?  A PC at either end is separable by a static rule; one in the middle is
+   critical only on some instances, which no per-PC filter can reach.  Each bucket is
+   counted twice -- by PC and by the instances those PCs stand for. */
+DEF_STAT(CRITPATH_PREC_PC_ACCELERATED, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L1_R0, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L1_R0_OPS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L1_RLT10, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L1_RLT10_OPS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L1_R10_50, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L1_R10_50_OPS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L1_R50_90, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L1_R50_90_OPS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L1_RGT90, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L1_RGT90_OPS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L2_R0, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L2_R0_OPS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L2_RLT10, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L2_RLT10_OPS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L2_R10_50, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L2_R10_50_OPS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L2_R50_90, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L2_R50_90_OPS, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L2_RGT90, COUNT, NO_RATIO)
+DEF_STAT(CRITPATH_PREC_PC_L2_RGT90_OPS, COUNT, NO_RATIO)

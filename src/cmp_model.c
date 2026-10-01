@@ -74,7 +74,9 @@
 #include "tea/tea_thread.h"
 #include "tea/tea_fetch_stage.h"
 #include "tea/tea_rename.h"
+#include "zereco/branch_state.h"
 #include "zereco/critpath.h"
+#include "zereco/critpath_precision.h"
 #include "zereco/h2p_mispred_latency.h"
 #include "zereco/rfp.h"
 
@@ -141,6 +143,7 @@ void cmp_init(uns mode) {
     init_on_off_path_cache(proc_id);
     rfp_init(proc_id);
     critpath_init(proc_id);
+    critpath_precision_init();
 
     /* TEA Thread initialization */
     if (TEA_ENABLE) {
@@ -336,6 +339,7 @@ void cmp_debug() {
 /* cmp_done: */
 
 void cmp_done() {
+
   if (PREF_FRAMEWORK_ON)
     pref_done();
   if (DVFS_ON)
@@ -357,6 +361,12 @@ void cmp_done() {
 /* cmp_done: */
 
 void cmp_per_core_done(uns8 proc_id) {
+  /* Called from sim.c the moment this core finishes, immediately before its final
+     dump_stats(), so the population tables the ledger emits here land in the file --
+     in the Periodic column, which is the window the analysis reads.  cmp_done() runs
+     after that dump and is too late. */
+  branch_state_done(proc_id);
+  critpath_precision_done(proc_id);
   stats_per_core_collect(proc_id);
   if (PREF_FRAMEWORK_ON)
     pref_per_core_done(proc_id);

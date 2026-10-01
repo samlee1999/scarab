@@ -457,6 +457,16 @@ DEF_PARAM(zereco_piq_dispatch_policy, ZERECO_PIQ_DISPATCH_POLICY, uns, uns, 0, )
 /* [EXPERIMENT: ZERECO_H2P_MISPRED_LATENCY_PROFILE]
    Profile execute-resolved H2P mispred/misfetch latency without changing pipeline behavior. */
 DEF_PARAM(zereco_h2p_mispred_latency_profile, ZERECO_H2P_MISPRED_LATENCY_PROFILE, Flag, Flag, FALSE, )
+/* [MEASUREMENT] Per-branch H2P state ledger (src/zereco/branch_state.c): how many static branches never mispredict,
+ * how many mispredict without ever reaching H2P, how long a branch sits one step below H2P before it crosses, and
+ * how long each state lasts.  This is what picks the threshold at which a branch's critical slice is worth keeping
+ * in brslice_tab, separately from the threshold at which its slice is accelerated.  Nothing reads the ledger back
+ * into the machine, so the run stays cycle-identical.  It also keeps an unbounded shadow HBT, so the branches the
+ * real 256-entry table loses to conflicts are visible. */
+DEF_PARAM(zereco_branch_state_profile, ZERECO_BRANCH_STATE_PROFILE, Flag, Flag, FALSE, )
+/* Also write the whole ledger to branch_state.csv in the run directory, one row per static branch, so thresholds can
+ * be swept offline without another run. */
+DEF_PARAM(zereco_branch_state_dump, ZERECO_BRANCH_STATE_DUMP, Flag, Flag, FALSE, )
 /* [ZERECO CRITICAL PATH] Build the critical chain of every H2P branch in
    brslice_tab: at wakeup keep the source that arrives last (the Last Producer
    Register), and at commit let a chain member add that producer one level up.
@@ -530,14 +540,45 @@ DEF_PARAM(zereco_critpath_priority_max_depth, ZERECO_CRITPATH_PRIORITY_MAX_DEPTH
    what every result before 2026-09-10 used.  Learning is unaffected either way:
    brslice_tab is written at commit, which only on-path ops reach. */
 DEF_PARAM(zereco_critpath_priority_offpath, ZERECO_CRITPATH_PRIORITY_OFFPATH, Flag, Flag, FALSE, )
+/* [CONSUMPTION GATE] Split "tracked" from "accelerated".  Membership in brslice_tab says a PC is on some branch's
+ * critical slice; with this on, the priority bit and the Target Load naming additionally require the branch that
+ * claimed the entry to be H2P right now, read through the owner field.  This is what lets the seed gate admit more
+ * branches (zereco_critpath_insert_gate 1 = mispredicted at least once, 0 = every branch) without widening what is
+ * accelerated -- one HBT counter, two thresholds.  It is also what stops acceleration the moment a branch is
+ * demoted; with the gate off the membership bit keeps accelerating until refresh peels the chain away. */
+DEF_PARAM(zereco_critpath_consume_h2p_only, ZERECO_CRITPATH_CONSUME_H2P_ONLY, Flag, Flag, FALSE, )
+/* An entry holds one owner, so a PC on two chains keeps the last branch that claimed it.  With this on, a branch
+ * that is not H2P does not take a member away from one that is. */
+DEF_PARAM(zereco_critpath_owner_protect, ZERECO_CRITPATH_OWNER_PROTECT, Flag, Flag, FALSE, )
+/* Which Prefetch Table loads RFP may launch for, under RFP_TARGET_CRITPATH.
+ * FALSE (every run through 2026-09-30): Prefetch Table membership is the scope.  A load CLEAR once named keeps its
+ *   entry and is prefetched until the entry is evicted; the consumption gate stops it only while it is a member whose
+ *   branch is not H2P, so a load that has dropped out of brslice_tab is still prefetched.
+ * TRUE: a launch also needs what the priority bit needs -- critpath_is_member(): a brslice_tab member within
+ *   zereco_critpath_priority_max_depth whose branch passes the consumption gate -- so both consumers accelerate the
+ *   same identified slice.  The Prefetch Table still learns every entry's stride and still counts every instance in
+ *   flight; only the launch is withheld (RFP_LAUNCH_BLOCKED_NOT_MEMBER). */
+DEF_PARAM(rfp_launch_member_only, RFP_LAUNCH_MEMBER_ONLY, Flag, Flag, FALSE, )
+/* [MEASUREMENT] Per-instance criticality of accelerated ops (src/zereco/critpath_precision.c).  Membership is a
+ * property of a static PC; acceleration is granted per instance; the critical producer changes between instances.
+ * This measures the gap at two strictnesses -- was this instance its consumer's last-arriving source (level 1), and
+ * is it reachable backward from an H2P branch instance along last-arriving edges (level 2, recorded over every H2P
+ * instance and over the mispredicted ones alone) -- and reports precision and recall against both definitions of
+ * "accelerated" (carried the priority bit, actually took a priority entry).  Nothing is read back into the machine,
+ * so the run stays cycle-identical. */
+DEF_PARAM(zereco_critpath_precision_profile, ZERECO_CRITPATH_PRECISION_PROFILE, Flag, Flag, FALSE, )
+/* Also write critpath_precision.csv, one row per static PC, so thresholds can be explored offline. */
+DEF_PARAM(zereco_critpath_precision_dump, ZERECO_CRITPATH_PRECISION_DUMP, Flag, Flag, FALSE, )
 /* Filters that demand repetition before an edge or a member counts as critical.
-   A is part of the baseline; B and C were not adopted (small effect, C12) and
-   stay off.  Setting A to 0 gives the unfiltered critical rule.
-   A -- edge confidence: a member propagates to its last-arriving producer only
-        after naming the same producer on this many further consecutive commits
-        (2-bit counter, 1..3; 3 = the same producer on 4 commits in a row).
-        Drops edges whose critical producer keeps changing.  Baseline 3; the
-        optimum (2 vs 3) is still being measured.
+   A is part of the baseline -- since 2026-10-01 in its ratio form,
+   zereco_critpath_edge_ratio (below); B and C were not adopted (small effect,
+   C12) and stay off.  Setting both zereco_critpath_edge_ratio and
+   zereco_critpath_edge_conf_min to 0 gives the unfiltered critical rule.
+   A, previous (consecutive) form -- used only with zereco_critpath_edge_ratio 0:
+        a member propagates to its last-arriving producer only after naming the
+        same producer on this many further consecutive commits (2-bit counter,
+        1..3; 3 = the same producer on 4 commits in a row).  One interruption
+        starts the count over, so two producers that take turns stop each other.
    B -- criticality ratio: at each decay sweep a non-root member is dropped if it
         was chosen as a last-arriving producer on fewer than this many percent
         of its own commits in the window (judged only after 4 commits).  Targets
@@ -560,6 +601,32 @@ DEF_PARAM(zereco_critpath_edge_conf_decay, ZERECO_CRITPATH_EDGE_CONF_DECAY, Flag
    setter hardly ever changes; the alternation is one level up, where the
    compare's two operands arrive in varying order -- hence 1, not 0 (C13). */
 DEF_PARAM(zereco_critpath_edge_conf_exempt_depth, ZERECO_CRITPATH_EDGE_CONF_EXEMPT_DEPTH, int, int, 1, )
+/* Filter A (baseline since 2026-10-01: 50, with min_count 4 and window 64).  A
+   member propagates to the producer of the operand that arrived last on this
+   instance only if that operand arrived last on at least this many percent of
+   the member's recent commits, and on at least zereco_critpath_edge_ratio_min_count
+   of them.  At 50 it is a majority vote: at most one operand of a consumer passes,
+   and a dominant operand is still followed when another one cuts in now and then
+   -- the case where the previous, consecutive form stopped both.  Higher shares
+   stop dominant operands that are interrupted; lower ones admit operands that are
+   last only now and then, at the same IPC and more resources (DESIGN 9.9).
+   Counted per operand position (4 counters, later positions share the last one),
+   so an entry holds small counters instead of a producer tag.  The depth
+   exemption applies unchanged.  A percentage and may be fractional (50 = 1/2, a
+   one-bit shift in hardware).  0 selects the previous filter A,
+   zereco_critpath_edge_conf_min above. */
+DEF_PARAM(zereco_critpath_edge_ratio, ZERECO_CRITPATH_EDGE_RATIO, float, float, 50.0, )
+/* The count every operand needs first, so that a handful of commits cannot pass on
+   a ratio that means nothing yet (1 of 1 = 100%).  4 = the consecutive form's 4
+   commits, no longer required in a row.  At most half the window. */
+DEF_PARAM(zereco_critpath_edge_ratio_min_count, ZERECO_CRITPATH_EDGE_RATIO_MIN_COUNT, uns, uns, 4, )
+/* "Recent" is counted in the member's own commits, not in time: once it has seen
+   this many (commits with a last-arriving operand), every count is halved.  The
+   ratios survive the halving while old instances fade, so the window follows a
+   phase change by itself and needs no refresh.  Time would not do: in a fixed
+   number of committed ops a hot loop passes almost any operand and a rare one
+   passes none. */
+DEF_PARAM(zereco_critpath_edge_ratio_window, ZERECO_CRITPATH_EDGE_RATIO_WINDOW, uns, uns, 64, )
 /* B and C (see above): not adopted, off by default. */
 DEF_PARAM(zereco_critpath_ratio_min, ZERECO_CRITPATH_RATIO_MIN, uns, uns, 0, )
 DEF_PARAM(zereco_critpath_slack_min, ZERECO_CRITPATH_SLACK_MIN, uns, uns, 0, )

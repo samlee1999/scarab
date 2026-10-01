@@ -10,6 +10,7 @@
  * predicted data arrived in time uses it instead of waiting on its own access.
  ***************************************************************************************/
 
+#include "zereco/critpath.h"
 #include "zereco/rfp.h"
 
 #include <stdlib.h>
@@ -169,6 +170,10 @@ void rfp_init(uns proc_id) {
      fail loudly rather than let a sweep silently measure nothing. */
   ASSERTM(proc_id, !RFP_WALK_BOOTSTRAP,
           "rfp_walk_bootstrap is not implemented\n");
+  /* Membership only exists when brslice_tab names the Target Loads; without it the flag would silently
+     withhold every prefetch. */
+  ASSERTM(proc_id, !RFP_LAUNCH_MEMBER_ONLY || (RFP_TARGET_CRITPATH && ZERECO_CRITPATH_PROFILE),
+          "rfp_launch_member_only needs rfp_target_critpath and zereco_critpath_profile\n");
 
   state->pt_sets = RFP_PT_ENTRIES / RFP_PT_ASSOC;
   state->pt = (RFP_PT_Entry*)calloc(RFP_PT_ENTRIES, sizeof(RFP_PT_Entry));
@@ -402,6 +407,16 @@ void rfp_rename_launch(Op* op) {
   if (!entry)
     return; /* PT membership is the scope filter (§3.7) */
 
+  /* The consumption gate.  The Prefetch Table keeps learning this load's stride
+     whatever its branch is doing, but the prefetch itself is spent only while the
+     branch that owns the chain is H2P -- so acceleration stops the cycle a branch is
+     demoted and resumes the cycle it is promoted, with the predictor already warm. */
+  if (RFP_TARGET_CRITPATH && critpath_owner_blocks(proc_id, op->inst_info->addr)) {
+    if (on_path)
+      STAT_EVENT(proc_id, RFP_LAUNCH_BLOCKED_BY_GATE);
+    return;
+  }
+
   if (on_path) {
     STAT_EVENT(proc_id, RFP_PT_HIT);
     STAT_EVENT(proc_id, RFP_PT_HIT_PCT);
@@ -413,6 +428,19 @@ void rfp_rename_launch(Op* op) {
   if (entry->inflight < RFP_INFLIGHT_MAX) {
     entry->inflight++;
     op->rfp_pt_counted = TRUE;
+  }
+
+  /* rfp_launch_member_only: prefetch only a load the frontend would mark for priority right now -- the same test,
+     critpath_is_member(), with the same depth limit -- so the two consumers accelerate one identified slice.  A load
+     that has left brslice_tab keeps its entry and keeps learning; it is simply not prefetched until it is a member
+     again.  Placed after the in-flight count, like an abstaining load: this instance still lies between the last
+     retired address and the next launch, and base_va moves when it retires, so leaving it uncounted would misplace
+     the next prediction. */
+  if (RFP_TARGET_CRITPATH && RFP_LAUNCH_MEMBER_ONLY &&
+      !critpath_is_member(proc_id, op->inst_info->addr, ZERECO_CRITPATH_PRIORITY_MAX_DEPTH)) {
+    if (on_path)
+      STAT_EVENT(proc_id, RFP_LAUNCH_BLOCKED_NOT_MEMBER);
+    return;
   }
 
   Flag store_data_ready = FALSE;

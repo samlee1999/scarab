@@ -22,10 +22,15 @@
  *                128 x 8-way).  Propagation stops at an op that waited on no
  *                operand (the frontier).
  *
- *   filter A     a member at depth >= 2 propagates only when the same producer
- *                was its last-arriving one on 4 commits in a row (2-bit counter,
- *                threshold 3); depth 0 and 1 -- the branch and its compare --
- *                always propagate, since the compare is where two inputs compete.
+ *   filter A     a member at depth >= 2 propagates only when the operand that
+ *                arrived last on this instance did so on at least half of the
+ *                member's recent commits and at least 4 times (counted per
+ *                operand position; all counts halve when the member reaches 64
+ *                commits, so the window is its own executions).  Depth 0 and 1 --
+ *                the branch and its compare -- always propagate, since the compare
+ *                is where two inputs compete.  Baseline since 2026-10-01
+ *                (ZERECO_CRITPATH_EDGE_RATIO 50); 0 selects the previous filter A,
+ *                the same producer on 4 commits in a row.
  *
  *   refresh      a 1-bit confirm per entry, set by every propagation that names
  *                the entry (or a root's own H2P commit) and cleared every 10K
@@ -67,6 +72,14 @@ void critpath_note_wake(struct Op_struct* src_op, struct Op_struct* dep_op,
    cannot disturb what the learning path measures.  `max_depth` of 0 accepts any
    depth; otherwise only members within that distance of their branch qualify. */
 Flag critpath_is_member(uns proc_id, Addr pc, uns max_depth);
+
+/* Raw membership, before the consumption gate (measurement only). */
+Flag critpath_pc_tracked(uns proc_id, Addr pc);
+
+/* The consumption gate, for consumers that hold their own scope filter (RFP keeps
+   Prefetch Table membership).  TRUE means "this PC is on a tracked chain whose owner
+   is not H2P right now", i.e. tracked but not worth accelerating. */
+Flag critpath_owner_blocks(uns proc_id, Addr pc);
 
 /* An op is committing.  Everything is measured here so that only on-path,
    architecturally executed instructions contribute. */

@@ -333,6 +333,11 @@ struct Op_struct {
      recovers the same PC by reading a scoreboard indexed by the source physical
      register; the two are equivalent, and the scoreboard is built in Phase B. */
   Addr critpath_last_producer_pc;
+  /* The INSTANCE behind that PC.  The PC is what the table learns from; the
+     instance is what a per-instance criticality check needs, since the same
+     PC is the last-arriving producer on some dynamic instances and not on
+     others.  Measurement only (zereco/critpath_precision.c). */
+  Counter critpath_last_producer_op_num;
   /* Producer PC of every source, filled at rename from the register map
      (register deps only; 0 otherwise).  Valid for indices < num_srcs of the
      current instance, so it needs no reset.  Read by the full-slice mode. */

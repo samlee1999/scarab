@@ -164,3 +164,12 @@ DEF_PARAM(  perceptron_conf_his_both_length  , PERCEPTRON_CONF_HIS_BOTH_LENGTH  
 
 DEF_PARAM(  mtage_realistic_sc_40k  , MTAGE_REALISTIC_SC_40K   , Flag    , Flag        , FALSE     ,           )
 DEF_PARAM(  mtage_realistic_sc_100k  , MTAGE_REALISTIC_SC_100K   , Flag    , Flag        , FALSE     ,           )
+
+/* H2P Branch Table geometry (TEA paper, MICRO 2024, Table II / Section IV-B:
+   256 entries, 8-way set associative, 0.2KB, 1-cycle access).  hbt_entries must
+   be a multiple of hbt_assoc.  Everything else about the table -- 3-bit
+   saturating counter, allocation on a misprediction with the counter at 1, H2P
+   above 1, a decrement of every counter each 50K retired instructions and
+   replacement priority for counter-0 entries -- is fixed in bp/hbt.c. */
+DEF_PARAM(  hbt_entries  , HBT_ENTRIES   , uns    , uns        , 256     ,           )
+DEF_PARAM(  hbt_assoc  , HBT_ASSOC   , uns    , uns        , 8     ,           )

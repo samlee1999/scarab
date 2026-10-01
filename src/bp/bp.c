@@ -40,6 +40,7 @@
 
 #include "bp/bp.param.h"
 #include "core.param.h"
+#include "zereco/branch_state.h"
 #include "prefetcher/pref.param.h"
 
 #include "bp//bp_conf.h"
@@ -299,6 +300,7 @@ void init_bp_data(uns8 proc_id, Bp_Data* bp_data) {
   }
 
   hbt_init();
+  branch_state_init();
 }
 
 Flag bp_is_predictable(Bp_Data* bp_data, uns proc_id) {

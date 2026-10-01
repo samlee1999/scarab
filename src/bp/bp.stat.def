@@ -723,3 +723,16 @@ DEF_STAT(  CRS_UNDERFLOW_OFF_PATH         , DIST    , NO_RATIO       )
 DEF_STAT(  HBT_DECAY_EVENTS               , COUNT   , NO_RATIO       )
 DEF_STAT(  HBT_RETIRED_INST_TICKS         , COUNT   , NO_RATIO       )
 DEF_STAT(  HBT_RETIRED_BRANCH_UPDATES     , COUNT   , NO_RATIO       )
+
+/* HBT capacity and conflict (256-entry 8-way, TEA paper Table II).  A branch
+   that cannot get an entry is invisible to everything gated on H2P status, so
+   the allocation path is counted in full. */
+DEF_STAT(  HBT_UPDATE_HITS                , COUNT   , NO_RATIO       )
+DEF_STAT(  HBT_MISPRED_UPDATES            , COUNT   , NO_RATIO       )
+DEF_STAT(  HBT_UPDATE_MISS_NO_ALLOC       , COUNT   , NO_RATIO       )
+DEF_STAT(  HBT_ALLOCATIONS                , COUNT   , NO_RATIO       )
+DEF_STAT(  HBT_ALLOC_EVICTED_COLD         , COUNT   , NO_RATIO       )
+DEF_STAT(  HBT_ALLOC_BLOCKED              , COUNT   , NO_RATIO       )
+/* Sampled at every decay sweep; divide by HBT_DECAY_EVENTS for the average. */
+DEF_STAT(  HBT_RESIDENT_ENTRIES_TOTAL     , COUNT   , NO_RATIO       )
+DEF_STAT(  HBT_RESIDENT_HARD_TOTAL        , COUNT   , NO_RATIO       )
