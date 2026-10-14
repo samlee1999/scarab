@@ -11,7 +11,6 @@
 // - H2P if counter > 1 (i.e., >= 2)
 // - Decrement all counters by 1 every 50K instructions
 // ==========================================================
-#define HBT_SIZE 256          // TEA: 256-entry H2P Branch Table
 #define HBT_CTR_BITS 3        // HBT 카운터의 비트 수 (논문: 3-bit)
 #define HBT_CTR_MAX ((1 << HBT_CTR_BITS) - 1) // HBT 카운터의 최댓값 (7)
 #define HBT_H2P_THRESHOLD 1   // counter > 1이면 H2P (논문 기준)
@@ -21,15 +20,17 @@
 // HBT 자료구조 정의
 // ==========================================================
 typedef struct {
-  uns64 tag;
-  uns32 counter;
+  Flag    valid;
+  uns64   tag;
+  Addr    pc;       /* the branch that owns the way (the tag is the full PC above the set index) */
+  uns32   counter;
+  Counter lru;
 } HbtEntry;
 
 // ==========================================================
 // 전역 변수 선언 (extern)
 // 변수의 실체는 hbt.c에 있고, 여기서는 '이런 변수가 외부에 있다'고 알려주는 역할만 합니다.
 // ==========================================================
-extern HbtEntry hbt_table[HBT_SIZE];
 extern uns64    retired_branch_count;
 extern uns64    hbt_retired_instruction_count;
 

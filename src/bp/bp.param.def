@@ -164,3 +164,8 @@ DEF_PARAM(  perceptron_conf_his_both_length  , PERCEPTRON_CONF_HIS_BOTH_LENGTH  
 
 DEF_PARAM(  mtage_realistic_sc_40k  , MTAGE_REALISTIC_SC_40K   , Flag    , Flag        , FALSE     ,           )
 DEF_PARAM(  mtage_realistic_sc_100k  , MTAGE_REALISTIC_SC_100K   , Flag    , Flag        , FALSE     ,           )
+
+/* H2P Branch Table geometry (bp/hbt.c).  TEA paper Section IV-B: 256 entries, 8-way.  The default hbt_assoc 1 is the
+   direct-mapped table this branch was run with (260921_TEA_rs_sweep); hbt_entries must be a multiple of hbt_assoc. */
+DEF_PARAM(  hbt_entries  , HBT_ENTRIES   , uns    , uns        , 256     ,           )
+DEF_PARAM(  hbt_assoc  , HBT_ASSOC   , uns    , uns        , 1     ,           )

@@ -1,37 +1,75 @@
-#include "bp/hbt.h"  
-#include "globals/global_types.h" 
-#include "op.h"                
-#include "bp/bp_conf.h"         
+#include "bp/hbt.h"
+#include "globals/global_types.h"
+#include "op.h"
+#include "bp/bp_conf.h"
+#include "bp/bp.param.h"
 #include "debug/debug.param.h"
 #include "debug/debug_macros.h"
-#include "globals/utils.h"        
+#include "globals/assert.h"
+#include "globals/utils.h"
 #include "statistics.h"
-#include <string.h>               
+#include <stdlib.h>
+#include <string.h>
 
-// .h 파일에 extern으로 선언된 전역 변수들의 실체를 정의
-HbtEntry hbt_table[HBT_SIZE];
-uns64    retired_branch_count = 0;
-uns64    hbt_retired_instruction_count = 0;
+/* TEA paper Table II / Section IV-B: 256 entries, 8-way, allocated on a misprediction with the counter at 1, H2P
+   above 1, all counters decremented every 50K retired instructions, counter-0 entries replaced first.  This is the
+   table of the test (CLEAR) branch with full tags; the geometry comes from hbt_entries / hbt_assoc.  hbt_assoc 1 is
+   the direct-mapped table this branch used before: every H2P decision and counter it reports is the same. */
+static HbtEntry* hbt_table = NULL;
+static uns       hbt_sets  = 0;
+static uns       hbt_ways  = 0;
+static Counter   hbt_clock = 0; /* monotonic stamp for the LRU field */
 
-// HBT의 모든 카운터를 주기적으로 1씩 감소시키는 내부 함수
-// 논문 기준: "All counters are decremented by 1 every 50K instructions"
-static void hbt_periodic_decrement(void) {
-  for (int i = 0; i < HBT_SIZE; i++) {
-    // 카운터가 0보다 크면 1만큼 감소 (Saturating at 0)
-    if (hbt_table[i].counter > 0) {
-      hbt_table[i].counter--;
-    }
-  }
+uns64 retired_branch_count          = 0;
+uns64 hbt_retired_instruction_count = 0;
+
+static inline uns       hbt_set_of(Addr pc) { return (uns)(pc % hbt_sets); }
+static inline uns64     hbt_tag_of(Addr pc) { return (uns64)(pc / hbt_sets); }
+static inline HbtEntry* hbt_set_base(Addr pc) { return &hbt_table[(size_t)hbt_set_of(pc) * hbt_ways]; }
+
+/* The way holding this PC, or NULL.  Read-only: it does not age the entry. */
+static HbtEntry* hbt_find(Addr pc) {
+  if (!hbt_table)
+    return NULL;
+  HbtEntry* set = hbt_set_base(pc);
+  uns64     tag = hbt_tag_of(pc);
+  for (uns w = 0; w < hbt_ways; ++w)
+    if (set[w].valid && set[w].tag == tag)
+      return &set[w];
+  return NULL;
 }
 
+// 논문 기준: "All counters are decremented by 1 every 50K instructions"
+static void hbt_periodic_decrement(uns proc_id) {
+  uns     entries = hbt_sets * hbt_ways;
+  Counter live = 0, hard = 0;
+  for (uns i = 0; i < entries; i++) {
+    if (!hbt_table[i].valid)
+      continue;
+    live++;
+    if (hbt_table[i].counter > 0)
+      hbt_table[i].counter--;
+    /* An entry whose counter reaches 0 stays resident -- it simply becomes the first thing a later allocation will
+       replace (paper, Section IV-B). */
+    if (hbt_table[i].counter > HBT_H2P_THRESHOLD)
+      hard++;
+  }
+  INC_STAT_EVENT(proc_id, HBT_RESIDENT_ENTRIES_TOTAL, live);
+  INC_STAT_EVENT(proc_id, HBT_RESIDENT_HARD_TOTAL, hard);
+}
 
-// HBT 모듈 초기화 함수
 void hbt_init(void) {
-  // HBT 테이블 전체를 0으로 초기화
-  memset(hbt_table, 0, sizeof(HbtEntry) * HBT_SIZE);
-  retired_branch_count = 0;
+  hbt_ways    = HBT_ASSOC ? HBT_ASSOC : 1;
+  uns entries = HBT_ENTRIES ? HBT_ENTRIES : hbt_ways;
+  ASSERTM(0, entries % hbt_ways == 0, "hbt_entries (%u) must be a multiple of hbt_assoc (%u)\n", entries, hbt_ways);
+  hbt_sets = entries / hbt_ways;
+  free(hbt_table);
+  hbt_table = (HbtEntry*)calloc(entries, sizeof(HbtEntry));
+  ASSERTM(0, hbt_table, "Failed to allocate the H2P branch table\n");
+  hbt_clock                     = 0;
+  retired_branch_count          = 0;
   hbt_retired_instruction_count = 0;
-  _DEBUG(0, DEBUG_HBT, "HBT module initialized.\n");
+  _DEBUG(0, DEBUG_HBT, "HBT initialized: %u entries, %u-way, %u sets.\n", entries, hbt_ways, hbt_sets);
 }
 
 void hbt_retire_instruction_tick(uns proc_id) {
@@ -39,92 +77,76 @@ void hbt_retire_instruction_tick(uns proc_id) {
   STAT_EVENT(proc_id, HBT_RETIRED_INST_TICKS);
 
   if ((hbt_retired_instruction_count % HBT_DECAY_INTERVAL) == 0) {
-    _DEBUG(0, DEBUG_HBT,
-           "Triggering periodic decrement at retired instruction count = %llu\n",
-           hbt_retired_instruction_count);
-    hbt_periodic_decrement();
+    hbt_periodic_decrement(proc_id);
     STAT_EVENT(proc_id, HBT_DECAY_EVENTS);
   }
 }
 
-/**
- * @brief HBT 상태를 업데이트하는 함수. Branch가 retire될 때마다 호출됩니다.
- * @param op retire되는 브랜치 명령어 정보
- */
+/* Called for every retired branch. */
 void hbt_update(Op* op) {
-  // 1. 필요한 정보 추출: 브랜치 주소(PC)와 예측 실패 여부
   Addr pc      = op->inst_info->addr;
   Flag mispred = op->oracle_info.mispred | op->oracle_info.misfetch;
 
-  // 2. HBT 테이블의 인덱스와 태그 계산
-  uns32 index = pc % HBT_SIZE;
-  uns64 tag   = pc / HBT_SIZE;
-  HbtEntry* entry = &hbt_table[index];
-
-  _DEBUG(0, DEBUG_HBT, "OpNum=%llu | HBT Update: PC=0x%llx, Mispred=%u, Index=%u, Tag=%llu\n",
-         op->op_num, pc, mispred, index, tag);
-  // 3. HBT Entry 탐색 및 할당
-  // 현재 entry의 태그가 찾는 브랜치의 태그와 다른 경우
-  if (entry->tag != tag) {
-    _DEBUG(0, DEBUG_HBT, "OpNum=%llu | Allocating new entry at index %u for tag %llu (was tag %llu)\n",
-          op->op_num, index, tag, entry->tag);
-    // 카운터가 0이라면, 이 entry는 다른 브랜치가 사용하지 않는 '빈 공간'임
-    // 따라서 이 공간을 현재 브랜치를 위해 새로 할당 (overwrite)
-    if (entry->counter == 0) {
-      entry->tag = tag;
-      entry->counter = 0; // 카운터는 0으로 초기화
-    } else {
-      _DEBUG(0, DEBUG_HBT, "OpNum=%llu | Skipping update: index %u is occupied by tag %llu with counter %u\n",
-      op->op_num, index, entry->tag, entry->counter);
-      // 다른 'Hard' 브랜치가 아직 사용 중인 공간이므로, 이번에는 업데이트하지 않고 넘어감
-      return; 
-    }
-  }
-
-  // 4. 예측 실패 시 카운터 업데이트
-  // entry->tag == tag 인 경우, 즉 현재 브랜치가 올바른 entry를 찾았을 때만 아래 로직 수행
-  if (mispred) {
-    _DEBUG(0, DEBUG_HBT, "OpNum=%llu | Mispredicted branch at index %u (tag %llu): Before counter %u\n",
-          op->op_num, index, tag, entry->counter);
-    // 예측에 실패했을 때만 카운터를 1 증가시킴 (saturating)
-    entry->counter = SAT_INC(entry->counter, HBT_CTR_MAX);
-    _DEBUG(0, DEBUG_HBT, "OpNum=%llu | Mispredicted branch at index %u (tag %llu): After counter %u\n",
-           op->op_num, index, tag, entry->counter);
-  }
-  // ※ 예측 성공 시에는 아무것도 하지 않는 것이 HBT의 핵심 로직입니다.
-
-  // Branch-specific update count is diagnostic only.  Periodic decay is driven
-  // by hbt_retire_instruction_tick() at main instruction retirement.
   retired_branch_count++;
   STAT_EVENT(op->proc_id, HBT_RETIRED_BRANCH_UPDATES);
+
+  HbtEntry* entry = hbt_find(pc);
+  hbt_clock++;
+
+  if (entry) {
+    entry->lru = hbt_clock;
+    STAT_EVENT(op->proc_id, HBT_UPDATE_HITS);
+    if (mispred) {
+      /* 예측에 실패했을 때만 카운터를 1 증가시킴 (saturating) */
+      entry->counter = SAT_INC(entry->counter, HBT_CTR_MAX);
+      STAT_EVENT(op->proc_id, HBT_MISPRED_UPDATES);
+    }
+    return;
+  }
+
+  /* Miss.  The paper allocates only on a misprediction -- a branch that always predicts correctly never takes a
+     slot -- and the new entry starts at 1. */
+  if (!mispred) {
+    STAT_EVENT(op->proc_id, HBT_UPDATE_MISS_NO_ALLOC);
+    return;
+  }
+
+  HbtEntry* set    = hbt_set_base(pc);
+  HbtEntry* victim = NULL;
+  for (uns w = 0; w < hbt_ways; ++w) { /* an empty way first */
+    if (!set[w].valid) {
+      victim = &set[w];
+      break;
+    }
+  }
+  if (!victim) { /* then a counter-0 way, least recent */
+    for (uns w = 0; w < hbt_ways; ++w)
+      if (set[w].counter == 0 && (!victim || set[w].lru < victim->lru))
+        victim = &set[w];
+    if (victim)
+      STAT_EVENT(op->proc_id, HBT_ALLOC_EVICTED_COLD);
+  }
+  if (!victim) {
+    /* Every way holds a branch that has mispredicted recently: this branch is not tracked this time round. */
+    STAT_EVENT(op->proc_id, HBT_ALLOC_BLOCKED);
+    return;
+  }
+
+  victim->valid   = TRUE;
+  victim->tag     = hbt_tag_of(pc);
+  victim->pc      = pc;
+  victim->counter = 1;
+  victim->lru     = hbt_clock;
+  STAT_EVENT(op->proc_id, HBT_ALLOCATIONS);
 }
 
-/**
- * @brief 특정 브랜치가 'Hard-to-predict' 상태인지 외부 모듈에 알려주는 함수
- * @param pc 확인할 브랜치의 주소
- * @return 'Hard' 상태이면 TRUE, 아니면 FALSE
- */
+/* 논문 기준: counter > 1이면 H2P */
 Flag hbt_is_hard_branch(Addr pc) {
-  uns32 index = pc % HBT_SIZE;
-  uns64 tag   = pc / HBT_SIZE;
-  HbtEntry* entry = &hbt_table[index];
-
-  // 논문 기준: counter > 1이면 H2P (즉, 2회 이상 misprediction)
-  // "A branch is considered H2P if it has an entry in the H2P Table and
-  //  its counter value is greater than 1."
-  if (entry->tag == tag && entry->counter > HBT_H2P_THRESHOLD) {
-    return TRUE;
-  }
-  return FALSE;
+  const HbtEntry* entry = hbt_find(pc);
+  return (entry && entry->counter > HBT_H2P_THRESHOLD) ? TRUE : FALSE;
 }
 
 uns32 hbt_get_counter(Addr pc) {
-  uns32 index = pc % HBT_SIZE;
-  uns64 tag   = pc / HBT_SIZE;
-  HbtEntry* entry = &hbt_table[index];
-  if (entry->tag == tag) {
-    return entry->counter;
-  } else {
-    return 0; // mismatch면 0 반환
-  }
+  const HbtEntry* entry = hbt_find(pc);
+  return entry ? entry->counter : 0;
 }
