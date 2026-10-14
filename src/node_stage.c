@@ -55,6 +55,7 @@
 #include "lsq.h"
 #include "fill_buffer.h"
 #include "bp/hbt.h"
+#include "bp/h2p_source.h"
 #include "map.h"
 #include "map_rename.h"
 #include "node_issue_queue.h"
@@ -1054,13 +1055,14 @@ void node_retire() {
 
     op->retire_cycle = cycle_count;
 
-    op->oracle_info.hbt_pred_is_hard = hbt_is_hard_branch(op->inst_info->addr);
-    op->oracle_info.hbt_misp_counter = hbt_get_counter(op->inst_info->addr);
-    /* The branch-state ledger files this instance under the same counter value the
-       critical-path seed gate reads below, so the population tables and the gate
-       agree on what state the branch was in. */
+    /* H2P as the selected table sees it at commit (bp/h2p_source.h; the HBT by default). */
+    op->oracle_info.hbt_pred_is_hard = h2p_is_hard(op->inst_info->addr);
+    op->oracle_info.hbt_misp_counter = h2p_level(op->inst_info->addr);
+    /* The branch-state ledger is the HBT's own history, whatever decides H2P: it files
+       this instance under the HBT counter, which under the default source is the value
+       the critical-path seed gate reads below. */
     if (op->table_info->cf_type != NOT_CF)
-      branch_state_note_retire(op, op->oracle_info.hbt_misp_counter);
+      branch_state_note_retire(op, hbt_get_counter(op->inst_info->addr));
     /* Address prediction trains here, on every committed instance in order.
        The backward walk that fills the buffer below cannot do this job: it
        drops ops while walking, and base_va + stride * inflight only holds if

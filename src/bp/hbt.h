@@ -3,6 +3,7 @@
 
 #include "globals/global_types.h" // Addr, uns, Flag 등 기본 타입
 #include "op.h"                   // Op 구조체
+#include "bp/bp.param.h"          // HBT_ENTRIES / _ASSOC / _DECAY_INTERVAL
 
 // ==========================================================
 // HBT (Hard Branch Table)
@@ -13,8 +14,9 @@
 //   - H2P if the counter is greater than 1
 //   - every counter is decremented by 1 every 50K retired instructions
 //   - entries whose counter is 0 take replacement priority
-// The geometry is a parameter (hbt_entries / hbt_assoc, defaults 256 / 8) so it
-// can be swept; everything else above is fixed by the paper.
+// The geometry (hbt_entries / hbt_assoc, defaults 256 / 8) and the decay interval
+// (hbt_decay_interval, default 50K) are parameters so they can be swept;
+// everything else above is fixed by the paper.
 //
 // The table is global, not per-core -- the simulations this is used in are
 // single-core, and the previous implementation was global as well.
@@ -22,13 +24,13 @@
 #define HBT_CTR_BITS 3        // HBT 카운터의 비트 수 (논문: 3-bit)
 #define HBT_CTR_MAX ((1 << HBT_CTR_BITS) - 1) // HBT 카운터의 최댓값 (7)
 #define HBT_H2P_THRESHOLD 1   // counter > 1이면 H2P (논문 기준)
-#define HBT_DECAY_INTERVAL 50000
 
 // ==========================================================
 // HBT 자료구조 정의
 // ==========================================================
 typedef struct {
-  uns64   tag;
+  uns64   tag;          // full tag, or under table_tag_hashed an hbt_tag_bits-bit hash (zereco/table_tag.h)
+  Addr    pc;           // measurement only: the branch that allocated the entry, to count aliasing
   uns32   counter;
   Flag    valid;
   Counter lru;          // 마지막 접근 시점 (counter 0인 way들 중 희생자 선택용)

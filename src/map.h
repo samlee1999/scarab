@@ -46,6 +46,8 @@ typedef struct Map_Entry_struct {
                          This is PUBS's def_tab: a consumer can name every
                          producer at rename even after the producer has left
                          the machine.  Read only by the ZERECO full-slice mode. */
+  Flag is_load;       /* whether that op is a load (not cleared, only overwritten).
+                         Read with pc, by rfp_target_on_add in full-slice mode. */
 } Map_Entry;
 
 typedef struct Map_Data_struct {

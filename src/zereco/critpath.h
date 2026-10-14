@@ -73,8 +73,8 @@ void critpath_note_wake(struct Op_struct* src_op, struct Op_struct* dep_op,
    depth; otherwise only members within that distance of their branch qualify. */
 Flag critpath_is_member(uns proc_id, Addr pc, uns max_depth);
 
-/* Raw membership, before the consumption gate (measurement only). */
-Flag critpath_pc_tracked(uns proc_id, Addr pc);
+/* Raw critical membership, before the consumption gate (measurement only). */
+Flag critpath_pc_critical(uns proc_id, Addr pc);
 
 /* The consumption gate, for consumers that hold their own scope filter (RFP keeps
    Prefetch Table membership).  TRUE means "this PC is on a tracked chain whose owner

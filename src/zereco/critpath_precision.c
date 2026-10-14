@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "bp/hbt.h"
+#include "zereco/branch_state.h"
 #include "zereco/critpath.h"
 #include "core.param.h"
 #include "globals/assert.h"
@@ -48,11 +49,78 @@ typedef struct {
   Counter op_num;
   Counter lpr_op_num; /* the instance that woke it last; 0 = none (frontier) */
   Addr    pc;
+  uns32   ord;      /* commit ordinal, the trace's key: the same instance has the same one in every run */
+  uns16   lpr_dist; /* commits back to the last-arriving producer when its record was found; 0 = none */
   uns16   flags;
   uns8    depth; /* distance from the branch when PREC_L2 is set, else 0xFF */
 } Prec_Record;
 
 static Prec_Record* ring = NULL;
+
+/**************************************************************************************/
+/* Per-instance trace (ZERECO_CRITPATH_PRECISION_TRACE).  Two runs of one SimPoint commit
+   the same op stream, so the k-th committed op is the same instance in both, and the runs
+   can be compared op by op -- e.g. "on the chain without acceleration" against "accelerated,
+   and still on the chain" (TODO N-4).  One entry per committed op of the measurement window,
+   written when its record leaves the ring, i.e. once its verdict is final; the backward
+   link lets the chains be rebuilt offline from any set of branch instances. */
+
+#define PREC_TRACE_BLOCK_BITS 12 /* one PC check value per 4,096 ops */
+
+enum {
+  PREC_TR_L2 = 1u << 0,      /* on an H2P branch instance's critical chain in this run */
+  PREC_TR_ROOT = 1u << 1,    /* is itself such a branch instance (depth 0) */
+  PREC_TR_CAND = 1u << 2,    /* carried the priority bit */
+  PREC_TR_ENTRY = 1u << 3,   /* took a priority RS entry */
+  PREC_TR_RFP = 1u << 4,     /* got its value from a useful RF prefetch */
+  PREC_TR_L2_MISP = 1u << 5, /* on the chain of a mispredicted one (a root: it mispredicted) */
+  PREC_TR_L1 = 1u << 6,      /* last-arriving source of its consumer */
+  PREC_TR_MEMBER = 1u << 7,  /* brslice_tab tracked the PC */
+};
+
+static uns32  commit_ord = 0;  /* ops committed so far */
+static uns32  trace_start = 0; /* ordinal of the window's first op; 0 = warm-up not over yet */
+static uns8*  tr_flags = NULL;
+static uns16* tr_lpr = NULL;
+static uns64* tr_pcx = NULL; /* XOR of the PCs of each block: lets two traces prove they are aligned */
+static uns32  tr_cap = 0;
+static uns32  tr_count = 0; /* one past the highest entry written */
+
+static void prec_trace_grow(uns32 need) {
+  uns32 cap = tr_cap ? tr_cap : (1u << 24);
+  while (cap < need)
+    cap *= 2;
+  if (cap == tr_cap)
+    return;
+  const uns32 old_blocks = tr_cap >> PREC_TRACE_BLOCK_BITS, blocks = cap >> PREC_TRACE_BLOCK_BITS;
+  tr_flags = (uns8*)realloc(tr_flags, cap);
+  tr_lpr = (uns16*)realloc(tr_lpr, (size_t)cap * sizeof(uns16));
+  tr_pcx = (uns64*)realloc(tr_pcx, (size_t)blocks * sizeof(uns64));
+  ASSERTM(0, tr_flags && tr_lpr && tr_pcx, "Failed to allocate the criticality trace\n");
+  memset(tr_flags + tr_cap, 0, cap - tr_cap);
+  memset(tr_lpr + tr_cap, 0, (size_t)(cap - tr_cap) * sizeof(uns16));
+  memset(tr_pcx + old_blocks, 0, (size_t)(blocks - old_blocks) * sizeof(uns64));
+  tr_cap = cap;
+}
+
+/* Little-endian, in this order: "CPTRACE1", uns32 version (1), uns32 ops per PC block,
+   uns64 ordinal of the first entry, uns64 entries, uns64 blocks, then uns8 flags[entries],
+   uns16 lpr_dist[entries] and uns64 pc_xor[blocks]. */
+static void prec_trace_write(void) {
+  FILE* f = fopen("critpath_precision_trace.bin", "wb");
+  if (!f)
+    return;
+  const uns32 block = 1u << PREC_TRACE_BLOCK_BITS;
+  const uns32 head32[2] = {1, block};
+  const uns64 head64[3] = {trace_start, tr_count, (tr_count + block - 1) >> PREC_TRACE_BLOCK_BITS};
+  fwrite("CPTRACE1", 1, 8, f);
+  fwrite(head32, sizeof(uns32), 2, f);
+  fwrite(head64, sizeof(uns64), 3, f);
+  fwrite(tr_flags, 1, tr_count, f);
+  fwrite(tr_lpr, sizeof(uns16), tr_count, f);
+  fwrite(tr_pcx, sizeof(uns64), head64[2], f);
+  fclose(f);
+}
 
 /**************************************************************************************/
 /* One record per static PC, unbounded: criticality may be a property of the PC or of
@@ -129,11 +197,25 @@ void critpath_precision_init(void) {
   pc_table = NULL;
   pc_capacity = pc_count = 0;
   prec_emitted = FALSE;
+  free(tr_flags);
+  free(tr_lpr);
+  free(tr_pcx);
+  tr_flags = NULL;
+  tr_lpr = NULL;
+  tr_pcx = NULL;
+  tr_cap = tr_count = commit_ord = trace_start = 0;
+  ASSERTM(0, !ZERECO_CRITPATH_PRECISION_TRACE || ZERECO_CRITPATH_PRECISION_PROFILE,
+          "zereco_critpath_precision_trace needs zereco_critpath_precision_profile\n");
   if (!ZERECO_CRITPATH_PRECISION_PROFILE)
     return;
   ring = (Prec_Record*)calloc(PREC_RING_SIZE, sizeof(Prec_Record));
   ASSERTM(0, ring, "Failed to allocate the criticality ring\n");
   pc_alloc(4096);
+  if (ZERECO_CRITPATH_PRECISION_TRACE) {
+    prec_trace_grow(1);
+    if (!FULL_WARMUP)
+      trace_start = 1;
+  }
 }
 
 static void prec_depth_event(uns proc_id, uns8 depth, Flag accelerated) {
@@ -170,6 +252,26 @@ static void prec_retire_record(uns proc_id, const Prec_Record* r) {
   const Flag l1m = (r->flags & PREC_L1M) != 0;
   const Flag l2 = (r->flags & PREC_L2) != 0;
   const Flag l2m = (r->flags & PREC_L2_MISP) != 0;
+
+  if (tr_flags && trace_start && r->ord >= trace_start) {
+    const uns32 i = r->ord - trace_start;
+    if (i >= tr_cap)
+      prec_trace_grow(i + 1);
+    uns8 b = 0;
+    b |= l2 ? PREC_TR_L2 : 0;
+    b |= l2 && r->depth == 0 ? PREC_TR_ROOT : 0;
+    b |= cand ? PREC_TR_CAND : 0;
+    b |= entry ? PREC_TR_ENTRY : 0;
+    b |= (r->flags & PREC_RFP) ? PREC_TR_RFP : 0;
+    b |= l2m ? PREC_TR_L2_MISP : 0;
+    b |= l1 ? PREC_TR_L1 : 0;
+    b |= (r->flags & PREC_MEMBER) ? PREC_TR_MEMBER : 0;
+    tr_flags[i] = b;
+    tr_lpr[i] = r->lpr_dist;
+    tr_pcx[i >> PREC_TRACE_BLOCK_BITS] ^= (uns64)r->pc;
+    if (i >= tr_count)
+      tr_count = i + 1;
+  }
 
   STAT_EVENT(proc_id, CRITPATH_PREC_OPS);
   if (r->flags & PREC_MEMBER)
@@ -221,6 +323,10 @@ static void prec_retire_record(uns proc_id, const Prec_Record* r) {
     STAT_EVENT(proc_id, CRITPATH_PREC_ACCEL);
     if (l2)
       STAT_EVENT(proc_id, CRITPATH_PREC_ACCEL_L2);
+    /* An H2P branch instance is the root of its own chain (depth 0), so it is on the chain by definition.  Counted
+       apart so the share can be read over the chain members alone. */
+    if (l2 && r->depth == 0)
+      STAT_EVENT(proc_id, CRITPATH_PREC_ACCEL_ROOT);
   }
   if (cand || rfp) {
     STAT_EVENT(proc_id, CRITPATH_PREC_CAND_OR_RFP);
@@ -255,10 +361,20 @@ static inline Prec_Record* prec_find(Counter op_num) {
   return (r->flags & PREC_VALID) && r->op_num == op_num ? r : NULL;
 }
 
+/* What one walk found on its branch instance's chain, the branch itself excluded:
+   the micro-ops, and how many of them were accelerated (a priority RS entry or a
+   useful RF prefetch), and by which mechanism.  For the age bins. */
+typedef struct {
+  uns chain;
+  uns accel;
+  uns entry;
+  uns rfp;
+} Prec_Walk_Count;
+
 /* From an H2P branch instance, walk last-arriving edges backward and mark what it
    was actually waiting on.  The ring is walked, not the pipeline: by now the
    producers have retired. */
-static void prec_walk(uns proc_id, Prec_Record* branch, Flag mispred) {
+static void prec_walk(uns proc_id, Prec_Record* branch, Flag mispred, Prec_Walk_Count* wc) {
   STAT_EVENT(proc_id, CRITPATH_PREC_WALK_STARTS);
   if (mispred)
     STAT_EVENT(proc_id, CRITPATH_PREC_WALK_STARTS_MISP);
@@ -282,6 +398,11 @@ static void prec_walk(uns proc_id, Prec_Record* branch, Flag mispred) {
       return;
     }
     STAT_EVENT(proc_id, CRITPATH_PREC_WALK_STEPS);
+    /* This instance waited on it, whether or not an earlier walk got here first. */
+    wc->chain++;
+    wc->entry += (r->flags & PREC_ENTRY) != 0;
+    wc->rfp += (r->flags & PREC_RFP) != 0;
+    wc->accel += (r->flags & (PREC_ENTRY | PREC_RFP)) != 0;
     if (depth < r->depth)
       r->depth = (uns8)depth; /* the shortest distance to any branch; unmarked records hold 0xFF */
     r->flags |= PREC_L2;
@@ -294,6 +415,45 @@ static void prec_walk(uns proc_id, Prec_Record* branch, Flag mispred) {
     next = r->lpr_op_num;
   }
   STAT_EVENT(proc_id, CRITPATH_PREC_WALK_MAXDEPTH);
+}
+
+/* The age bins: file one walked H2P branch instance by how many H2P instances its
+   branch has run since its latest promotion (zereco/branch_state.c), so the run
+   shows how soon after a promotion its chain is accelerated.  A chain learned
+   before the promotion (zereco_critpath_learn_owner_gate 1) should be accelerated
+   from the first bin on; one learned only after it (gate 2) should start low.
+   The latency is taken here, at the same instance's retire, rather than from the
+   ZERECO_H2P_* profiler, which files its event before the branch retires. */
+enum {
+  PREC_AGE_INST, PREC_AGE_CHAIN, PREC_AGE_ACCEL, PREC_AGE_ENTRY, PREC_AGE_RFP, PREC_AGE_MISP,
+  PREC_AGE_MISP_CHAIN, PREC_AGE_MISP_ACCEL, PREC_AGE_MISP_LAT_N, PREC_AGE_MISP_LAT, PREC_AGE_MEASURES
+};
+
+static void prec_age_event(uns proc_id, const Op* op, Flag mispred, const Prec_Walk_Count* wc) {
+  Counter age = branch_state_h2p_age(op->inst_info->addr);
+  if (!age) {
+    STAT_EVENT(proc_id, CRITPATH_PREC_AGE_UNKNOWN);
+    return;
+  }
+  uns bin = age <= 16 ? 0 : age <= 64 ? 1 : age <= 256 ? 2 : age <= 1024 ? 3 : 4;
+  uns base = CRITPATH_PREC_AGE_A1_16_INST + bin * PREC_AGE_MEASURES;
+  STAT_EVENT(proc_id, base + PREC_AGE_INST);
+  INC_STAT_EVENT(proc_id, base + PREC_AGE_CHAIN, wc->chain);
+  INC_STAT_EVENT(proc_id, base + PREC_AGE_ACCEL, wc->accel);
+  INC_STAT_EVENT(proc_id, base + PREC_AGE_ENTRY, wc->entry);
+  INC_STAT_EVENT(proc_id, base + PREC_AGE_RFP, wc->rfp);
+  if (!mispred)
+    return;
+  STAT_EVENT(proc_id, base + PREC_AGE_MISP);
+  INC_STAT_EVENT(proc_id, base + PREC_AGE_MISP_CHAIN, wc->chain);
+  INC_STAT_EVENT(proc_id, base + PREC_AGE_MISP_ACCEL, wc->accel);
+  /* Fetch to resolution, as the profiler measures it: the cycle the branch was
+     fetched to the cycle it executed and found itself wrong. */
+  if (op->oracle_info.recover_at_exec && op->fetch_cycle && op->exec_cycle != MAX_CTR &&
+      op->exec_cycle >= op->fetch_cycle) {
+    STAT_EVENT(proc_id, base + PREC_AGE_MISP_LAT_N);
+    INC_STAT_EVENT(proc_id, base + PREC_AGE_MISP_LAT, op->exec_cycle - op->fetch_cycle);
+  }
 }
 
 void critpath_precision_note_retire(Op* op) {
@@ -309,6 +469,8 @@ void critpath_precision_note_retire(Op* op) {
   slot->op_num = op->op_num;
   slot->lpr_op_num = op->critpath_wake_events ? op->critpath_last_producer_op_num : 0;
   slot->pc = op->inst_info->addr;
+  slot->ord = ++commit_ord;
+  slot->lpr_dist = 0;
   slot->depth = 0xFF;
   slot->flags = PREC_VALID;
   if (op->zereco_iq_priority_candidate_bit)
@@ -324,7 +486,7 @@ void critpath_precision_note_retire(Op* op) {
      in every configuration this ledger runs with. */
   if (op->zereco_rf_covered)
     slot->flags |= PREC_RFP;
-  if (critpath_pc_tracked(proc_id, slot->pc))
+  if (critpath_pc_critical(proc_id, slot->pc))
     slot->flags |= PREC_MEMBER; /* tracked, whether or not the gate let it through */
 
   /* Level 1 is the consumer's verdict on its producer, so it is recorded from
@@ -336,6 +498,8 @@ void critpath_precision_note_retire(Op* op) {
     if (member_consumer)
       STAT_EVENT(proc_id, CRITPATH_PREC_EDGES_MEMBER);
     if (prod) {
+      /* Both records are in the ring, which spans at most PREC_RING_SIZE commits. */
+      slot->lpr_dist = (uns16)MIN2(slot->ord - prod->ord, 0xFFFFu);
       prod->flags |= PREC_L1;
       if (member_consumer)
         prod->flags |= PREC_L1M;
@@ -352,8 +516,15 @@ void critpath_precision_note_retire(Op* op) {
   /* An H2P branch instance is where a critical path ends. */
   if (op->table_info->cf_type != NOT_CF && op->oracle_info.hbt_pred_is_hard) {
     Flag mispred = op->oracle_info.mispred | op->oracle_info.misfetch;
-    prec_walk(proc_id, slot, mispred);
+    Prec_Walk_Count wc = {0, 0, 0, 0};
+    prec_walk(proc_id, slot, mispred, &wc);
+    prec_age_event(proc_id, op, mispred, &wc);
   }
+
+  /* The trace's window opens with the first op after the warm-up's last instruction.  It is
+     placed by commit count, so it opens on the same instance in every run. */
+  if (tr_flags && !trace_start && op->eom && inst_count[proc_id] >= FULL_WARMUP)
+    trace_start = slot->ord + 1;
 }
 
 /**************************************************************************************/
@@ -416,4 +587,6 @@ void critpath_precision_done(uns proc_id) {
   }
   if (ZERECO_CRITPATH_PRECISION_DUMP)
     prec_dump_csv();
+  if (tr_flags)
+    prec_trace_write();
 }

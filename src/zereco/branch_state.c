@@ -46,6 +46,19 @@ typedef struct Branch_Record_struct {
   Flag    lead_done;
   Counter lead_instances;
 
+  /* The current stretch at counter 1 (Table 6): whether it is open, whether it
+     was entered from H2P (a cool-down) or from 0 (a run-up), the instances run
+     in it, and the learning brslice_tab did for this branch's chain meanwhile. */
+  Flag    prep_open;
+  Flag    prep_from_h2p;
+  Counter prep_instances;
+  Counter prep_counts;
+  Counter prep_regs;
+
+  /* H2P instances since the latest promotion, this one included (1 = the
+     instance that crossed the threshold); read by the ledger's age bins. */
+  Counter h2p_age;
+
   /* Shadow HBT: same rules, unbounded. */
   Flag    shadow_valid;
   uns8    shadow_counter;
@@ -60,7 +73,7 @@ static Branch_Record* bs_table    = NULL;
 static uns            bs_capacity = 0;
 static uns            bs_count    = 0;
 static Counter        bs_ops      = 0;  /* retired instructions, the dwell clock */
-static Counter        bs_ticks    = 0;  /* for the shadow 50K decay */
+static Counter        bs_ticks    = 0;  /* for the shadow decay (hbt_decay_interval) */
 
 /* Accumulated here rather than through STAT_EVENT as they happen: the statistics
    counters are reset at every periodic dump, while the ledger spans the whole run.
@@ -73,6 +86,12 @@ static Counter bs_open_h2p;       /* intervals still open when the run ended (ce
 static Counter bs_open_cold;
 static Counter bs_decays;
 static Flag    bs_emitted;  /* the ledger is global; emit it once even on several cores */
+
+/* Table 6: stretches at counter 1 by how they began (0 = from 0, a run-up; 1 = from
+   H2P, a cool-down) and how they ended (0 = promoted, 1 = lapsed, 2 = open at the
+   end), and per class: stretches, instances, counts, registrations. */
+enum { BS_PREP_N, BS_PREP_INST, BS_PREP_COUNTS, BS_PREP_REGS, BS_PREP_MEASURES };
+static Counter bs_prep[2][3][BS_PREP_MEASURES];
 
 static inline uns bs_hash(Addr pc) {
   uns64 h = (uns64)pc;
@@ -135,6 +154,7 @@ void branch_state_init(void) {
   memset(bs_dwell_cold, 0, sizeof(bs_dwell_cold));
   bs_promotions = bs_demotions = bs_open_h2p = bs_open_cold = 0;
   bs_decays = 0;
+  memset(bs_prep, 0, sizeof(bs_prep));
   bs_emitted = FALSE;
   if (!ZERECO_BRANCH_STATE_PROFILE)
     return;
@@ -158,6 +178,17 @@ static void bs_record_dwell(Flag was_h2p, Counter ops) {
     bs_dwell_h2p[bs_dwell_bucket(ops)]++;
   else
     bs_dwell_cold[bs_dwell_bucket(ops)]++;
+}
+
+/* Close the branch's stretch at counter 1 with `outcome` (0 promoted, 1 lapsed,
+   2 open at the end) and file it under Table 6. */
+static void bs_close_prep(Branch_Record* r, uns outcome) {
+  Counter* c = bs_prep[r->prep_from_h2p ? 1 : 0][outcome];
+  c[BS_PREP_N]++;
+  c[BS_PREP_INST] += r->prep_instances;
+  c[BS_PREP_COUNTS] += r->prep_counts;
+  c[BS_PREP_REGS] += r->prep_regs;
+  r->prep_open = FALSE;
 }
 
 void branch_state_note_retire(Op* op, uns32 hbt_counter) {
@@ -192,6 +223,20 @@ void branch_state_note_retire(Op* op, uns32 hbt_counter) {
   if (r->shadow_valid && r->shadow_counter > HBT_H2P_THRESHOLD)
     r->commits_shadow_h2p++;
 
+  /* Table 6: a stretch at counter 1 ends when the counter leaves 1 -- promoted
+     if it rose past the H2P threshold, lapsed if it fell to 0 (decayed, or the
+     branch lost its HBT entry) -- and a new one starts whenever it reaches 1. */
+  const uns8 prev = r->real_counter;
+  if (r->prep_open && ctr != 1)
+    bs_close_prep(r, ctr > HBT_H2P_THRESHOLD ? 0 : 1);
+  if (ctr == 1 && !r->prep_open) {
+    r->prep_open      = TRUE;
+    r->prep_from_h2p  = prev > HBT_H2P_THRESHOLD;
+    r->prep_instances = r->prep_counts = r->prep_regs = 0;
+  }
+  if (r->prep_open)
+    r->prep_instances++;
+
   r->real_counter = (uns8)ctr;
   if (r->real_counter > r->real_max)
     r->real_max = r->real_counter;
@@ -211,11 +256,31 @@ void branch_state_note_retire(Op* op, uns32 hbt_counter) {
       r->promotions++;
       r->lead_done = TRUE;
       bs_promotions++;
+      r->h2p_age = 0;
     } else {
       r->demotions++;
       bs_demotions++;
     }
   }
+  if (now_h2p)
+    r->h2p_age++;
+}
+
+Counter branch_state_h2p_age(Addr branch_pc) {
+  if (!ZERECO_BRANCH_STATE_PROFILE || !bs_table)
+    return 0;
+  const Branch_Record* r = bs_slot(bs_table, bs_capacity, branch_pc);  /* look up, never allocate */
+  return (r->used && r->was_h2p) ? r->h2p_age : 0;
+}
+
+void branch_state_note_prep(Addr branch_pc, uns counts, uns regs) {
+  if (!ZERECO_BRANCH_STATE_PROFILE || !bs_table || !branch_pc)
+    return;
+  Branch_Record* r = bs_slot(bs_table, bs_capacity, branch_pc);  /* look up, never allocate */
+  if (!r->used || !r->prep_open)
+    return;
+  r->prep_counts += counts;
+  r->prep_regs += regs;
 }
 
 void branch_state_retire_tick(uns proc_id) {
@@ -391,7 +456,17 @@ void branch_state_done(uns proc_id) {
       bs_open_h2p++;
     else
       bs_open_cold++;
+    /* Likewise a stretch at counter 1 still running: its outcome is unknown. */
+    if (r->prep_open)
+      bs_close_prep(&bs_table[i], 2);
   }
+  static const uns prep_stat[2][3] = {
+    {BRANCH_STATE_RUNUP_PROMOTED, BRANCH_STATE_RUNUP_LAPSED, BRANCH_STATE_RUNUP_OPEN},
+    {BRANCH_STATE_COOLDOWN_PROMOTED, BRANCH_STATE_COOLDOWN_LAPSED, BRANCH_STATE_COOLDOWN_OPEN}};
+  for (uns from = 0; from < 2; ++from)
+    for (uns outcome = 0; outcome < 3; ++outcome)
+      for (uns m = 0; m < BS_PREP_MEASURES; ++m)  /* the four stats of a class are consecutive */
+        INC_STAT_EVENT(proc_id, prep_stat[from][outcome] + m, bs_prep[from][outcome][m]);
   INC_STAT_EVENT(proc_id, BRANCH_STATE_PROMOTIONS, bs_promotions);
   INC_STAT_EVENT(proc_id, BRANCH_STATE_DEMOTIONS, bs_demotions);
   INC_STAT_EVENT(proc_id, BRANCH_STATE_H2P_DWELL_LT1K, bs_dwell_h2p[0]);

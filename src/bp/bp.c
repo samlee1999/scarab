@@ -28,6 +28,8 @@
 
 #include "bp/bp.h"
 #include "bp/hbt.h"
+#include "bp/h2p_source.h"
+#include "bp/pubs_conf.h"
 #include "globals/assert.h"
 #include "globals/global_defs.h"
 #include "globals/global_types.h"
@@ -300,6 +302,7 @@ void init_bp_data(uns8 proc_id, Bp_Data* bp_data) {
   }
 
   hbt_init();
+  pubs_conf_init();
   branch_state_init();
 }
 
@@ -313,8 +316,9 @@ Flag bp_is_predictable(Bp_Data* bp_data, uns proc_id) {
 Addr bp_predict_op(Bp_Data* bp_data, Op* op, uns br_num, Addr fetch_addr) {
 
   if (op->table_info->cf_type) {
-     op->oracle_info.hbt_pred_is_hard = hbt_is_hard_branch(op->inst_info->addr);
-    op->oracle_info.hbt_misp_counter = hbt_get_counter(op->inst_info->addr);
+    /* H2P as the selected table sees it at prediction (bp/h2p_source.h; the HBT by default). */
+    op->oracle_info.hbt_pred_is_hard = h2p_is_hard(op->inst_info->addr);
+    op->oracle_info.hbt_misp_counter = h2p_level(op->inst_info->addr);
     /* NOTE: TEA trigger moved to after bp_predict_op_evaluate() - see line ~876 */
   }
 
@@ -1076,6 +1080,7 @@ void bp_retire_op(Bp_Data* bp_data, Op* op) {
     bp_data->late_bp->retire_func(op);
   }
   hbt_update(op);
+  pubs_conf_update(op); /* no-op unless h2p_source 1 */
 }
 
 /******************************************************************************/

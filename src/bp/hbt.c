@@ -8,6 +8,7 @@
 #include "globals/assert.h"
 #include "globals/utils.h"
 #include "statistics.h"
+#include "zereco/table_tag.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -24,22 +25,33 @@ uns64 retired_branch_count          = 0;
 uns64 hbt_retired_instruction_count = 0;
 
 static inline uns   hbt_set_of(Addr pc) { return (uns)(pc % hbt_sets); }
-static inline uns64 hbt_tag_of(Addr pc) { return (uns64)(pc / hbt_sets); }
+/* The full tag is the PC above the set index; under table_tag_hashed it is folded to
+   hbt_tag_bits, so two branches of a set can share a way (zereco/table_tag.h). */
+static inline uns64 hbt_tag_of(Addr pc) {
+  return table_tag(pc, hbt_sets, table_tag_bits(HBT_TAG_BITS), (uns64)(pc / hbt_sets));
+}
 
 static inline HbtEntry* hbt_set_base(Addr pc) {
   return &hbt_table[(size_t)hbt_set_of(pc) * hbt_ways];
 }
 
 /* The way holding this PC, or NULL.  Read-only: it does not age the entry, so
-   the profiling lookups cannot disturb replacement. */
+   the profiling lookups cannot disturb replacement.  The table is shared by the
+   whole machine, so its lookup statistics go to core 0; they count every caller
+   (prediction, retire, the CLEAR gates and the profilers). */
 static HbtEntry* hbt_find(Addr pc) {
   if (!hbt_table)
     return NULL;
   HbtEntry* set = hbt_set_base(pc);
   uns64     tag = hbt_tag_of(pc);
+  STAT_EVENT(0, HBT_LOOKUPS);
   for (uns w = 0; w < hbt_ways; ++w) {
-    if (set[w].valid && set[w].tag == tag)
+    if (set[w].valid && set[w].tag == tag) {
+      /* With a hashed tag the way may belong to another branch of the set. */
+      if (set[w].pc != pc)
+        STAT_EVENT(0, HBT_ALIAS_HITS);
       return &set[w];
+    }
   }
   return NULL;
 }
@@ -71,6 +83,8 @@ void hbt_init(void) {
   ASSERTM(0, entries % hbt_ways == 0,
           "hbt_entries (%u) must be a multiple of hbt_assoc (%u)\n", entries,
           hbt_ways);
+  ASSERTM(0, HBT_DECAY_INTERVAL > 0, "hbt_decay_interval must be positive\n");
+  ASSERTM(0, HBT_TAG_BITS < 64, "hbt_tag_bits must be 0 (full tag) or 1..63 (hashed)\n");
   hbt_sets = entries / hbt_ways;
   free(hbt_table);
   hbt_table = (HbtEntry*)calloc(entries, sizeof(HbtEntry));
@@ -109,6 +123,8 @@ void hbt_update(Op* op) {
   if (entry) {
     entry->lru = hbt_clock;
     STAT_EVENT(op->proc_id, HBT_UPDATE_HITS);
+    if (entry->pc != pc)
+      STAT_EVENT(op->proc_id, HBT_UPDATE_ALIAS_HITS);
     if (mispred) {
       /* 예측에 실패했을 때만 카운터를 1 증가시킴 (saturating).
          ※ 예측 성공 시에는 아무것도 하지 않는 것이 HBT의 핵심 로직입니다. */
@@ -150,6 +166,7 @@ void hbt_update(Op* op) {
 
   victim->valid   = TRUE;
   victim->tag     = hbt_tag_of(pc);
+  victim->pc      = pc;
   victim->counter = 1;
   victim->lru     = hbt_clock;
   STAT_EVENT(op->proc_id, HBT_ALLOCATIONS);

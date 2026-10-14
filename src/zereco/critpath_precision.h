@@ -35,6 +35,14 @@
  * when it is evicted, by which time the walk has had its chance to mark it.
  * CRITPATH_PREC_WALK_MISS says how often the ring was too short.
  *
+ * THE RUN PROBLEM.  Level 2 is judged in the run it is measured in: an op that
+ * acceleration pushed off the chain counts as off it.  Whether it was critical
+ * BEFORE acceleration needs a second run.  ZERECO_CRITPATH_PRECISION_TRACE writes
+ * one entry per committed op of the window (critpath_precision_trace.bin: the
+ * verdict bits and the commit distance to the last-arriving producer), so two
+ * runs of a SimPoint, which commit the same op stream, can be joined op by op
+ * and their chains rebuilt from a common set of branch instances (TODO N-4).
+ *
  * Nothing here is read back into the machine, so a run with
  * ZERECO_CRITPATH_PRECISION_PROFILE on is cycle-identical to one without it.
  ***************************************************************************************/

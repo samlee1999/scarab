@@ -29,9 +29,12 @@
 #include "globals/utils.h"
 
 #include "bp/hbt.h"
+#include "bp/h2p_source.h"
 #include "core.param.h"
 #include "op.h"
+#include "zereco/branch_state.h"
 #include "zereco/rfp.h"
+#include "zereco/table_tag.h"
 #include "statistics.h"
 
 /**************************************************************************************/
@@ -60,7 +63,8 @@
 
 typedef struct Critpath_PC_Entry_struct {
   Flag valid;
-  Addr tag;             /* full PC; the table is scaffolding, so no hashing */
+  uns64 tag;            /* full PC, or under table_tag_hashed a zereco_critpath_tag_bits-bit hash (zereco/table_tag.h) */
+  Addr pc;              /* measurement only: the PC that allocated the entry, to count aliasing */
   Flag has_last;        /* a previous LPR observation exists */
   uns8 last_src;        /* previous LPR source index */
   Addr last_producer_pc;/* previous LPR producer PC */
@@ -68,6 +72,9 @@ typedef struct Critpath_PC_Entry_struct {
   uns8 depth;           /* distance from that branch, saturating */
   Addr owner_pc;        /* the H2P branch that claimed it */
   uns8 confirm;         /* times re-derived as a critical producer, saturating */
+  Flag tracked;         /* tracking layer: on the full backward slice of some root */
+  uns8 t_depth;         /* tracking layer: shortest full-slice distance from that root */
+  uns8 t_confirm;       /* tracking layer: refresh bit, like confirm */
   uns8 edge_conf;       /* A: confidence that edge_pc is this PC's critical producer */
   Addr edge_pc;         /* A: the producer that confidence is about */
   uns16 win_exec;       /* B: commits of this PC in the current decay window */
@@ -112,10 +119,17 @@ static Critpath_PC_Entry* critpath_table_lookup(uns proc_id,
                                                 Critpath_PC_Entry* table,
                                                 Addr pc, Flag allocate,
                                                 Flag is_main) {
+  const uns64 tag = table_tag(pc, state->sets, table_tag_bits(ZERECO_CRITPATH_TAG_BITS), pc);
   Critpath_PC_Entry* set = &table[(pc % state->sets) * state->assoc];
+  if (is_main)
+    STAT_EVENT(proc_id, CRITPATH_PC_TABLE_LOOKUPS);
   for (uns way = 0; way < state->assoc; ++way) {
-    if (set[way].valid && set[way].tag == pc) {
+    if (set[way].valid && set[way].tag == tag) {
       set[way].lru_touch = cycle_count;
+      /* With a hashed tag the entry may belong to another PC of the set: the lookup
+         takes it all the same, as the hardware would. */
+      if (is_main && set[way].pc != pc)
+        STAT_EVENT(proc_id, CRITPATH_PC_TABLE_ALIAS_HITS);
       return &set[way];
     }
   }
@@ -140,12 +154,38 @@ static Critpath_PC_Entry* critpath_table_lookup(uns proc_id,
     STAT_EVENT(proc_id, CRITPATH_PC_TABLE_CONFLICTS);
     if (victim->in_slice)
       STAT_EVENT(proc_id, CRITPATH_PC_TABLE_EVICT_MEMBER);
+    else if (victim->tracked)
+      STAT_EVENT(proc_id, CRITPATH_PC_TABLE_EVICT_TRACKED);
   }
   memset(victim, 0, sizeof(*victim));
   victim->valid = TRUE;
-  victim->tag = pc;
+  victim->tag = tag;
+  victim->pc = pc;
   victim->lru_touch = cycle_count;
   return victim;
+}
+
+/* The state of the branch an entry serves, for the learning-by-owner statistics:
+   0 = H2P, 1 = counter 1 (tracked, not H2P -- learning ahead of promotion),
+   2 = no owner, or counter 0 / gone from the HBT.  Indexes the _H2P / _CTR1 /
+   _NONE stat triples. */
+static uns critpath_owner_state(Addr owner_pc) {
+  if (!owner_pc)
+    return 2;
+  return h2p_is_hard(owner_pc) ? 0 : (h2p_is_tracked(owner_pc) ? 1 : 2);
+}
+
+/* Learning done for the chain of `owner_pc`: count it by the owner's state and,
+   while the owner sits at counter 1, credit it to the branch's run-up so the
+   ledger can tell learning that led to a promotion from learning that lapsed. */
+static void critpath_note_learning(uns proc_id, Addr owner_pc, uns counts, uns regs) {
+  uns s = critpath_owner_state(owner_pc);
+  if (counts)
+    INC_STAT_EVENT(proc_id, CRITPATH_LEARN_COUNTS_OWNER_H2P + s, counts);
+  if (regs)
+    INC_STAT_EVENT(proc_id, CRITPATH_LEARN_REGS_OWNER_H2P + s, regs);
+  if (s == 1)
+    branch_state_note_prep(owner_pc, counts, regs);
 }
 
 static Critpath_PC_Entry* critpath_pc_lookup(uns proc_id, Addr pc,
@@ -164,7 +204,8 @@ static Critpath_PC_Entry* critpath_pc_lookup(uns proc_id, Addr pc,
 static void critpath_decay_table(uns proc_id, Critpath_Core_State* state,
                                  Critpath_PC_Entry* table, Flag is_main) {
   uns entries = state->sets * state->assoc;
-  Counter live = 0;
+  Counter live = 0, tracked_only = 0, idle = 0;
+  Counter live_by_owner[3] = {0, 0, 0};
   for (uns ii = 0; ii < entries; ++ii) {
     Critpath_PC_Entry* e = &table[ii];
     if (!e->valid)
@@ -186,21 +227,52 @@ static void critpath_decay_table(uns proc_id, Critpath_Core_State* state,
     if (e->confirm) {
       e->confirm--;
     } else if (e->in_slice) {
-      /* Nothing re-confirmed it for a whole interval: it leaves the chain. */
+      /* Nothing re-confirmed it for a whole interval: it leaves the chain.  A
+         PC still on the tracked slice keeps the owner its learning answers to. */
       e->in_slice = FALSE;
       e->depth = 0;
-      e->owner_pc = 0;
+      if (!e->tracked)
+        e->owner_pc = 0;
       if (is_main)
         STAT_EVENT(proc_id, CRITPATH_DECAY_DROPPED_MEMBER);
     }
+    /* Tracking layer: the same refresh on its own bit.  Only the bit goes; the
+       entry and its counters stay, as they do for a critical member. */
+    if (e->t_confirm) {
+      e->t_confirm--;
+    } else if (e->tracked) {
+      e->tracked = FALSE;
+      e->t_depth = 0;
+      if (!e->in_slice)
+        e->owner_pc = 0;
+      if (is_main)
+        STAT_EVENT(proc_id, CRITPATH_TRACK_DROPPED);
+    }
     if (e->in_slice)
       live++;
+    else if (e->tracked)
+      tracked_only++;
+    else
+      idle++;
+    if (is_main && (e->in_slice || e->tracked))
+      live_by_owner[critpath_owner_state(e->owner_pc)]++;
+    /* Every critical member is tracked: its consumer marks it both ways. */
+    if (is_main && ZERECO_CRITPATH_TRACK_SLICE && e->in_slice && !e->tracked)
+      STAT_EVENT(proc_id, CRITPATH_TRACK_INVARIANT_BROKEN);
   }
   /* Live member PCs after the sweep: averaged over sweeps this is the table
      population the real structure must hold (hardware budget, TODO D-6). */
   INC_STAT_EVENT(proc_id, is_main ? CRITPATH_LIVE_MEMBERS_AT_SWEEP
                                   : CRITPATH_SHADOW_LIVE_MEMBERS_AT_SWEEP,
                  live);
+  /* The rest of the occupancy: tracked but not critical, and entries that are
+     neither and keep only their counters. */
+  if (is_main) {
+    INC_STAT_EVENT(proc_id, CRITPATH_LIVE_TRACKED_ONLY_AT_SWEEP, tracked_only);
+    INC_STAT_EVENT(proc_id, CRITPATH_LIVE_IDLE_AT_SWEEP, idle);
+    for (uns s = 0; s < 3; ++s)
+      INC_STAT_EVENT(proc_id, CRITPATH_LIVE_OWNER_H2P_AT_SWEEP + s, live_by_owner[s]);
+  }
 }
 
 static Counter critpath_live_members(Critpath_Core_State* state,
@@ -258,6 +330,8 @@ void critpath_init(uns proc_id) {
 
   ASSERTM(proc_id, ZERECO_CRITPATH_TABLE_SETS > 0 && ZERECO_CRITPATH_TABLE_ASSOC > 0,
           "critpath table geometry must be non-zero\n");
+  ASSERTM(proc_id, ZERECO_CRITPATH_TAG_BITS < 64,
+          "zereco_critpath_tag_bits must be 0 (full tag) or 1..63 (hashed)\n");
   ASSERTM(proc_id, ZERECO_CRITPATH_CONFIRM_BITS > 0 &&
                      ZERECO_CRITPATH_CONFIRM_BITS <= 8,
           "zereco_critpath_confirm_bits must be between 1 and 8\n");
@@ -279,6 +353,12 @@ void critpath_init(uns proc_id) {
   ASSERTM(proc_id, ZERECO_CRITPATH_INSERT_GATE <= 2,
           "zereco_critpath_insert_gate must be 0 (all branches), "
           "1 (mispredicted at least once), or 2 (H2P)\n");
+  ASSERTM(proc_id, ZERECO_CRITPATH_LEARN_OWNER_GATE <= 2,
+          "zereco_critpath_learn_owner_gate must be 0 (off), 1 (owner tracked by the HBT) "
+          "or 2 (owner H2P)\n");
+  ASSERTM(proc_id, !(ZERECO_CRITPATH_TRACK_SLICE && ZERECO_CRITPATH_FULL_SLICE),
+          "zereco_critpath_track_slice is a layer under the critical rule; "
+          "it does not combine with zereco_critpath_full_slice\n");
 
   state->sets = ZERECO_CRITPATH_TABLE_SETS;
   state->assoc = ZERECO_CRITPATH_TABLE_ASSOC;
@@ -328,7 +408,7 @@ void critpath_reset(uns proc_id) {
 static Flag critpath_owner_accelerates(uns proc_id, const Critpath_PC_Entry* e) {
   if (!ZERECO_CRITPATH_CONSUME_H2P_ONLY)
     return TRUE;
-  Hbt_Lookup state = e->owner_pc ? hbt_lookup_state(e->owner_pc) : HBT_LOOKUP_MISS;
+  Hbt_Lookup state = e->owner_pc ? h2p_lookup_state(e->owner_pc) : HBT_LOOKUP_MISS;
   if (state == HBT_LOOKUP_HARD) {
     STAT_EVENT(proc_id, CRITPATH_CONSUME_OWNER_HARD);
     return TRUE;
@@ -350,12 +430,12 @@ Flag critpath_owner_blocks(uns proc_id, Addr pc) {
   Critpath_PC_Entry* e = critpath_pc_lookup(proc_id, pc, FALSE);
   if (!e || !e->in_slice)
     return FALSE;
-  return e->owner_pc ? !hbt_is_hard_branch(e->owner_pc) : TRUE;
+  return e->owner_pc ? !h2p_is_hard(e->owner_pc) : TRUE;
 }
 
-/* Raw membership, no gate: is this PC in brslice_tab at all?  Measurement only --
-   critpath_is_member() is what the machine consults, and it also asks the owner. */
-Flag critpath_pc_tracked(uns proc_id, Addr pc) {
+/* Raw critical membership, no gate: is this PC a critical member at all?  Measurement
+   only -- critpath_is_member() is what the machine consults, and it also asks the owner. */
+Flag critpath_pc_critical(uns proc_id, Addr pc) {
   if (!ZERECO_CRITPATH_PROFILE)
     return FALSE;
   Critpath_PC_Entry* e = critpath_pc_lookup(proc_id, pc, FALSE);
@@ -410,6 +490,8 @@ void critpath_note_wake(Op* src_op, Op* dep_op, uns8 rdy_bit) {
       (uns8)dep_op->oracle_info.src_info[rdy_bit].type;
     dep_op->critpath_last_producer_pc =
       src_op->inst_info ? src_op->inst_info->addr : 0;
+    dep_op->critpath_last_producer_is_load =
+      src_op->table_info && src_op->table_info->mem_type == MEM_LD;
     dep_op->critpath_last_producer_op_num = src_op->op_num;
   } else if (arrival > dep_op->critpath_second_cycle) {
     dep_op->critpath_second_cycle = arrival;
@@ -486,10 +568,9 @@ static void critpath_record_owner_class(uns proc_id, Addr owner_pc) {
     STAT_EVENT(proc_id, CRITPATH_OWNER_UNKNOWN);
     return;
   }
-  uns32 c = hbt_get_counter(owner_pc);
-  if (c > 1)
+  if (h2p_is_hard(owner_pc))
     STAT_EVENT(proc_id, CRITPATH_OWNER_H2P);
-  else if (c == 1)
+  else if (h2p_is_tracked(owner_pc))
     STAT_EVENT(proc_id, CRITPATH_OWNER_MISP_ONCE);
   else
     STAT_EVENT(proc_id, CRITPATH_OWNER_COLD);
@@ -608,26 +689,92 @@ static Flag critpath_slack_passes(const Op* op) {
              ZERECO_CRITPATH_SLACK_MIN);
 }
 
-/* Make `producer_pc` a member one level below (`my_depth`, `my_owner`).  The
-   lookup may evict any entry that shares its set, so callers must have copied
-   whatever they still need out of their own entry before calling this. */
-static void critpath_propagate_to(uns proc_id, Critpath_Core_State* state,
-                                  Critpath_PC_Entry* table, Flag is_main,
-                                  Addr producer_pc, uns8 my_depth,
-                                  Addr my_owner) {
+/* The learning gate (zereco_critpath_learn_owner_gate): brslice_tab counts and
+   follows edges for a chain only while the branch that owns it passes the gate's
+   threshold -- 1: still tracked by the HBT (counter >= 1, the threshold that seeds
+   a root); 2: H2P (the acceleration threshold).  Read through the owner field, as
+   the consumption gate reads the H2P threshold. */
+static Flag critpath_owner_learns(const Critpath_PC_Entry* e) {
+  if (!e->owner_pc)
+    return FALSE;
+  return ZERECO_CRITPATH_LEARN_OWNER_GATE >= 2 ? h2p_is_hard(e->owner_pc)
+                                               : h2p_is_tracked(e->owner_pc);
+}
+
+/* Hand member load `pc` (entry `e`) to the Prefetch Table as a Target Load: allocate its entry, or raise the
+   utility of the one it has.  Under rfp_target_owner_gate only while its owner passes the learning gate's threshold,
+   so the Prefetch Table names Target Loads only for the chains brslice_tab is still learning.  Used by
+   rfp_target_on_add, where brslice_tab adding or re-confirming the load is the moment; the load's own commit is the
+   moment otherwise (critpath_note_retire). */
+static void critpath_target_load(uns proc_id, const Critpath_PC_Entry* e, Addr pc) {
+  if (ZERECO_CRITPATH_PRIORITY_MAX_DEPTH && e->depth > ZERECO_CRITPATH_PRIORITY_MAX_DEPTH)
+    return;
+  if (RFP_TARGET_OWNER_GATE && !critpath_owner_learns(e)) {
+    STAT_EVENT(proc_id, CRITPATH_TARGET_LOADS_OWNER_BLOCKED);
+    return;
+  }
+  rfp_note_target_load(proc_id, pc, 0);
+  STAT_EVENT(proc_id, CRITPATH_TARGET_LOADS);
+}
+
+/* Tracking layer: mark `e` tracked at full-slice distance `t_depth`, or refresh it
+   and keep the shortest distance seen. */
+static void critpath_track_touch(Critpath_Core_State* state, Critpath_PC_Entry* e,
+                                 uns8 t_depth) {
+  if (!e->tracked) {
+    e->tracked = TRUE;
+    e->t_depth = t_depth;
+    e->t_confirm = 1;
+    return;
+  }
+  if (e->t_depth > t_depth)
+    e->t_depth = t_depth;
+  if (e->t_confirm < state->confirm_max)
+    e->t_confirm++;
+}
+
+/* Tracking layer: make `producer_pc` tracked one level below (`my_t_depth`,
+   `my_owner`).  A critical member keeps the owner its critical chain gave it --
+   that owner decides acceleration; a tracked-only entry takes the claimant, with
+   the critical path's protection of an H2P owner.  Same eviction caveat as
+   critpath_propagate_to(). */
+static void critpath_track_to(uns proc_id, Critpath_Core_State* state,
+                              Addr producer_pc, uns8 my_t_depth, Addr my_owner) {
   Critpath_PC_Entry* producer =
-    critpath_table_lookup(proc_id, state, table, producer_pc, TRUE, is_main);
+    critpath_table_lookup(proc_id, state, state->pc_table, producer_pc, TRUE, TRUE);
   if (!producer)
     return;
+  if (!producer->tracked) {
+    STAT_EVENT(proc_id, CRITPATH_TRACK_PROPAGATIONS);
+    critpath_note_learning(proc_id, my_owner, 0, 1);
+  }
+  critpath_track_touch(state, producer, my_t_depth + 1);
+  if (!producer->in_slice && producer->owner_pc != my_owner) {
+    Flag steals_from_h2p = producer->owner_pc && h2p_is_hard(producer->owner_pc) &&
+                           !(my_owner && h2p_is_hard(my_owner));
+    if (!(ZERECO_CRITPATH_OWNER_PROTECT && steals_from_h2p))
+      producer->owner_pc = my_owner;
+  }
+}
+
+/* The membership half of critpath_propagate_to(): join, or re-confirm. */
+static void critpath_propagate_member(uns proc_id, Critpath_Core_State* state,
+                                      Critpath_PC_Entry* producer, Flag is_main,
+                                      uns8 my_depth, Addr my_owner) {
   if (is_main && producer->win_crit < 0xFFFF)
     producer->win_crit++;
+  /* A critical member is on the tracked slice too, whichever way it got here. */
+  if (is_main && ZERECO_CRITPATH_TRACK_SLICE)
+    critpath_track_touch(state, producer, my_depth + 1);
   if (!producer->in_slice) {
     producer->in_slice = TRUE;
     producer->depth = my_depth + 1;
     producer->owner_pc = my_owner;
     producer->confirm = 1;
-    if (is_main)
+    if (is_main) {
       STAT_EVENT(proc_id, CRITPATH_PROPAGATIONS);
+      critpath_note_learning(proc_id, my_owner, 0, 1);
+    }
     return;
   }
   /* Already a member.  Keep the shortest distance seen -- this also absorbs a
@@ -641,8 +788,8 @@ static void critpath_propagate_to(uns proc_id, Critpath_Core_State* state,
   if (producer->confirm < state->confirm_max)
     producer->confirm++;
   if (producer->owner_pc != my_owner) {
-    Flag steals_from_h2p = producer->owner_pc && hbt_is_hard_branch(producer->owner_pc) &&
-                           !(my_owner && hbt_is_hard_branch(my_owner));
+    Flag steals_from_h2p = producer->owner_pc && h2p_is_hard(producer->owner_pc) &&
+                           !(my_owner && h2p_is_hard(my_owner));
     if (is_main) {
       STAT_EVENT(proc_id, CRITPATH_OWNER_OVERWRITE);
       if (steals_from_h2p)
@@ -662,6 +809,119 @@ static void critpath_propagate_to(uns proc_id, Critpath_Core_State* state,
   } else if (is_main) {
     STAT_EVENT(proc_id, CRITPATH_PROPAGATION_REFRESHED);
   }
+}
+
+/* Make `producer_pc` a member one level below (`my_depth`, `my_owner`).  The
+   lookup may evict any entry that shares its set, so callers must have copied
+   whatever they still need out of their own entry before calling this.  Under
+   rfp_target_on_add a load producer goes to the Prefetch Table in the same step,
+   whether it has just joined or has been re-confirmed. */
+static void critpath_propagate_to(uns proc_id, Critpath_Core_State* state,
+                                  Critpath_PC_Entry* table, Flag is_main,
+                                  Addr producer_pc, Flag producer_is_load,
+                                  uns8 my_depth, Addr my_owner) {
+  Critpath_PC_Entry* producer =
+    critpath_table_lookup(proc_id, state, table, producer_pc, TRUE, is_main);
+  if (!producer)
+    return;
+  critpath_propagate_member(proc_id, state, producer, is_main, my_depth, my_owner);
+  if (is_main && producer_is_load && RFP_TARGET_CRITPATH && RFP_TARGET_ON_ADD)
+    critpath_target_load(proc_id, producer, producer_pc);
+}
+
+/* The distinct producer PCs of `op`'s sources on the followed edge set (register
+   edges, plus store -> load under zereco_critpath_mem_edge), in source order.
+   One per producer: two operands from the same instruction must not confirm it
+   twice per instance. */
+static uns critpath_source_producers(const Op* op, Addr out[MAX_DEPS], Flag out_load[MAX_DEPS]) {
+  uns n = 0;
+  for (uns ii = 0; ii < op->oracle_info.num_srcs; ++ii) {
+    Dep_Type t = op->oracle_info.src_info[ii].type;
+    if (t != REG_DATA_DEP && !(ZERECO_CRITPATH_MEM_EDGE && t == MEM_DATA_DEP))
+      continue;
+    Addr producer_pc = op->critpath_src_producer_pc[ii];
+    if (producer_pc == 0)
+      continue;
+    Flag dup = FALSE;
+    for (uns jj = 0; jj < n && !dup; ++jj)
+      dup = (out[jj] == producer_pc);
+    if (!dup) {
+      if (out_load)
+        out_load[n] = op->critpath_src_producer_is_load[ii];
+      out[n++] = producer_pc;
+    }
+  }
+  return n;
+}
+
+/* Step 5 of critpath_note_retire(): a member follows its edges one level up --
+   to the producer of the operand that arrived last (the critical rule) or, in
+   the full-slice comparison, to every producer.  May evict `entry`. */
+static void critpath_follow_edges(uns proc_id, Critpath_Core_State* state, const Op* op,
+                                  Critpath_PC_Entry* entry, Flag has_lpr, Flag frontier,
+                                  Flag edge_match, Flag learns) {
+  if (!entry->in_slice)
+    return;
+
+  if (ZERECO_CRITPATH_FULL_SLICE) {
+    /* PUBS-style: every register producer joins, no frontier stop, no LPR
+       needed.  Depth is still bounded and still the shortest distance seen. */
+    critpath_record_depth(proc_id, entry->depth);
+    if (entry->depth >= CRITPATH_MAX_DEPTH) {
+      STAT_EVENT(proc_id, CRITPATH_PROPAGATION_STOPPED_DEPTH);
+      return;
+    }
+    if (!learns) {
+      STAT_EVENT(proc_id, CRITPATH_LEARN_GATE_CRIT_BLOCKED);
+      return;
+    }
+    uns8 my_depth = entry->depth;
+    Addr my_owner = entry->owner_pc;
+    Addr producers[MAX_DEPS];
+    Flag producer_is_load[MAX_DEPS];
+    uns n = critpath_source_producers(op, producers, producer_is_load);
+    for (uns ii = 0; ii < n; ++ii)
+      critpath_propagate_to(proc_id, state, state->pc_table, TRUE,
+                            producers[ii], producer_is_load[ii], my_depth, my_owner);
+    return;
+  }
+
+  if (!has_lpr)
+    return;
+  STAT_EVENT(proc_id, CRITPATH_SLICE_OPS_WITH_LPR);
+  critpath_record_depth(proc_id, entry->depth);
+  if (frontier) {
+    /* Nothing upstream of this op is delaying it, so a backward walk has
+       nothing left to gain here.  This is where propagation should stop. */
+    STAT_EVENT(proc_id, CRITPATH_PROPAGATION_STOPPED_FRONTIER);
+    return;
+  }
+  if (entry->depth >= CRITPATH_MAX_DEPTH) {
+    STAT_EVENT(proc_id, CRITPATH_PROPAGATION_STOPPED_DEPTH);
+    return;
+  }
+  if (op->critpath_last_producer_pc == 0)
+    return;
+  if (!critpath_slack_passes(op)) {
+    STAT_EVENT(proc_id, CRITPATH_SLACK_BLOCKED);
+    return;
+  }
+  if (!learns) {
+    STAT_EVENT(proc_id, CRITPATH_LEARN_GATE_CRIT_BLOCKED);
+    return;
+  }
+  if (!critpath_edge_filter(proc_id, entry, edge_match, op->critpath_last_src)) {
+    STAT_EVENT(proc_id, CRITPATH_EDGE_CONF_BLOCKED);
+    STAT_EVENT(proc_id, CRITPATH_EDGE_CONF_BLOCKED_D0 + MIN2(entry->depth, 3));
+    return;
+  }
+  /* Read what this op contributes before touching the table again.  The lookup
+     inside the helper can evict whichever entry shares its index -- including
+     this one -- so `entry` must not be dereferenced afterwards. */
+  critpath_propagate_to(proc_id, state, state->pc_table, TRUE,
+                        op->critpath_last_producer_pc,
+                        op->critpath_last_producer_is_load, entry->depth,
+                        entry->owner_pc);
 }
 
 void critpath_note_retire(Op* op) {
@@ -747,6 +1007,8 @@ void critpath_note_retire(Op* op) {
       /* A root re-confirms itself every time it commits. */
       if (entry->confirm < state->confirm_max)
         entry->confirm++;
+      if (ZERECO_CRITPATH_TRACK_SLICE)
+        critpath_track_touch(state, entry, 0);
     }
     if (shadow) {
       if (!shadow->in_slice || shadow->owner_pc != pc) {
@@ -777,7 +1039,7 @@ void critpath_note_retire(Op* op) {
     uns8 sh_depth = shadow->depth;
     Addr sh_owner = shadow->owner_pc;
     critpath_propagate_to(proc_id, state, state->shadow_table, FALSE,
-                          op->critpath_last_producer_pc, sh_depth, sh_owner);
+                          op->critpath_last_producer_pc, FALSE, sh_depth, sh_owner);
   }
 
   if (!entry)
@@ -793,15 +1055,22 @@ void critpath_note_retire(Op* op) {
        tracking.  If it stopped while a branch is not H2P, the chain would be
        ready at the next promotion but the address predictor would have to start
        over -- which is exactly what tracking early is meant to avoid.  The gate
-       sits on the launch instead (rfp_rename_launch). */
-    if (RFP_TARGET_CRITPATH && op->table_info->mem_type == MEM_LD &&
+       sits on the launch instead (rfp_rename_launch).  What it does follow,
+       under rfp_target_owner_gate, is the learning gate's threshold: the
+       Prefetch Table then names Target Loads only for the chains brslice_tab is
+       still learning. */
+    if (RFP_TARGET_CRITPATH && !RFP_TARGET_ON_ADD && op->table_info->mem_type == MEM_LD &&
         (!ZERECO_CRITPATH_PRIORITY_MAX_DEPTH ||
          entry->depth <= ZERECO_CRITPATH_PRIORITY_MAX_DEPTH)) {
-      rfp_note_target_load(proc_id, pc, op->oracle_info.va);
-      STAT_EVENT(proc_id, CRITPATH_TARGET_LOADS);
-      if (state->shadow_table)
-        STAT_EVENT(proc_id, shadow_member ? CRITPATH_TARGET_LOAD_CRITICAL
-                                          : CRITPATH_TARGET_LOAD_NONCRITICAL);
+      if (RFP_TARGET_OWNER_GATE && !critpath_owner_learns(entry)) {
+        STAT_EVENT(proc_id, CRITPATH_TARGET_LOADS_OWNER_BLOCKED);
+      } else {
+        rfp_note_target_load(proc_id, pc, op->oracle_info.va);
+        STAT_EVENT(proc_id, CRITPATH_TARGET_LOADS);
+        if (state->shadow_table)
+          STAT_EVENT(proc_id, shadow_member ? CRITPATH_TARGET_LOAD_CRITICAL
+                                            : CRITPATH_TARGET_LOAD_NONCRITICAL);
+      }
     }
     STAT_EVENT(proc_id, CRITPATH_SLICE_OPS);
     state->tl_members++;
@@ -850,14 +1119,26 @@ void critpath_note_retire(Op* op) {
   }
 
   /* ---- 4. does the critical edge stay the same across instances? ------- */
+  /* What may learn (both switches off by default, and then everything with an
+     entry counts): the learning gate wants the owner past its threshold, the
+     tracking layer wants the entry on the tracked slice. */
+  Flag learns = !ZERECO_CRITPATH_LEARN_OWNER_GATE || critpath_owner_learns(entry);
   if (has_lpr) {
-    /* A: the edge to this op's last-arriving producer earns confidence only by
-       repeating. */
-    edge_match = critpath_edge_observe(entry, entry->has_last,
-                                       op->critpath_last_producer_pc);
-    /* Its ratio form counts the same instances, by operand position. */
-    if (ZERECO_CRITPATH_EDGE_RATIO)
-      critpath_ratio_observe(proc_id, entry, op->critpath_last_src);
+    Flag counts = learns && (!ZERECO_CRITPATH_TRACK_SLICE || entry->tracked);
+    if (counts) {
+      /* A: the edge to this op's last-arriving producer earns confidence only by
+         repeating. */
+      edge_match = critpath_edge_observe(entry, entry->has_last,
+                                         op->critpath_last_producer_pc);
+      /* Its ratio form counts the same instances, by operand position. */
+      if (ZERECO_CRITPATH_EDGE_RATIO)
+        critpath_ratio_observe(proc_id, entry, op->critpath_last_src);
+      critpath_note_learning(proc_id, entry->owner_pc, 1, 0);
+    } else {
+      /* The counters are kept, not cleared: they resume where they stopped. */
+      STAT_EVENT(proc_id, learns ? CRITPATH_TRACK_COUNT_SKIPPED_IDLE
+                                 : CRITPATH_LEARN_GATE_COUNT_SKIPPED);
+    }
     if (!entry->has_last) {
       STAT_EVENT(proc_id, CRITPATH_LPR_FIRST_OBSERVATION);
     } else {
@@ -884,74 +1165,29 @@ void critpath_note_retire(Op* op) {
   }
 
   /* ---- 5. propagate one level, as the real mechanism would -------------- */
-  if (!in_slice)
+  /* The tracking layer's inputs are read first: the lookups below may evict
+     this entry. */
+  Flag track = ZERECO_CRITPATH_TRACK_SLICE && entry->tracked;
+  uns8 my_t_depth = entry->t_depth;
+  Addr my_owner = entry->owner_pc;
+  critpath_follow_edges(proc_id, state, op, entry, has_lpr, frontier, edge_match, learns);
+  if (!track)
     return;
 
-  if (ZERECO_CRITPATH_FULL_SLICE) {
-    /* PUBS-style: every register producer joins, no frontier stop, no LPR
-       needed.  Depth is still bounded and still the shortest distance seen. */
-    critpath_record_depth(proc_id, entry->depth);
-    if (entry->depth >= CRITPATH_MAX_DEPTH) {
-      STAT_EVENT(proc_id, CRITPATH_PROPAGATION_STOPPED_DEPTH);
-      return;
-    }
-    uns8 my_depth = entry->depth;
-    Addr my_owner = entry->owner_pc;
-    uns num_srcs = op->oracle_info.num_srcs;
-    Addr seen[MAX_DEPS];
-    uns num_seen = 0;
-    for (uns ii = 0; ii < num_srcs; ++ii) {
-      Dep_Type t = op->oracle_info.src_info[ii].type;
-      if (t != REG_DATA_DEP && !(ZERECO_CRITPATH_MEM_EDGE && t == MEM_DATA_DEP))
-        continue;
-      Addr producer_pc = op->critpath_src_producer_pc[ii];
-      if (producer_pc == 0)
-        continue;
-      /* One propagation per distinct producer: two operands from the same
-         instruction must not confirm it twice per instance. */
-      Flag dup = FALSE;
-      for (uns jj = 0; jj < num_seen && !dup; ++jj)
-        dup = (seen[jj] == producer_pc);
-      if (dup)
-        continue;
-      seen[num_seen++] = producer_pc;
-      critpath_propagate_to(proc_id, state, state->pc_table, TRUE,
-                            producer_pc, my_depth, my_owner);
-    }
+  /* Tracking layer: every producer joins the tracked slice, one level per
+     instance like the critical rule but with no frontier stop -- an operand
+     that is ready today may be the late one tomorrow.  Only counters ride on
+     it; nothing here is accelerated. */
+  if (!learns) {
+    STAT_EVENT(proc_id, CRITPATH_LEARN_GATE_TRACK_BLOCKED);
     return;
   }
-
-  if (!has_lpr)
+  if (my_t_depth >= CRITPATH_MAX_DEPTH)
     return;
-  STAT_EVENT(proc_id, CRITPATH_SLICE_OPS_WITH_LPR);
-  critpath_record_depth(proc_id, entry->depth);
-  if (frontier) {
-    /* Nothing upstream of this op is delaying it, so a backward walk has
-       nothing left to gain here.  This is where propagation should stop. */
-    STAT_EVENT(proc_id, CRITPATH_PROPAGATION_STOPPED_FRONTIER);
-    return;
-  }
-  if (entry->depth >= CRITPATH_MAX_DEPTH) {
-    STAT_EVENT(proc_id, CRITPATH_PROPAGATION_STOPPED_DEPTH);
-    return;
-  }
-  if (op->critpath_last_producer_pc == 0)
-    return;
-  if (!critpath_slack_passes(op)) {
-    STAT_EVENT(proc_id, CRITPATH_SLACK_BLOCKED);
-    return;
-  }
-  if (!critpath_edge_filter(proc_id, entry, edge_match, op->critpath_last_src)) {
-    STAT_EVENT(proc_id, CRITPATH_EDGE_CONF_BLOCKED);
-    STAT_EVENT(proc_id, CRITPATH_EDGE_CONF_BLOCKED_D0 + MIN2(entry->depth, 3));
-    return;
-  }
-  /* Read what this op contributes before touching the table again.  The lookup
-     inside the helper can evict whichever entry shares its index -- including
-     this one -- so `entry` must not be dereferenced afterwards. */
-  critpath_propagate_to(proc_id, state, state->pc_table, TRUE,
-                        op->critpath_last_producer_pc, entry->depth,
-                        entry->owner_pc);
+  Addr producers[MAX_DEPS];
+  uns n = critpath_source_producers(op, producers, NULL);
+  for (uns ii = 0; ii < n; ++ii)
+    critpath_track_to(proc_id, state, producers[ii], my_t_depth, my_owner);
 }
 
 /**************************************************************************************/

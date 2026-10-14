@@ -12,6 +12,7 @@
 
 #include "zereco/critpath.h"
 #include "zereco/rfp.h"
+#include "zereco/table_tag.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -69,15 +70,25 @@ static inline RFP_PT_Entry* rfp_pt_set(RFP_Core_State* state, Addr load_pc) {
   return &state->pt[(load_pc % state->pt_sets) * RFP_PT_ASSOC];
 }
 
+/* The full load PC, or under table_tag_hashed rfp_pt_tag_bits of it hashed (zereco/table_tag.h). */
+static inline Addr rfp_pt_tag(RFP_Core_State* state, Addr load_pc) {
+  return table_tag(load_pc, state->pt_sets, table_tag_bits(RFP_PT_TAG_BITS), load_pc);
+}
+
 static RFP_PT_Entry* rfp_pt_lookup(uns proc_id, Addr load_pc) {
   RFP_Core_State* state = rfp_get_state(proc_id);
   if (!state->initialized)
     return NULL;
 
   RFP_PT_Entry* set = rfp_pt_set(state, load_pc);
+  const Addr tag = rfp_pt_tag(state, load_pc);
+  STAT_EVENT(proc_id, RFP_PT_LOOKUPS);
   for (uns way = 0; way < RFP_PT_ASSOC; ++way) {
-    if (set[way].valid && set[way].tag == load_pc) {
+    if (set[way].valid && set[way].tag == tag) {
       set[way].lru_touch = cycle_count;
+      /* With a hashed tag the entry may belong to another load of the set. */
+      if (set[way].pc != load_pc)
+        STAT_EVENT(proc_id, RFP_PT_ALIAS_HITS);
       return &set[way];
     }
   }
@@ -118,7 +129,8 @@ static RFP_PT_Entry* rfp_pt_allocate(uns proc_id, Addr load_pc) {
 
   memset(victim, 0, sizeof(*victim));
   victim->valid = TRUE;
-  victim->tag = load_pc;
+  victim->tag = rfp_pt_tag(state, load_pc);
+  victim->pc = load_pc;
   victim->lru_touch = cycle_count;
   return victim;
 }
@@ -161,6 +173,8 @@ void rfp_init(uns proc_id) {
           RFP_PT_ENTRIES, RFP_PT_ASSOC);
   ASSERTM(proc_id, RFP_CONF_BITS > 0 && RFP_CONF_BITS <= 8,
           "rfp_conf_bits must be between 1 and 8\n");
+  ASSERTM(proc_id, RFP_PT_TAG_BITS < 64,
+          "rfp_pt_tag_bits must be 0 (full tag) or 1..63 (hashed)\n");
   ASSERTM(proc_id, RFP_CONF_INC_PROB_LOG2 < 16,
           "rfp_conf_inc_prob_log2 is a log2 probability; keep it under 16\n");
   ASSERTM(proc_id, RFP_QUEUE_ENTRIES > 0, "rfp_queue_entries must be non-zero\n");

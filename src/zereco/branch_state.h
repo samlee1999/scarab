@@ -19,7 +19,7 @@
  * run with ZERECO_BRANCH_STATE_PROFILE on is cycle-identical to one with it off.
  *
  * It also keeps a SHADOW HBT: the same 3-bit counter rules (allocate on a
- * misprediction at 1, H2P above 1, every counter decremented each 50K retired
+ * misprediction at 1, H2P above 1, every counter decremented each hbt_decay_interval (50K) retired
  * instructions) with no capacity limit at all.  The real table is 256 entries,
  * 8-way; the difference between the two is the set of branches the real HBT
  * loses to conflicts -- which is exactly the false-negative bound of anything
@@ -45,7 +45,20 @@ void branch_state_init(void);
    population tables and the gate classify an instance the same way. */
 void branch_state_note_retire(struct Op_struct* op, uns32 hbt_counter);
 
-/* One retired instruction.  Drives the shadow HBT's 50K decay and the global
+/* brslice_tab did learning for this branch's chain while the branch sat at HBT
+   counter 1 (critpath.c): `counts` commits that updated filter A's counters and
+   `regs` members or tracked entries registered.  Credited to the branch's open
+   stretch at counter 1, if any, whose outcome -- promoted or lapsed -- Table 6
+   reports.  Looks the branch up, never adds it. */
+void branch_state_note_prep(Addr branch_pc, uns counts, uns regs);
+
+/* How many H2P instances this branch has run since its latest promotion, the one
+   retiring now included -- 1 for the instance that crossed the threshold.  0 when
+   the branch is not H2P at its latest retire, or the ledger is off.  Call after
+   branch_state_note_retire() for the same instance. */
+Counter branch_state_h2p_age(Addr branch_pc);
+
+/* One retired instruction.  Drives the shadow HBT's decay (hbt_decay_interval) and the global
    op clock the dwell histograms are measured in. */
 void branch_state_retire_tick(uns proc_id);
 

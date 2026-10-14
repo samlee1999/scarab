@@ -150,6 +150,7 @@ void init_map(uns8 proc_id) {
     map_data->reg_map[ii].op = &invalid_op;
     map_data->reg_map[ii].op_num = 0;
     map_data->reg_map[ii].pc = 0;
+    map_data->reg_map[ii].is_load = FALSE;
   }
   for (ii = 0; ii < NUM_REG_IDS; ii++)
     map_data->map_flags[ii] = FALSE;
@@ -318,6 +319,7 @@ static inline void update_map(Op* op) {
     map_entry->op_num = op->op_num;
     map_entry->unique_num = op->unique_num;
     map_entry->pc = op->inst_info ? op->inst_info->addr : 0;
+    map_entry->is_load = op->table_info && op->table_info->mem_type == MEM_LD;
     map_data->map_flags[id] = op->off_path;
   }
 
@@ -346,6 +348,7 @@ inline void update_map_entry(Op* op, Map_Entry* map_entry) {
   map_entry->op_num = op->op_num;
   map_entry->unique_num = op->unique_num;
   map_entry->pc = op->inst_info ? op->inst_info->addr : 0;
+  map_entry->is_load = op->table_info && op->table_info->mem_type == MEM_LD;
 }
 
 /**************************************************************************************/
@@ -700,6 +703,9 @@ void add_src_from_op(Op* op, Op* src_op, Dep_Type type) {
   op->critpath_src_producer_pc[src_num] =
     ((type == REG_DATA_DEP || type == MEM_DATA_DEP) && src_op->inst_info)
       ? src_op->inst_info->addr : 0;
+  op->critpath_src_producer_is_load[src_num] =
+    op->critpath_src_producer_pc[src_num] && src_op->table_info &&
+    src_op->table_info->mem_type == MEM_LD;
 
   /* for memory dependencies, derived_from_prog_input incremented in track_addr */
   set_not_rdy_bit(op, src_num);
@@ -735,6 +741,8 @@ void add_src_from_map_entry(Op* op, Map_Entry* map_entry, Dep_Type type) {
   /* Producer PC survives the producer's commit, unlike `op` above. */
   op->critpath_src_producer_pc[src_num] =
     (type == REG_DATA_DEP) ? map_entry->pc : 0;
+  op->critpath_src_producer_is_load[src_num] =
+    (type == REG_DATA_DEP) && map_entry->is_load;
 
   /* always start with the not ready bit set */
   set_not_rdy_bit(op, src_num);
@@ -799,6 +807,7 @@ void reset_map() {
     map_data->reg_map[ii].op = &invalid_op;
     map_data->reg_map[ii].op_num = 0;
     map_data->reg_map[ii].pc = 0;
+    map_data->reg_map[ii].is_load = FALSE;
   }
   for (ii = 0; ii < NUM_REG_IDS; ii++)
     map_data->map_flags[ii] = FALSE;

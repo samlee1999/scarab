@@ -43,7 +43,8 @@ extern "C" {
    why training must see every retired instance rather than a sampled subset. */
 typedef struct RFP_PT_Entry_struct {
   Flag valid;
-  Addr tag;             /* full load PC; the paper keeps a 16-bit tag */
+  Addr tag;             /* full load PC, or under table_tag_hashed an rfp_pt_tag_bits-bit hash (the paper keeps 16) */
+  Addr pc;              /* measurement only: the load that allocated the entry, to count aliasing */
   Flag has_base;        /* FALSE until the first retire fills base_va */
   Addr base_va;
   Flag has_stride;

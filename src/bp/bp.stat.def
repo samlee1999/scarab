@@ -736,3 +736,21 @@ DEF_STAT(  HBT_ALLOC_BLOCKED              , COUNT   , NO_RATIO       )
 /* Sampled at every decay sweep; divide by HBT_DECAY_EVENTS for the average. */
 DEF_STAT(  HBT_RESIDENT_ENTRIES_TOTAL     , COUNT   , NO_RATIO       )
 DEF_STAT(  HBT_RESIDENT_HARD_TOTAL        , COUNT   , NO_RATIO       )
+
+/* HBT tags (zereco/table_tag.h, 2026-10-14).  All HBT lookups, those that matched an entry another branch had
+   allocated (possible only with hbt_tag_bits > 0), and the commit-time updates among them. */
+DEF_STAT(  HBT_LOOKUPS                    , COUNT   , NO_RATIO       )
+DEF_STAT(  HBT_ALIAS_HITS                 , COUNT   , NO_RATIO       )
+DEF_STAT(  HBT_UPDATE_ALIAS_HITS          , COUNT   , NO_RATIO       )
+
+/* PUBS conf_tab (bp/pubs_conf.c, h2p_source 1; 2026-10-14).  Lookups and alias hits as for the HBT (core 0);
+   training at retire: updates, those that hit another branch's entry, allocations, evictions, counter resets
+   (mispredictions, including an allocation at 0), and committed instances left unconfident. */
+DEF_STAT(  PUBS_CONF_LOOKUPS              , COUNT   , NO_RATIO       )
+DEF_STAT(  PUBS_CONF_ALIAS_HITS           , COUNT   , NO_RATIO       )
+DEF_STAT(  PUBS_CONF_UPDATES              , COUNT   , NO_RATIO       )
+DEF_STAT(  PUBS_CONF_UPDATE_ALIAS_HITS    , COUNT   , NO_RATIO       )
+DEF_STAT(  PUBS_CONF_ALLOCATIONS          , COUNT   , NO_RATIO       )
+DEF_STAT(  PUBS_CONF_EVICTIONS            , COUNT   , NO_RATIO       )
+DEF_STAT(  PUBS_CONF_RESETS               , COUNT   , NO_RATIO       )
+DEF_STAT(  PUBS_CONF_UNCONFIDENT_COMMITS  , COUNT   , NO_RATIO       )

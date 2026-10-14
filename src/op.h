@@ -333,6 +333,9 @@ struct Op_struct {
      recovers the same PC by reading a scoreboard indexed by the source physical
      register; the two are equivalent, and the scoreboard is built in Phase B. */
   Addr critpath_last_producer_pc;
+  /* Whether that producer is a load: what rfp_target_on_add needs to hand it to
+     the Prefetch Table at this op's commit, when brslice_tab adds it. */
+  Flag critpath_last_producer_is_load;
   /* The INSTANCE behind that PC.  The PC is what the table learns from; the
      instance is what a per-instance criticality check needs, since the same
      PC is the last-arriving producer on some dynamic instances and not on
@@ -342,6 +345,9 @@ struct Op_struct {
      (register deps only; 0 otherwise).  Valid for indices < num_srcs of the
      current instance, so it needs no reset.  Read by the full-slice mode. */
   Addr critpath_src_producer_pc[MAX_DEPS];
+  /* Whether each of those producers is a load, filled with it.  Read by
+     rfp_target_on_add in the full-slice mode. */
+  Flag critpath_src_producer_is_load[MAX_DEPS];
 };
 
 /**************************************************************************************/
